@@ -29,6 +29,7 @@ Authorization: Bearer <device_token>
 
 1. **桌面端**用它自己已有的凭据（门户会话或凭据库里的 `user_key`）调用：
    `POST /devices/register {device_id?, name, platform}` → `{device_id, device_token, created_at}`
+   - `device_id` 由客户端首次运行生成 **UUID v4** 并持久化；注册时带上，服务端校验格式后沿用。缺省才由服务端生成（仅 dev 便利，真客户端不应依赖）。
    - `device_token` 写入**操作系统凭据库**（Windows Credential Manager / macOS Keychain / libsecret），**不落任何 json 文件**。
    - PKCE 留在它本来该在的位置（桌面端引导自己的 `user_key`），不为设备注册再造 loopback 回调。
 2. **采集器**只从凭据库读 `device_token`，走 `Authorization: Bearer`。
@@ -101,6 +102,7 @@ Authorization: Bearer <device_token>
   "source_id": "cc-sessions",
   "source_type": "sessions",
   "project": "auto",
+  "source_rev": 0,
   "cursor_before": { "files": 37, "bytes": 10485760 },
   "cursor_after":  { "files": 39, "bytes": 10616832 },
   "files": [
@@ -123,6 +125,9 @@ Authorization: Bearer <device_token>
 | `content` | 只允许 **纯文本** 容器（`.jsonl` / `.md` / `.txt` / `.log`）。二进制（图片、pdf、sqlite）一律不上传，客户端直接跳过并在返回值里报 `skipped:[...]`。 |
 | `from_offset/to_offset` | 用于服务端拼接；`from_offset` 必须 ≥ 服务端已知 offset，否则返回 `409 {code:1004, data:{expected_offset}}`，客户端回退。 |
 | `sha256` | 原文片段哈希，服务端用于二次去重。 |
+| `cursor_before` / `cursor_after` | **仅诊断**，服务端不校验，也不据此产生 1004。游标以每条文件的 `from_offset` 为准。 |
+
+服务端游标校验只看两处：`source_rev`（是否允许重扫）与每条文件的 `from_offset`（相对已知 offset 是否回退）。
 
 部分成功：`200` + `data.results[]`；完全失败才用 4xx/5xx。
 

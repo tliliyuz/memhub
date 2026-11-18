@@ -11,9 +11,8 @@ venv/
 *.pem
 *.key
 
-# data & projections (真源 markdown 入库，投影不入库)
+# data & projections (真源 markdown 与 _edges.jsonl 入库，投影不入库)
 raw_store/
-knowledge/**/_edges.jsonl
 kg.json
 vector/
 fts.db
