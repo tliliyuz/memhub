@@ -56,7 +56,10 @@ class ApiError(Exception):
 class DeviceRegister(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    device_id: str | None = None
+    device_id: str | None = Field(
+        default=None,
+        pattern=r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
     name: str = Field(min_length=1)
     platform: str = Field(min_length=1)
 

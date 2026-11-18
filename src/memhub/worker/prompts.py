@@ -1,0 +1,20 @@
+"""prompt profile 加载与渲染。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+PROMPT_DIR = Path(__file__).resolve().parents[3] / "prompts"
+PROFILES = {"wiki", "sessions", "docs"}
+
+
+def load_profile(name: str, root: Path | None = None) -> str:
+    if name not in PROFILES:
+        raise ValueError(f"未知 profile: {name}")
+    path = (root or PROMPT_DIR) / f"{name}.md"
+    return path.read_text(encoding="utf-8")
+
+
+def render(template: str, *, path: str, text: str) -> str:
+    # 不能用 str.format：模板里的 JSON 示例含大量花括号。
+    return template.replace("{path}", path).replace("{text}", text)

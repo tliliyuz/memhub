@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from memhub.ingest.app import create_app
 
-DEVICE = "dev-device-1"
+DEVICE = str(uuid.uuid4())
 TOKEN = "devtoken"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
