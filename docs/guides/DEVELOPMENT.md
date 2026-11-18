@@ -125,3 +125,29 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main serve --graph kb/kg.json 
 
 产物不入库：`kb/kg.json` 是投影，随时可从真源重建；`knowledge/` 下的 markdown 才是真源。
 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
+
+## 10. MCP 检索服务（stdio）
+
+```bash
+# 直接跑：每行一条 JSON-RPC 2.0，stdout 只放协议，日志走 stderr
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
+
+# 挂到 Claude Code（本机当前目录）
+claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
+```
+
+暴露检索组四个工具（契约见 [`mcp-tools.md`](../contracts/mcp-tools.md)）：
+`kb_search`（默认只给 canonical，候选要显式 `tier="all"`）、`kb_read`（全文 ≤8KB + 出入边）、
+`kb_related`（depth ≤2）、`kb_audit_list`（矛盾/断链/孤立/低置信/陈旧，现算）。
+
+分层：工具定义与传输在 `src/memhub/mcp/server.py`，检索算法在 `src/memhub/kb/query.py`；
+以后换 FTS/向量只改 `query.py`，工具形状不变。远程 `https://memhub.work/mcp`
+（Streamable HTTP + device_token）复用 `handle_message`，当前未实现。
+
+stdio 编码固定 UTF-8（`serve()` 会 `reconfigure` 两个流）：Windows 管道默认 cp936，
+不固定的话中文 JSON 到 agent 那边就是乱码。冒烟：
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  | PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
+```

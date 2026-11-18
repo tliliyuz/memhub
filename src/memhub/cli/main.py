@@ -12,6 +12,7 @@ from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
+from memhub.mcp.server import serve as serve_mcp
 from memhub.worker.extract import ExtractionFailed, extract_document
 from memhub.worker.llm import AnthropicClient, LLMError
 from memhub.worker.merge import merge
@@ -45,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--no-browser", action="store_true")
 
+    mcp = sub.add_parser("mcp", help="以 MCP stdio 服务暴露检索组给 agent")
+    mcp.add_argument("--knowledge-dir", default=None)
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -55,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         return _project(args)
     if args.command == "serve":
         return _serve(args)
+    if args.command == "mcp":
+        return _mcp(args)
     parser.print_help()
     return 0
 
@@ -196,6 +202,14 @@ def _serve(args: argparse.Namespace) -> int:
         command.append("--no-browser")
     print(f"memhub explorer: http://127.0.0.1:{args.port}/  graph={graph}", flush=True)
     return subprocess.call(command, env=_serve_env())
+
+
+def _mcp(args: argparse.Namespace) -> int:
+    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    if not store.root.is_dir():
+        print(f"知识库目录不存在: {store.root}", file=sys.stderr)
+        return 2
+    return serve_mcp(store)
 
 
 if __name__ == "__main__":
