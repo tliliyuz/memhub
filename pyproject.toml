@@ -16,6 +16,8 @@ dependencies = [
 engine = [
     # 解析/切分/去重/图谱/向量/explorer 复用 semantica
     "semantica>=0.7.0,<0.8",
+    # semantica explorer 的表单上传依赖，缺失时启动即报 "Form data requires python-multipart"
+    "python-multipart>=0.0.9,<1",
 ]
 dev = [
     "pytest>=8",

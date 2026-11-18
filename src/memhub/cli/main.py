@@ -161,8 +161,23 @@ def _project(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve_env() -> dict[str, str]:
+    """explorer 只绑回环地址；补齐它启动所需的运行环境。
+
+    - UTF-8：semantica 启动日志含 `✓`，Windows 默认 GBK 会直接 UnicodeEncodeError。
+    - 匿名只读：explorer API 要求 token 或显式匿名，否则返回
+      "Server is not configured for authentication"。服务不对外暴露，故默认允许匿名；
+      调用方已显式设置的环境变量优先。
+    """
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("SEMANTICA_ALLOW_ANONYMOUS", "true")
+    return env
+
+
 def _serve(args: argparse.Namespace) -> int:
-    graph = Path(args.graph)
+    graph = Path(args.graph).resolve()
     if not graph.is_file():
         print(f"图谱不存在: {graph}（先运行 memhub project）", file=sys.stderr)
         return 2
@@ -179,7 +194,8 @@ def _serve(args: argparse.Namespace) -> int:
     ]
     if args.no_browser:
         command.append("--no-browser")
-    return subprocess.call(command)
+    print(f"memhub explorer: http://127.0.0.1:{args.port}/  graph={graph}", flush=True)
+    return subprocess.call(command, env=_serve_env())
 
 
 if __name__ == "__main__":

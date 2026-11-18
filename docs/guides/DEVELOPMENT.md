@@ -18,7 +18,7 @@
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer 依赖
 cp .env.example .env
 ```
 
@@ -104,3 +104,24 @@ prompts/      各 source_type 的抽取 profile
 - 日志不得出现密钥、正文原文、token。
 - 时间一律带时区 UTC。
 - LLM 调用参数（模型、max_tokens）从配置读，不写死在函数里。
+
+## 9. 端到端最小闭环（会话 → 真源 → 图谱页）
+
+```bash
+# 1) 抽取：会话 jsonl → knowledge/<project>/<kind>/<slug>.md
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main ingest \
+  --path .scratch/sessions --profile sessions --project memhub --limit 3
+# 2) 投影：markdown 真源 → semantica ContextGraph
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main project --out kb/kg.json
+# 3) 看图
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main serve --graph kb/kg.json --port 8011 --no-browser
+#    → http://127.0.0.1:8011/ ，页面加载后点 “Open Semantica Explorer”
+```
+
+`serve` 只绑 `127.0.0.1`，并自动为子进程补齐 explorer 的运行环境：`PYTHONUTF8=1`、
+`PYTHONIOENCODING=utf-8`（否则 Windows GBK 在启动日志的 `✓` 上崩）、
+`SEMANTICA_ALLOW_ANONYMOUS=true`（否则 API 报 “Server is not configured for authentication”）。
+已显式设置的同名环境变量优先，不会被覆盖。
+
+产物不入库：`kb/kg.json` 是投影，随时可从真源重建；`knowledge/` 下的 markdown 才是真源。
+页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
