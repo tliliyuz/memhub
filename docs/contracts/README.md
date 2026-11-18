@@ -19,6 +19,6 @@
 
 ## 变更记录
 
-- 0.3 — 注册段补充：生产必须带 `user_key` 鉴权、`device_id` 生产必填（400/1002）、同 device_id 重复注册幂等、吊销后重注册签发新 token；`source-registry` 明确 `base_url` 必须与签发 token 的服务器一致。
+- 0.3 — 注册段补充：生产必须带 `user_key` 鉴权、`device_id` 生产必填（400/1002）、同 device_id 重复注册幂等、吊销后重注册签发新 token；`source-registry` 明确 `base_url` 必须与签发 token 的服务器一致；示例中的 `device_id` 统一改为 UUID v4。
 - 0.2 — 按客户端评审修订：device token 作用域与注册流程、游标加 `size/mtime/source_rev`、`code` 非 HTTP 状态、batch 幂等 24h + 200 重放、退避抖动与不丢数据、令牌不落盘、Windows reparse/offline 跳过。
 - 0.1 — 初稿：节点 schema、源注册表、采集 API。

@@ -101,7 +101,7 @@ Authorization: Bearer <device_token>
 ```json
 {
   "batch_id": "9f1c...",
-  "device_id": "applesay-win-01",
+  "device_id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
   "source_id": "cc-sessions",
   "source_type": "sessions",
   "project": "auto",
