@@ -1,0 +1,33 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  - repo: local
+    hooks:
+      - id: env-key-parity
+        name: .env.example 与 ENVIRONMENT.md 键集一致
+        entry: python scripts/check_env_example_keys.py
+        language: system
+        pass_filenames: false
+        files: ^(\.env\.example|docs/tech/ENVIRONMENT\.md)$
+
+      - id: mypy
+        name: mypy strict
+        entry: mypy src
+        language: system
+        pass_filenames: false
+        files: ^src/
+        types: [python]

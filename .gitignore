@@ -1,0 +1,31 @@
+# runtime
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# secrets / local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# data & projections (真源 markdown 入库，投影不入库)
+raw_store/
+knowledge/**/_edges.jsonl
+kg.json
+vector/
+fts.db
+state/
+data/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
+logs/

@@ -1,0 +1,45 @@
+[project]
+name = "memhub"
+version = "0.1.0"
+description = "Memhub 2.0：本地采集推送、云端提炼、markdown 真源 + 图谱投影"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "httpx>=0.27,<1",
+    "pyyaml>=6.0,<7",
+    "python-frontmatter>=1.1,<2",
+]
+
+[project.optional-dependencies]
+engine = [
+    # 解析/切分/去重/图谱/向量/explorer 复用 semantica
+    "semantica>=0.7.0,<0.8",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+memhub = "memhub.cli.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
