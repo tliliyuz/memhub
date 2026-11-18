@@ -19,6 +19,7 @@ engine = [
 ]
 dev = [
     "pytest>=8",
+    "httpx2>=0.1",
     "ruff>=0.6",
     "mypy>=1.11",
 ]
