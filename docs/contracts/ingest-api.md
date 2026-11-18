@@ -29,7 +29,8 @@ Authorization: Bearer <device_token>
 
 1. **桌面端**用它自己已有的凭据（门户会话或凭据库里的 `user_key`）调用：
    `POST /devices/register {device_id?, name, platform}` → `{device_id, device_token, created_at}`
-   - `device_id` 由客户端首次运行生成 **UUID v4** 并持久化；注册时带上，服务端校验格式后沿用。缺省才由服务端生成（仅 dev 便利，真客户端不应依赖）。
+   - 生产必须带 `Authorization: Bearer <user_key>`（注册是用户态操作，`device_token` 本身不能注册设备）；缺失返回 `401 {code:1001}`。dev stub 未强制，仅便于本地联调。
+   - `device_id` 由客户端首次运行生成 **UUID v4** 并持久化；生产按**必填**处理，缺失或格式不符返回 `400 {code:1002}`。服务端自动生成只保留在 dev stub（真客户端不应依赖）。
    - `device_token` 写入**操作系统凭据库**（Windows Credential Manager / macOS Keychain / libsecret），**不落任何 json 文件**。
    - PKCE 留在它本来该在的位置（桌面端引导自己的 `user_key`），不为设备注册再造 loopback 回调。
 2. **采集器**只从凭据库读 `device_token`，走 `Authorization: Bearer`。

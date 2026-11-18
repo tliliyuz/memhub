@@ -15,6 +15,7 @@
 2. **sessions 源的项目归属**：Claude Code 的 `projects/<encoded-path>` 能否可靠映射到知识库 `project`。当前按 `auto` 留给云端推断。
 3. **portal 去留**：`memhub.work/portal` 目前是一个静态页；重写 vhost 时若占用 `/`，需确认 portal 保留为 `/portal/` 还是撤掉。→ 责任人：用户
 4. **MCP 接入形态**：远端 SSE/HTTP 还是本地 stdio + 服务端 API。倾向：远端 HTTP（`/mcp`），本地仅留一个轻代理用于无公网场景。
+5. **同 device_id 重复注册**：倾向幂等返回同一有效 token、不旋转（provision 重试安全），旋转只走 `/devices/refresh`；实现前定稿。
 
 ## 变更记录
 
