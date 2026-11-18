@@ -1,6 +1,6 @@
 # 本地源注册表 `sources.json`
 
-> 版本: 0.1
+> 版本: 0.2
 > 由桌面端（agent-console）写入，采集器只读。位置：Windows `%APPDATA%\memhub\sources.json`，macOS `~/Library/Application Support/memhub/sources.json`，Linux `~/.config/memhub/sources.json`。
 
 ## 1. 结构
@@ -65,6 +65,7 @@
 - 采集器**不得**修改 `sources.json`；它自己的进度另存 `state/<source_id>.json`（`cursor`、`source_rev`、`last_scan_at`、`skipped` 计数）。
 - **禁止**：`sources.json`、`state/*.json`、任何采集器落盘文件里都不得出现 token、key、密码。`device_token` 只存操作系统凭据库（Windows Credential Manager / macOS Keychain / libsecret），由桌面端写入，采集器只读。
 - 删除一个 source 后采集器停止推送，但**不通知云端删除数据**；清理是云端能力（`DELETE /ingest/source/{id}`，需显式调用）。
+- 采集器的云端地址 `base_url` 必须指向**签发当前 token 的那台服务器**（含版本前缀，如生产 `https://memhub.work/api/v1`、本地 stub `http://127.0.0.1:8700`）；桌面端在 provision 成功时一并写入采集器配置（如 `collector.toml`）。不得依赖内置默认地址，否则 stub 签发的 token 会被推给生产，形成静默失败。
 
 ## 4. 采集器行为
 

@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.1
+> 版本: 0.3
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -41,6 +41,8 @@ Authorization: Bearer <device_token>
 - 一个用户可注册多设备；每个 device_id 一枚 token。
 - 吊销：`POST /devices/revoke {device_id}`（桌面端/用户态）。吊销后采集器下次请求得 `401 {code:1001}`，必须**停推 + 心跳上报 + 本地告警**，不得静默重试。
 - 轮换：`POST /devices/refresh`，旧 token 宽限 10 分钟。
+- 重复注册（幂等）：同一 `device_id` 在**未吊销**状态下重复调用 `/devices/register`，返回同一枚仍有效的 token，不旋转——provision 失败后整段重试安全，客户端不依赖“重注册换新 token”。被吊销后重新注册视为重新启用：签发新 token，旧 token 失效，采集器在桌面重新 provision 后自动恢复，无需重启。自动轮换只由 `/devices/refresh` 触发，客户端不自动调用。
+- 采集器拿到 `401 {code:1001}`（吊销/无效 token）必须停推该链路并本地告警，不得静默重试；重新 provision 产生新 token 后再继续。
 
 **所有端点（含 GET）都要求 Bearer**；`device_id` 可以出现在 query，但服务端必须校验 `token.device_id == 请求中的 device_id`，不一致返回 `403`。
 

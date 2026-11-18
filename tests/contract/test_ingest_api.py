@@ -137,3 +137,13 @@ def test_binary_content_is_rejected(client: TestClient) -> None:
     status, body = _push(client, [_file("a.bin", "abc\x00def")])
     assert status == 422
     assert body["code"] == 1006
+
+
+def test_register_is_idempotent_for_same_device(client: TestClient) -> None:
+    """契约 0.3：未吊销时重复注册返回同一枚 token，provision 重试安全。"""
+    payload = {"device_id": DEVICE, "name": "test", "platform": "win32"}
+    first = client.post("/devices/register", json=payload).json()
+    second = client.post("/devices/register", json=payload).json()
+    assert first["code"] == second["code"] == 0
+    assert first["data"]["device_id"] == second["data"]["device_id"] == DEVICE
+    assert first["data"]["device_token"] == second["data"]["device_token"]
