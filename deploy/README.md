@@ -21,6 +21,7 @@
 | explorer | `127.0.0.1:8703` | `/` |
 
 段位约定：memhub 用 8700-8710，只监听 loopback。同机 AI 评测中台用 8200-8299，互不重叠。
+`eval.memhub.work` 归评测中台，但需用户配 DNS 与证书；配好之前它只跑回环。
 
 ## 3. 资源预算
 
@@ -31,7 +32,7 @@
 | raw_store 上限 | 4 GiB，超出时 ingest 返回 `1008`，采集端降级 |
 | 告警水位 | 磁盘 ≥80% 已用；可用内存 <300 MiB |
 
-同机评测中台预算 1.2-1.5 GiB / 10 GiB。合计约 2.5 GiB / 22 GiB，留 ≥1 GiB 余量给 OS 与突发。
+同机评测中台：内存按 1.2 GiB 设计（1.5 GiB 为上限），磁盘 10 GiB；Postgres `shared_buffers`/`work_mem` 设上限，MinIO 计入内存与磁盘水位。合计约 2.2-2.5 GiB / 22 GiB，留 ≥1 GiB 余量给 OS 与突发。
 
 ## 4. nginx
 
