@@ -7,6 +7,8 @@
 | [ADR-0001](ADR-0001-no-proxy-in-request-path.md) | 记忆能力不进入模型请求路径 | accepted |
 | [ADR-0002](ADR-0002-markdown-source-of-truth.md) | markdown 为真源，图谱/向量为可重建投影 | accepted |
 | [ADR-0003](ADR-0003-device-token-scope.md) | 采集器使用独立 device token，不复用面板 user_key | accepted |
+| [ADR-0004](ADR-0004-runtime-state-in-postgres.md) | 运行态放云上共享 PostgreSQL 实例 | accepted |
+| [ADR-0005](ADR-0005-async-orm-data-access.md) | 数据访问层改为异步 I/O + SQLAlchemy ORM | proposed |
 
 模板：
 
