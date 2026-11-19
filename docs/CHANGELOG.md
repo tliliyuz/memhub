@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-11-19（治理：Git 钩子覆盖 PowerShell）
+
+- `fix(guard)`：`.claude/settings.json` 为 `PowerShell` 工具补注册同一守卫钩子——原先只注册 `Bash`，经 PowerShell 发起的 `git push` 会绕过；`guard-git-write.py` 补充识别 `git.exe`、`& git push` / `. git push` 调用运算符与大小写变体。
+- 验证：钩子探针确认 PowerShell 形态的 `git status; git push`、`& git push`、`git.exe push`、`GIT push`、`powershell -Command "git push"` 返回 `ask`，`& git status`、`git.exe status` 放行；`python scripts/check_document_format.py` 与 `git diff --check` 通过。
+
 ## 2026-11-19（治理：Git 授权放开为仅限制远端操作）
 
 - `docs`：根入口 `CLAUDE.md` / `AGENTS.md` §2 与 [DEVELOPMENT](guides/DEVELOPMENT.md) §6 的 Git 授权边界改为：本地写操作（提交、合并、变基、切换、worktree、分支与标签管理、清理等）默认授权，无需逐次确认；仅远端操作（`push`、`fetch`、`pull`、`clone`、修改 `remote`、推送标签、创建或更新 PR/release 等）需要负责人针对当前操作单独授权。本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。
