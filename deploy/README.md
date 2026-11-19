@@ -93,9 +93,11 @@ nginx 段（explorer 旧版）保留在上线记录里；563fefe 的完整 vhost
 `deploy/nginx/memhub.vhost.conf`（`/` 与 `/api/v1/kb/` → 8701，走 `auth_request /__memhub_auth`）。
 认证网关为 **oauth2-proxy v7.6.0**（GitHub OAuth，`--github-user` 白名单）：
 凭据只写 `/etc/memhub/env`（0600），cookie secret 32 字节随机
-（`openssl rand -base64 32`）。**注意两处部署坑**：镜像 distroless 不能配
+（`openssl rand -base64 32`）。**注意三处部署坑**：镜像 distroless 不能配
 exec 型 healthcheck；compose 的 `environment: ${VAR}` 会把 env_file 值覆盖成空串，
-只能靠 `env_file` 注入。
+只能靠 `env_file` 注入；**不要覆盖 `--scope`**——GitHub provider 默认 `user:email read:org`，
+v7.6.0 的 EnrichSession 会无条件列组织，缺 `read:org` 时回调 500。回跳原页面还需
+`--whitelist-domain=memhub.work`，否则 `rd` 被判非法、登录后只能回 `/`。
 
 kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查走 `127.0.0.1:8701/healthz`，
 不经公网（与 `location = /api/v1/healthz → 404` 同义）。

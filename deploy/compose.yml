@@ -150,7 +150,11 @@ services:
       - --cookie-secure=true
       - --cookie-httponly=true
       - --pass-access-token=false
-      - --scope=user:email
+      # 不要覆盖 --scope：GitHub provider 默认是 `user:email read:org`；v7.6.0 的
+      # EnrichSession 会无条件列组织（/user/orgs），少了 read:org 回调直接
+      # 500 `You need at least read:org scope`（线上已踩）。
+      # rd 校验需要白名单，否则 https://memhub.work/ 被判非法、登录后只能回到 /。
+      - --whitelist-domain=memhub.work
     restart: unless-stopped
     mem_limit: 128m
     memswap_limit: 128m
