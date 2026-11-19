@@ -4,7 +4,7 @@
 |:---|:---|
 | 文档状态 | specified |
 | 最后更新 | 2026-11-19 |
-| 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、编码约定 |
+| 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
 
 ## 1. 环境准备
 
@@ -90,14 +90,13 @@ prompts/      各 source_type 的抽取 profile
 - 不提交 `.env`、`data/`、`raw_store/`、投影产物、真实会话内容。
 - **有意未采用**「禁止 `Co-Authored-By` 签名行」的检查：本仓库的运行环境会给提交自动追加署名，加检查会与工具链冲突。署名只存在于 git 元数据，不进入源码、文档或发布物；对外发布物由 `deploy/` 与镜像构建产出，不含提交信息。
 
-## 6. 分支与 worktree 闭环
+## 6. 分支、Git 授权与 worktree 闭环
 
 授权边界：
 
-- 未经负责人针对当前操作的明确授权，只执行只读 Git 命令（`status`、`diff`、`log`、`show`）。
-- 本地提交需要负责人针对当前操作的明确授权；一次授权不延伸到后续提交。
-- 推送远端、改写历史需要单独授权；本地提交授权不覆盖推送。
-- 不得在未授权时执行 `git reset --hard`、`git checkout --`、`git clean` 等破坏性操作。
+- Git 本地写操作默认授权，无需逐次确认——包括 `add`、`commit`、`merge`、`rebase`、`cherry-pick`、`revert`、`switch`、`checkout`、`restore`、`reset`、`clean`、`stash`、`worktree`、`branch`、`tag`、`config`、`rm`、`mv` 等；本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。
+- 仅**远端操作**需要负责人针对当前操作明确授权：`push`、`fetch`、`pull`、`clone`、`ls-remote`、修改 `remote`、推送标签、`send-email`、`request-pull`、`lfs` 的远端动作，以及创建或更新 PR/release。本地操作的授权不覆盖任何远端操作。
+- **机器化**：授权边界由 [.claude/hooks/guard-git-write.py](../../.claude/hooks/guard-git-write.py) 执行，经 [.claude/settings.json](../../.claude/settings.json) 注册——只读命令与全部本地写操作放行；远端子命令返回 `ask`，逐条确认。复合命令逐段判定，`git status && git push` 不会因前半段放行而整条通过。本仓 §5 有意不禁止 `Co-Authored-By` 署名，钩子不做署名拦截。钩子不检查当前分支，worktree 闭环靠本节文本约束与自查执行。
 
 worktree 闭环（硬约束）：
 
