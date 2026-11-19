@@ -70,7 +70,7 @@
 | `kb/proc.py`（新增） | 全仓唯一的子进程入口。**Windows 的 SelectorEventLoop 不支持 asyncio 子进程**（`subprocess_exec` 直接 `NotImplementedError`，已实测），所以把 `subprocess.run/Popen` 放进 `anyio.to_thread`；调用方仍是 `await`，事件循环不阻塞 |
 | `worker/llm.py`、`prompts.py`、`extract.py`、`merge.py`、`daemon.py` | `httpx.AsyncClient`；`anyio.Path` 读写/移动/清理；端点探活改 `asyncio.open_connection`；`time.sleep` 改 `asyncio.sleep`（可注入，测试用 async 收集器） |
 | `mcp/server.py` | 协议处理全 async；stdout 写入与 stdin `readline`（阻塞流）放 `anyio.to_thread` |
-| `ingest/rawstore.py`、`ingest/app.py` | 落盘、配额扫描、`/debug/sources` 全 async；`RawStoreQuota` 改 `anyio.Lock`；此前 `asyncio.to_thread` 包装删除 |
+| `ingest/rawstore.py`、`ingest/app.py` | 落盘、配额扫描、`/debug/sources` 全 async；`RawStoreQuota` 改 `anyio.Lock`；此前 `asyncio.to_thread` 包装删除。后续 `rawstore.py` 已移入 `queue/`（见同日 CHANGELOG 条目） |
 | `cli/main.py` | 所有命令改 `async def`，入口一次 `_prepare_event_loop()` + `asyncio.run(_dispatch())`；`uvicorn.Server.serve()` 在同一循环内启动（不再嵌套 `asyncio.run`）；explorer 走 `proc.run_command` |
 
 **同步例外清单**（不允许扩大，新增需在本 ADR 登记）：

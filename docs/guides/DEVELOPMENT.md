@@ -28,7 +28,8 @@ cp .env.example .env
 ```text
 src/memhub/
   contract/   跨端模型与枚举（对外字段的唯一实现）
-  ingest/     鉴权、游标、幂等、raw_store、入队
+  queue/      raw_store 落盘与配额（ingest 采集、kb 上传共用）
+  ingest/     鉴权、游标、幂等、入队
   worker/     value_filter / extract / merge
   kb/         真源读写、检索、投影重建
   mcp/        MCP 工具
@@ -48,6 +49,7 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|:---|
 | 字段、枚举、校验 | `contract/` | 在 API 或 worker 里临时解析 JSON |
 | 采集协议行为 | `ingest/` | 把提炼逻辑塞进 ingest（它必须 <200ms） |
+| 队列落盘、用量与配额 | `queue/` | 在路由层复制落盘/配额逻辑，或让 kb 直接依赖 `ingest/` |
 | 抽取 prompt | `prompts/` | 在 Python 里拼长 prompt 字符串 |
 | 检索/写入 | `kb/` | MCP 层直接读文件 |
 | 工具定义 | `mcp/` | 在工具函数里实现检索算法 |

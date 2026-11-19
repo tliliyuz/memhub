@@ -11,7 +11,7 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import BatchFile, IngestRequest
-from memhub.ingest.rawstore import (
+from memhub.queue.rawstore import (
     QuotaExceeded,
     RawStoreQuota,
     batch_dir,

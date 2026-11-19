@@ -15,7 +15,7 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import BatchFile, IngestRequest
-from memhub.ingest.rawstore import save_batch
+from memhub.queue.rawstore import save_batch
 from memhub.worker.daemon import (
     RoundReport,
     WorkerConfig,

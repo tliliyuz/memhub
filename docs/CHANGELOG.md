@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（分层：提炼队列落盘抽为 queue 模块）
+
+- `refactor(queue)`：`ingest/rawstore.py` 整体移入 `src/memhub/queue/rawstore.py`——内容寻址布局、原子写、`tree_size`/`estimate_new_bytes`、`RawStoreQuota` 行为不变，`ingest/app.py` 与单元测试只改 import。原因：kb-api 的知识库上传要落同一个 raw_store，但不该让 `kb/` 依赖采集协议层（鉴权、游标、<200ms 约束）。
+- `docs`：[architecture](architecture.md) 组件职责新增 queue（非独立进程，写入方 ingest-api/kb-api、读取方 worker），拓扑与目录同步；[DEVELOPMENT](guides/DEVELOPMENT.md) §2 分层树与归属表加入 `queue/`；ADR-0005 文件表注明 rawstore 已迁移。
+- 验证：`pytest` 140 passed + 9 skipped（PG 契约按开关跳过）；`ruff check/format`、mypy strict（32 文件）、`check_async_io`、`check_no_raw_sql`、`check_document_format`、`check_document_ownership --all`、`check_adr_governance`、`check_agent_entrypoints_sync`、`check_env_example_keys` 全部通过。
+
 ## 2026-11-19（治理：Git 钩子覆盖 PowerShell）
 
 - `fix(guard)`：`.claude/settings.json` 为 `PowerShell` 工具补注册同一守卫钩子——原先只注册 `Bash`，经 PowerShell 发起的 `git push` 会绕过；`guard-git-write.py` 补充识别 `git.exe`、`& git push` / `. git push` 调用运算符与大小写变体。

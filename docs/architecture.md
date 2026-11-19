@@ -22,7 +22,7 @@
  │   /mcp              → mcp-server (streamable HTTP)                      │
  │   /                → explorer (只读可视化)                               │
  ├─────────────────────────────────────────────────────────────────────────┤
- │  ingest-api → raw_store (原始增量, 按 device/source 分片)                 │
+ │  ingest-api / kb-api(上传) → queue.rawstore (原始增量, 按 device/source)  │
  │           → runtime state (PostgreSQL: 设备/游标/批次幂等, memhub_prod)   │
  │  worker:  value_filter(cheap) → extract(expensive) → merge              │
  │  merge → knowledge/ (markdown 真源, git) → rebuild projections          │
@@ -57,6 +57,11 @@
 ### ingest-api（服务端）
 - 鉴权、游标、幂等、限流、落 raw_store、入队。
 - 只做校验，不做 LLM 调用，响应 <200ms。
+
+### queue（跨模块落盘与配额，非独立进程）
+- `memhub.queue.rawstore`：raw_store 的内容寻址布局、原子写、用量估算与配额（`MEMHUB_QUEUE_MAX_BYTES`）。
+- 写入方：ingest-api 的 `/ingest/raw`、kb-api 的知识库上传；读取方只有 worker。
+- 放在 `queue/` 而不是 `ingest/`：上传入口不该依赖采集协议层（鉴权、游标、<200ms 约束）；鉴权、游标校验与错误码映射留在各自路由层，这里只做与协议无关的落盘与计量。
 
 ### worker（服务端，单机串行 + 少量并发）
 ```
@@ -97,18 +102,22 @@ raw 片段 ──► value_filter ──► extract ──► merge ──► gi
 - 真源目录 `knowledge/` 挂 volume + 每日 git push 到私有远端（可选）。
 - 配置与密钥：`.env`（600）+ systemd `EnvironmentFile`；不写进镜像。
 
-## 6. 目录（拟定，待骨架规范确认）
+## 6. 目录
 
 ```
 memhub/
+  src/memhub/
+    contract/      # 跨端模型与枚举（对外字段的唯一实现）
+    queue/         # raw_store 落盘与配额（ingest / kb 上传共用）
+    ingest/        # 鉴权、游标、幂等、入队
+    worker/        # value_filter / extract / merge
+    kb/            # 真源读写、检索、投影重建
+    mcp/           # MCP 工具
+    cli/           # 运维命令
   docs/            # 架构、契约、运维
-  server/
-    ingest_api/    # FastAPI
-    worker/
-    kb/            # 检索/写入/投影
-    mcp/
   knowledge/       # markdown 真源（git）
   prompts/         # 各 source_type 的抽取 profile
   deploy/          # compose / nginx / systemd / daemon.json
+  web/             # 管理台前端
   tests/
 ```

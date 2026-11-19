@@ -32,13 +32,13 @@ from memhub.contract import (
     IngestResult,
     SourcesConfig,
 )
-from memhub.ingest.rawstore import (
+from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
+from memhub.queue.rawstore import (
     QuotaExceeded,
     RawStoreQuota,
     estimate_new_bytes,
     save_batch,
 )
-from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
 
 HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.TOKEN_INVALID: 401,
