@@ -96,7 +96,7 @@ prompts/      各 source_type 的抽取 profile
 
 - Git 本地写操作默认授权，无需逐次确认——包括 `add`、`commit`、`merge`、`rebase`、`cherry-pick`、`revert`、`switch`、`checkout`、`restore`、`reset`、`clean`、`stash`、`worktree`、`branch`、`tag`、`config`、`rm`、`mv` 等；本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。
 - 仅**远端操作**需要负责人针对当前操作明确授权：`push`、`fetch`、`pull`、`clone`、`ls-remote`、修改 `remote`、推送标签、`send-email`、`request-pull`、`lfs` 的远端动作，以及创建或更新 PR/release。本地操作的授权不覆盖任何远端操作。
-- 本仓未注册 Git 授权钩子，上述边界靠本节文本约束与自查执行。
+- **机器化**：授权边界由 [.claude/hooks/guard-git-write.py](../../.claude/hooks/guard-git-write.py) 执行，经 [.claude/settings.json](../../.claude/settings.json) 注册——只读命令与全部本地写操作放行；远端子命令返回 `ask`，逐条确认。复合命令逐段判定，`git status && git push` 不会因前半段放行而整条通过。本仓 §5 有意不禁止 `Co-Authored-By` 署名，钩子不做署名拦截。钩子不检查当前分支，worktree 闭环靠本节文本约束与自查执行。
 
 worktree 闭环（硬约束）：
 
