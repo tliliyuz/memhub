@@ -249,7 +249,11 @@ export function GraphCanvas({
     ;(containerRef.current as HTMLElement & { __cy?: Core }).__cy = cy
 
     const applyLabels = () => {
-      const showAll = cy.nodes().length <= 60 || cy.zoom() >= 0.75
+      // 大图整体缩放时降低标签密度：≤60 全显示，中图放大到 0.85，大图到 1.05；
+      // 枢纽/命中/选中节点始终带标签，overview 也能读出主干。
+      const count = cy.nodes().length
+      const labelZoom = count > 150 ? 1.05 : count > 60 ? 0.85 : 0
+      const showAll = count <= 60 || cy.zoom() >= labelZoom
       const showEdges = cy.zoom() >= 1.35
       cy.batch(() => {
         cy.nodes().forEach((node) => {
