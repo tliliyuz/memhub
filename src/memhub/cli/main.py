@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import re
 import subprocess
@@ -24,6 +25,12 @@ SKELETON_PAGES = {"schema.md", "log.md", "purpose.md"}
 DEVICE_ID_RE = re.compile(
     r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+
+
+def _prepare_event_loop() -> None:
+    """psycopg 异步实现不支持 Windows 默认的 ProactorEventLoop，入口处先切 Selector。"""
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -316,12 +323,16 @@ def _purge_expired(args: argparse.Namespace) -> int:
         return 0
     from memhub.ingest.postgres import PostgresStore
 
-    store = PostgresStore(dsn, min_size=1, max_size=1)
-    try:
-        store.migrate()  # 幂等：库是空的也能自建表，timer 不依赖部署顺序
-        deleted = store.purge_expired(keep=timedelta(hours=args.keep_hours))
-    finally:
-        store.close()
+    async def purge() -> int:
+        store = PostgresStore(dsn, min_size=1, max_size=1)
+        try:
+            await store.migrate()  # 幂等：库是空的也能自建表，timer 不依赖部署顺序
+            return await store.purge_expired(keep=timedelta(hours=args.keep_hours))
+        finally:
+            await store.close()
+
+    _prepare_event_loop()
+    deleted = asyncio.run(purge())
     print(f"已清理 {deleted} 条过期批次记录")
     return 0
 
@@ -410,12 +421,16 @@ def _provision_device(args: argparse.Namespace) -> int:
         return 2
     from memhub.ingest.postgres import PostgresStore
 
-    store = PostgresStore(dsn, min_size=1, max_size=1)
-    try:
-        store.migrate()
-        store.register_device(args.device_id, name=args.name, platform=args.platform)
-    finally:
-        store.close()
+    async def register() -> None:
+        store = PostgresStore(dsn, min_size=1, max_size=1)
+        try:
+            await store.migrate()
+            await store.register_device(args.device_id, name=args.name, platform=args.platform)
+        finally:
+            await store.close()
+
+    _prepare_event_loop()
+    asyncio.run(register())
     print(issue_device_token(secret, args.device_id))
     return 0
 
@@ -467,11 +482,15 @@ def _api(args: argparse.Namespace) -> int:
         # 幂等，重复启动只会打印 "already up to date"。
         from memhub.ingest.postgres import PostgresStore
 
-        store = PostgresStore(dsn, min_size=1, max_size=1)
-        try:
-            applied = store.migrate()
-        finally:
-            store.close()
+        async def migrate() -> list[str]:
+            store = PostgresStore(dsn, min_size=1, max_size=1)
+            try:
+                return await store.migrate()
+            finally:
+                await store.close()
+
+        _prepare_event_loop()
+        applied = asyncio.run(migrate())
         print(f"schema: {applied or 'already up to date'}", flush=True)
     print(f"memhub ingest-api: http://{host}:{port}/", flush=True)
     uvicorn.run(

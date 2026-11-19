@@ -38,3 +38,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^(docs/|CLAUDE\.md$|AGENTS\.md$|README\.md$)
+
+      - id: no-raw-sql
+        name: 禁止手写 SQL（数据访问走 ORM/Core）
+        entry: python scripts/check_no_raw_sql.py
+        language: system
+        pass_filenames: false
+        files: ^src/

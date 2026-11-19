@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-11-19（数据访问层异步化：SQLAlchemy ORM + 禁手写 SQL）
+
+- `refactor(ingest)`：按 ADR-0005 把数据访问层整体改为异步——`StateStore` 协议全部 `async def`，`PostgresStore` 换成 SQLAlchemy 2.0 async engine（`create_async_engine` + `async_sessionmaker`，`postgresql+psycopg`，复用现有 psycopg 3，不引入 asyncpg / asyncmy）。连接池随 engine 异步管理；`MEMHUB_DB_URL` 参数语义不变。
+- `feat(ingest)`：新增 `models.py`（`devices`/`sources`/`file_cursors`/`batches`/`seen_shas` 的 `DeclarativeBase` 模型）。并发语义逐条用 Core/ORM 表达：advisory lock = `select(func.pg_advisory_xact_lock(func.hashtextextended(...)))`、行锁 = `with_for_update()`、去重 = `pg_insert(...).on_conflict_do_nothing().returning(...)`、游标 = `on_conflict_do_update`。表结构与 `MIGRATIONS` DDL 完全不变（不引入 Alembic）。
+- `refactor(ingest)`：ingest 路由改 `async def`，`auth()` 与 store 调用 await；`raw_store` 落盘与配额扫描用 `asyncio.to_thread` 移出事件循环。`migrations.py` 的 `ensure_schema` 改接收 SQLAlchemy `Connection`（`exec_driver_sql`），DDL 列表冻结。
+- `refactor(cli)`：`provision-device` / `purge-expired` / `_api` 改为局部 async 入口 + `asyncio.run`，命令语义与参数不变；Windows 上统一切 `WindowsSelectorEventLoopPolicy`（psycopg async 不支持 Proactor）。
+- `feat(guard)`：新增 `scripts/check_no_raw_sql.py`——AST 扫描 `src/`，命中 `sqlalchemy.text(...)` 或传给 `execute/exec_driver_sql/scalar/scalars` 的 SQL 字符串即失败；唯一白名单 `migrations.py`（冻结基线），并挂到 pre-commit。附 `tests/unit/test_no_raw_sql.py` 自测。
+- `test`：`tests/contract/test_state_store.py` 全 async，同一组场景参数化跑内存与 PG 实现，新增 `asyncio.gather` 同批重放用例；`tests/conftest.py` 在 Windows 下给 pytest-asyncio 提供 `SelectorEventLoop`。
+- `deps`：新增 `sqlalchemy>=2.0.30,<2.1`（`postgres` extra）与 `pytest-asyncio`（`dev`）；`psycopg[binary,pool]` 保留。
+- 验证：对临时 Docker PG 16 容器跑全量 **142 passed**（PG 契约真实执行，含并发重放）；未设 `MEMHUB_TEST_DB_URL` 时 PG 用例跳过、其余通过；`ruff check/format`、mypy strict（30 文件）、`python scripts/check_no_raw_sql.py` 均通过。
+- 范围外：`kb-api`（`memhub kb`）无数据库访问，保持同步；markdown 文件 I/O 是否异步化另议。
+
 ## 2026-11-19（治理：ego-lite 验收后关闭标签页）
 
 - `docs`：根入口 `CLAUDE.md` / `AGENTS.md` §2 新增硬约束——使用 ego-lite（ego-browser）做页面验收后，关闭本次打开的所有标签页，避免占用浏览器资源、干扰后续会话或误认页面状态。

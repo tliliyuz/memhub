@@ -9,13 +9,15 @@ PG 用例只在 `MEMHUB_TEST_DB_URL` 存在时运行（本机没有库时跳过�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
+import pytest_asyncio
 
 from memhub.contract import BatchFile, Cursor, IngestRequest
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
@@ -51,11 +53,11 @@ def _batch(
     )
 
 
-@pytest.fixture(params=["memory", "postgres"])
-def store(request: pytest.FixtureRequest) -> Iterator[StateStore]:
+@pytest_asyncio.fixture(params=["memory", "postgres"])
+async def store(request: pytest.FixtureRequest) -> AsyncIterator[StateStore]:
     if request.param == "memory":
         memory = MemoryStore()
-        memory.register_device(DEVICE, name="test", platform="win32")
+        await memory.register_device(DEVICE, name="test", platform="win32")
         yield memory
         return
 
@@ -74,52 +76,52 @@ def store(request: pytest.FixtureRequest) -> Iterator[StateStore]:
 
     pg_store = PostgresStore(dsn, schema=schema)
     try:
-        pg_store.migrate()
-        pg_store.register_device(DEVICE, name="test", platform="win32")
+        await pg_store.migrate()
+        await pg_store.register_device(DEVICE, name="test", platform="win32")
         yield pg_store
     finally:
-        pg_store.close()
+        await pg_store.close()
         with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)),
             )
 
 
-def test_unknown_device_is_not_registered(store: StateStore) -> None:
-    assert store.is_registered(DEVICE)
-    assert not store.is_registered(str(uuid.uuid4()))
+async def test_unknown_device_is_not_registered(store: StateStore) -> None:
+    assert await store.is_registered(DEVICE)
+    assert not await store.is_registered(str(uuid.uuid4()))
 
 
-def test_first_push_advances_cursor(store: StateStore) -> None:
-    result = store.apply(_batch(content="hello"))
+async def test_first_push_advances_cursor(store: StateStore) -> None:
+    result = await store.apply(_batch(content="hello"))
     assert (result.accepted, result.duplicates, result.replayed) == (1, 0, False)
     assert result.cursor.files == 1
     assert result.cursor.bytes == 5
 
-    source_rev, files = store.get_cursor(DEVICE, "cc-sessions")
+    source_rev, files = await store.get_cursor(DEVICE, "cc-sessions")
     assert source_rev == 0
     assert [(file.path, file.offset) for file in files] == [("sessions/a.jsonl", 5)]
 
 
-def test_same_batch_is_replay_within_window(store: StateStore) -> None:
+async def test_same_batch_is_replay_within_window(store: StateStore) -> None:
     batch_id = str(uuid.uuid4())
-    first = store.apply(_batch(batch_id=batch_id))
-    second = store.apply(_batch(batch_id=batch_id))
+    first = await store.apply(_batch(batch_id=batch_id))
+    second = await store.apply(_batch(batch_id=batch_id))
     assert first.replayed is False
     assert second.replayed is True
     assert (second.accepted, second.duplicates) == (first.accepted, first.duplicates)
 
 
-def test_offset_rollback_is_conflict(store: StateStore) -> None:
-    store.apply(_batch(content="hello"))
+async def test_offset_rollback_is_conflict(store: StateStore) -> None:
+    await store.apply(_batch(content="hello"))
     with pytest.raises(CursorConflict) as excinfo:
-        store.apply(_batch(content="llo", from_offset=0))
+        await store.apply(_batch(content="llo", from_offset=0))
     assert excinfo.value.expected_offset == 5
 
 
-def test_conflict_rolls_back_the_whole_batch(store: StateStore) -> None:
+async def test_conflict_rolls_back_the_whole_batch(store: StateStore) -> None:
     """同一批里先进后出：冲突时前面那条文件的游标也不能留下。"""
-    store.apply(_batch(content="hello"))
+    await store.apply(_batch(content="hello"))
     later = IngestRequest(
         batch_id=str(uuid.uuid4()),
         device_id=DEVICE,
@@ -145,27 +147,38 @@ def test_conflict_rolls_back_the_whole_batch(store: StateStore) -> None:
         ],
     )
     with pytest.raises(CursorConflict):
-        store.apply(later)
-    _, files = store.get_cursor(DEVICE, "cc-sessions")
+        await store.apply(later)
+    _, files = await store.get_cursor(DEVICE, "cc-sessions")
     assert [file.path for file in files] == ["sessions/a.jsonl"]
 
 
-def test_same_content_different_batch_is_duplicate(store: StateStore) -> None:
-    store.apply(_batch(content="hello"))
+async def test_same_content_different_batch_is_duplicate(store: StateStore) -> None:
+    await store.apply(_batch(content="hello"))
     # 换路径但内容 sha 相同：去重按 (source, sha)，不看路径。
-    result = store.apply(_batch(content="hello", path="sessions/copy.jsonl"))
+    result = await store.apply(_batch(content="hello", path="sessions/copy.jsonl"))
     assert (result.accepted, result.duplicates) == (0, 1)
 
 
-def test_new_source_rev_allows_rescan(store: StateStore) -> None:
-    store.apply(_batch(content="hello world"))
-    result = store.apply(_batch(content="hello", from_offset=0, source_rev=1))
+async def test_new_source_rev_allows_rescan(store: StateStore) -> None:
+    await store.apply(_batch(content="hello world"))
+    result = await store.apply(_batch(content="hello", from_offset=0, source_rev=1))
     assert result.accepted == 1
-    source_rev, files = store.get_cursor(DEVICE, "cc-sessions")
+    source_rev, files = await store.get_cursor(DEVICE, "cc-sessions")
     assert source_rev == 1
     assert files[0].offset == 5
 
 
-def test_empty_cursor_for_unknown_source(store: StateStore) -> None:
-    assert store.get_cursor(DEVICE, "never-seen") == (0, [])
-    assert store.cursor_summary(DEVICE, "never-seen") == Cursor()
+async def test_empty_cursor_for_unknown_source(store: StateStore) -> None:
+    assert await store.get_cursor(DEVICE, "never-seen") == (0, [])
+    assert await store.cursor_summary(DEVICE, "never-seen") == Cursor()
+
+
+async def test_concurrent_same_batch_applies_once(store: StateStore) -> None:
+    """并发重放：advisory lock / 单事务保证只应用一次。"""
+    batch_id = str(uuid.uuid4())
+    results = await asyncio.gather(
+        store.apply(_batch(batch_id=batch_id)),
+        store.apply(_batch(batch_id=batch_id)),
+    )
+    assert sorted(result.replayed for result in results) == [False, True]
+    assert results[0].accepted == results[1].accepted

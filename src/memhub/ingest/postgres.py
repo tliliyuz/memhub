@@ -5,44 +5,57 @@
 
     postgresql://memhub_app@127.0.0.1:5432/memhub_prod
 
-并发语义：
+实现走 SQLAlchemy 2.0 async（`postgresql+psycopg` 驱动，ADR-0005），连接池异步，
+接口全部 `async`。并发语义与旧实现一致：
+
 - 同一 `(device_id, batch_id)` 用事务级 advisory lock 串行化，保证并发重放只应用一次；
-- 同一 `(device_id, source_id)` 先用 `INSERT ... ON CONFLICT DO NOTHING` 建行，再 `FOR UPDATE`
+- 同一 `(device_id, source_id)` 先 `INSERT ... ON CONFLICT DO NOTHING` 建行，再 `FOR UPDATE`
   锁行，游标推进因此是串行的，不会出现两个请求各写一半；
 - 幂等窗口 24 小时，窗口外同 batch_id 视为新批次（契约 0.3），内容 `sha256` 兜底去重。
+
+所有语句由 ORM/Core 构造，不写裸 SQL；唯一例外是 `migrations.py` 里的建表基线。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
-from psycopg import Connection
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
-from psycopg_pool import ConnectionPool
+from sqlalchemy import CursorResult, delete, func, literal, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from memhub.contract import Cursor, FileCursor, IngestRequest, IngestResult
 from memhub.ingest.migrations import ensure_schema
+from memhub.ingest.models import (
+    Batch,
+    Device,
+    SeenSha,
+    Source,
+)
+from memhub.ingest.models import (
+    FileCursor as FileCursorRow,
+)
 from memhub.ingest.store import CursorConflict
 
 REPLAY_WINDOW = timedelta(hours=24)
 
 
-def _schema_configurer(schema: str) -> Callable[[Connection[dict[str, Any]]], None]:
-    """每根新连接都设 search_path；schema 名来自配置，不拼接 SQL 字符串。"""
+def _async_dsn(dsn: str) -> str:
+    """把 `postgresql://` 统一换成 SQLAlchemy 的异步方言前缀。
 
-    def configure(conn: Connection[dict[str, Any]]) -> None:
-        conn.execute("SELECT set_config('search_path', %s, false)", (schema,))
-        # configure 不是业务事务的一部分：不提交会话停在 INTRANS，池会把连接整个丢弃。
-        conn.commit()
-
-    return configure
+    已经带方言的 DSN 原样返回；未知格式也原样返回，让 SQLAlchemy 自己报清楚的错。
+    """
+    if "+" in dsn.split("://", 1)[0]:
+        return dsn
+    for prefix in ("postgresql://", "postgres://"):
+        if dsn.startswith(prefix):
+            return "postgresql+psycopg://" + dsn[len(prefix) :]
+    return dsn
 
 
 class PostgresStore:
-    """`StateStore` 的生产实现。线程安全，连接由池管理。
+    """`StateStore` 的生产实现。连接池、会话与事务由 SQLAlchemy async engine 管理。
 
     `schema` 只给隔离场景用（测试、联调各占一个 schema）；生产不传，落在库的默认 schema。
     """
@@ -55,126 +68,140 @@ class PostgresStore:
         max_size: int = 5,
         schema: str | None = None,
     ) -> None:
-        self.pool: ConnectionPool[Connection[dict[str, Any]]] = ConnectionPool(
-            dsn,
-            min_size=min_size,
-            max_size=max_size,
-            kwargs={"row_factory": dict_row, "autocommit": False},
-            configure=_schema_configurer(schema) if schema else None,
-            open=True,
+        connect_args: dict[str, Any] = {}
+        if schema:
+            # libpq options：连接建立时就设好 search_path，不需要额外一轮查询。
+            connect_args["options"] = f"-csearch_path={schema}"
+        self.engine = create_async_engine(
+            _async_dsn(dsn),
+            pool_size=min_size,
+            max_overflow=max(0, max_size - min_size),
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
+        self.sessions: async_sessionmaker[AsyncSession] = async_sessionmaker(
+            self.engine, expire_on_commit=False
         )
 
-    def close(self) -> None:
-        self.pool.close()
+    async def close(self) -> None:
+        await self.engine.dispose()
 
-    def migrate(self) -> list[str]:
+    async def migrate(self) -> list[str]:
         """建表/补迁移；返回本次应用的版本。启动时调用一次。"""
-        with self.pool.connection() as conn:
-            return ensure_schema(conn)
+        async with self.engine.begin() as conn:
+            applied = await conn.run_sync(ensure_schema)
+        return applied
 
     # -- devices ---------------------------------------------------------
-    def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
-        with self.pool.connection() as conn, conn.transaction():
-            conn.execute(
-                """
-                INSERT INTO devices (device_id, name, platform)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (device_id) DO UPDATE
-                    SET name = EXCLUDED.name,
-                        platform = EXCLUDED.platform,
-                        last_seen_at = now(),
-                        revoked_at = NULL
-                """,
-                (device_id, name, platform),
+    async def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
+        stmt = (
+            pg_insert(Device)
+            .values(device_id=device_id, name=name, platform=platform)
+            .on_conflict_do_update(
+                index_elements=[Device.device_id],
+                set_={
+                    "name": name,
+                    "platform": platform,
+                    "last_seen_at": func.now(),
+                    "revoked_at": None,
+                },
             )
+        )
+        async with self.sessions() as session, session.begin():
+            await session.execute(stmt)
 
-    def is_registered(self, device_id: str) -> bool:
-        with self.pool.connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM devices WHERE device_id = %s AND revoked_at IS NULL",
-                (device_id,),
-            ).fetchone()
-        return row is not None
+    async def is_registered(self, device_id: str) -> bool:
+        stmt = select(Device.device_id).where(
+            Device.device_id == device_id, Device.revoked_at.is_(None)
+        )
+        async with self.sessions() as session:
+            return (await session.scalar(stmt)) is not None
 
     # -- cursors ---------------------------------------------------------
-    def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
-        with self.pool.connection() as conn:
-            source = conn.execute(
-                "SELECT source_rev FROM sources WHERE device_id = %s AND source_id = %s",
-                (device_id, source_id),
-            ).fetchone()
-            rows = conn.execute(
-                """
-                SELECT path, "offset", size, mtime
-                FROM file_cursors
-                WHERE device_id = %s AND source_id = %s
-                ORDER BY path
-                """,
-                (device_id, source_id),
-            ).fetchall()
+    async def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
+        async with self.sessions() as session:
+            source_rev = await session.scalar(
+                select(Source.source_rev).where(
+                    Source.device_id == device_id, Source.source_id == source_id
+                )
+            )
+            rows = (
+                await session.scalars(
+                    select(FileCursorRow)
+                    .where(
+                        FileCursorRow.device_id == device_id,
+                        FileCursorRow.source_id == source_id,
+                    )
+                    .order_by(FileCursorRow.path)
+                )
+            ).all()
         files = [
-            FileCursor(path=row["path"], offset=row["offset"], size=row["size"], mtime=row["mtime"])
+            FileCursor(path=row.path, offset=row.offset, size=row.size, mtime=row.mtime)
             for row in rows
         ]
-        return (int(source["source_rev"]) if source else 0), files
+        return (int(source_rev) if source_rev is not None else 0), files
 
-    def cursor_summary(self, device_id: str, source_id: str) -> Cursor:
-        with self.pool.connection() as conn:
-            return self._cursor_summary(conn, device_id, source_id)
+    async def cursor_summary(self, device_id: str, source_id: str) -> Cursor:
+        async with self.sessions() as session:
+            return await self._cursor_summary(session, device_id, source_id)
 
     @staticmethod
-    def _cursor_summary(conn: Connection[dict[str, Any]], device_id: str, source_id: str) -> Cursor:
-        row = conn.execute(
-            """
-            SELECT count(*) AS files, coalesce(sum("offset"), 0) AS bytes
-            FROM file_cursors
-            WHERE device_id = %s AND source_id = %s
-            """,
-            (device_id, source_id),
-        ).fetchone()
-        source = conn.execute(
-            "SELECT last_at FROM sources WHERE device_id = %s AND source_id = %s",
-            (device_id, source_id),
-        ).fetchone()
-        return Cursor(
-            files=int(row["files"]) if row else 0,
-            bytes=int(row["bytes"]) if row else 0,
-            last_at=source["last_at"] if source else None,
+    async def _cursor_summary(session: AsyncSession, device_id: str, source_id: str) -> Cursor:
+        row = (
+            await session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(FileCursorRow.offset), 0),
+                ).where(
+                    FileCursorRow.device_id == device_id,
+                    FileCursorRow.source_id == source_id,
+                )
+            )
+        ).one()
+        last_at = await session.scalar(
+            select(Source.last_at).where(
+                Source.device_id == device_id, Source.source_id == source_id
+            )
         )
+        return Cursor(files=int(row[0]), bytes=int(row[1]), last_at=last_at)
 
     # -- ingest ----------------------------------------------------------
-    def apply(self, request: IngestRequest) -> IngestResult:
+    async def apply(self, request: IngestRequest) -> IngestResult:
         now = datetime.now(UTC)
-        with self.pool.connection() as conn, conn.transaction():
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"{request.device_id}:{request.batch_id}",),
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                select(
+                    func.pg_advisory_xact_lock(
+                        func.hashtextextended(f"{request.device_id}:{request.batch_id}", 0)
+                    )
+                )
             )
-            previous = conn.execute(
-                "SELECT received_at, result FROM batches WHERE device_id = %s AND batch_id = %s",
-                (request.device_id, request.batch_id),
-            ).fetchone()
-            if previous is not None and now - previous["received_at"] < REPLAY_WINDOW:
-                result = IngestResult.model_validate(previous["result"])
-                return result.model_copy(update={"replayed": True})
+            previous = (
+                await session.execute(
+                    select(Batch.received_at, Batch.result).where(
+                        Batch.device_id == request.device_id,
+                        Batch.batch_id == request.batch_id,
+                    )
+                )
+            ).first()
+            if previous is not None and now - previous.received_at < REPLAY_WINDOW:
+                replayed = IngestResult.model_validate(previous.result)
+                return replayed.model_copy(update={"replayed": True})
 
-            conn.execute(
-                """
-                INSERT INTO sources (device_id, source_id)
-                VALUES (%s, %s)
-                ON CONFLICT (device_id, source_id) DO NOTHING
-                """,
-                (request.device_id, request.source_id),
+            await session.execute(
+                pg_insert(Source)
+                .values(device_id=request.device_id, source_id=request.source_id)
+                .on_conflict_do_nothing(index_elements=[Source.device_id, Source.source_id])
             )
-            source = conn.execute(
-                """
-                SELECT source_rev FROM sources
-                WHERE device_id = %s AND source_id = %s
-                FOR UPDATE
-                """,
-                (request.device_id, request.source_id),
-            ).fetchone()
-            current_rev = int(source["source_rev"]) if source else 0
+            current_raw = await session.scalar(
+                select(Source.source_rev)
+                .where(
+                    Source.device_id == request.device_id,
+                    Source.source_id == request.source_id,
+                )
+                .with_for_update()
+            )
+            current_rev = int(current_raw) if current_raw is not None else 0
             reset_allowed = request.source_rev > current_rev
 
             accepted = 0
@@ -182,86 +209,98 @@ class PostgresStore:
             for batch_file in request.files:
                 known = None
                 if not reset_allowed:
-                    known = conn.execute(
-                        """
-                        SELECT "offset" FROM file_cursors
-                        WHERE device_id = %s AND source_id = %s AND path = %s
-                        """,
-                        (request.device_id, request.source_id, batch_file.path),
-                    ).fetchone()
-                expected = int(known["offset"]) if known is not None else 0
+                    known = await session.scalar(
+                        select(FileCursorRow.offset).where(
+                            FileCursorRow.device_id == request.device_id,
+                            FileCursorRow.source_id == request.source_id,
+                            FileCursorRow.path == batch_file.path,
+                        )
+                    )
+                expected = int(known) if known is not None else 0
                 if batch_file.from_offset < expected:
                     raise CursorConflict(batch_file.path, expected)
 
-                marker = conn.execute(
-                    """
-                    INSERT INTO seen_shas (source_id, sha256) VALUES (%s, %s)
-                    ON CONFLICT DO NOTHING
-                    RETURNING 1
-                    """,
-                    (request.source_id, batch_file.sha256),
-                ).fetchone()
+                marker = (
+                    await session.execute(
+                        pg_insert(SeenSha)
+                        .values(source_id=request.source_id, sha256=batch_file.sha256)
+                        .on_conflict_do_nothing(index_elements=[SeenSha.source_id, SeenSha.sha256])
+                        .returning(literal(1))
+                    )
+                ).scalar_one_or_none()
                 if marker is None:
                     duplicates += 1
                 else:
                     accepted += 1
 
-                conn.execute(
-                    """
-                    INSERT INTO file_cursors (device_id, source_id, path, "offset", size, mtime)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (device_id, source_id, path) DO UPDATE
-                        SET "offset" = EXCLUDED."offset",
-                            size = EXCLUDED.size,
-                            mtime = EXCLUDED.mtime
-                    """,
-                    (
-                        request.device_id,
-                        request.source_id,
-                        batch_file.path,
-                        # rescan（更高的 source_rev）时以客户端为准重置游标；
-                        # 常规追加时 expected 已保证 to_offset >= known offset。
-                        batch_file.to_offset
-                        if reset_allowed
-                        else max(expected, batch_file.to_offset),
-                        batch_file.to_offset,
-                        batch_file.mtime,
-                    ),
+                # rescan（更高的 source_rev）时以客户端为准重置游标；
+                # 常规追加时 expected 已保证 to_offset >= known offset。
+                next_offset = (
+                    batch_file.to_offset if reset_allowed else max(expected, batch_file.to_offset)
+                )
+                await session.execute(
+                    pg_insert(FileCursorRow)
+                    .values(
+                        device_id=request.device_id,
+                        source_id=request.source_id,
+                        path=batch_file.path,
+                        offset=next_offset,
+                        size=batch_file.to_offset,
+                        mtime=batch_file.mtime,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[
+                            FileCursorRow.device_id,
+                            FileCursorRow.source_id,
+                            FileCursorRow.path,
+                        ],
+                        set_={
+                            "offset": next_offset,
+                            "size": batch_file.to_offset,
+                            "mtime": batch_file.mtime,
+                        },
+                    )
                 )
 
-            conn.execute(
-                """
-                UPDATE sources
-                SET source_rev = GREATEST(source_rev, %s), last_at = %s
-                WHERE device_id = %s AND source_id = %s
-                """,
-                (request.source_rev, now, request.device_id, request.source_id),
+            await session.execute(
+                update(Source)
+                .where(
+                    Source.device_id == request.device_id,
+                    Source.source_id == request.source_id,
+                )
+                .values(
+                    source_rev=func.greatest(Source.source_rev, request.source_rev),
+                    last_at=now,
+                )
             )
             result = IngestResult(
                 batch_id=request.batch_id,
                 accepted=accepted,
                 duplicates=duplicates,
-                cursor=self._cursor_summary(conn, request.device_id, request.source_id),
+                cursor=await self._cursor_summary(session, request.device_id, request.source_id),
             )
-            conn.execute(
-                """
-                INSERT INTO batches (device_id, batch_id, result) VALUES (%s, %s, %s)
-                ON CONFLICT (device_id, batch_id) DO UPDATE
-                    SET received_at = now(), result = EXCLUDED.result
-                """,
-                (request.device_id, request.batch_id, Jsonb(result.model_dump(mode="json"))),
+            payload = result.model_dump(mode="json")
+            await session.execute(
+                pg_insert(Batch)
+                .values(
+                    device_id=request.device_id,
+                    batch_id=request.batch_id,
+                    result=payload,
+                )
+                .on_conflict_do_update(
+                    index_elements=[Batch.device_id, Batch.batch_id],
+                    set_={"received_at": func.now(), "result": payload},
+                )
             )
             return result
 
     # -- maintenance -----------------------------------------------------
-    def purge_expired(self, *, keep: timedelta = timedelta(hours=25)) -> int:
+    async def purge_expired(self, *, keep: timedelta = timedelta(hours=25)) -> int:
         """删掉重放窗口外的批次记录（窗口 24h，留 1h 余量给边界）。"""
-        with self.pool.connection() as conn, conn.transaction():
-            cursor = conn.execute(
-                "DELETE FROM batches WHERE received_at < now() - %s",
-                (keep,),
-            )
-            return cursor.rowcount
+        cutoff = datetime.now(UTC) - keep
+        async with self.sessions() as session, session.begin():
+            outcome = await session.execute(delete(Batch).where(Batch.received_at < cutoff))
+        return int(cast(CursorResult[Any], outcome).rowcount)
 
 
 __all__ = ["PostgresStore"]

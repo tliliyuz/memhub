@@ -11,9 +11,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
 
-from psycopg import Connection
+from sqlalchemy.engine import Connection
 
 MIGRATIONS: list[tuple[str, Sequence[str]]] = [
     (
@@ -74,20 +73,14 @@ MIGRATIONS: list[tuple[str, Sequence[str]]] = [
 ]
 
 
-def _version_of(row: Any) -> str:
-    """连接可能是 dict_row（池配置）也可能是默认 tuple 行。两种都要认。
+def ensure_schema(conn: Connection) -> list[str]:
+    """幂等建表；返回本次实际应用的迁移版本。
 
-    踩过的坑：池里是 dict 行，`row[0]` 抛 KeyError；而空库首次迁移不读行，
-    所以第一次永远正常、第二次（重启 / timer / provision）才炸。
+    由 `PostgresStore.migrate()` 通过 `AsyncConnection.run_sync` 调用，
+    事务提交由外层 `engine.begin()` 负责。DDL 是冻结基线：模型变更从
+    下一条迁移开始追加，不改这里的历史语句。
     """
-    if isinstance(row, dict):
-        return str(row["version"])
-    return str(row[0])
-
-
-def ensure_schema(conn: Connection[Any]) -> list[str]:
-    """幂等建表；返回本次实际应用的迁移版本。"""
-    conn.execute(
+    conn.exec_driver_sql(
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version    text PRIMARY KEY,
@@ -96,16 +89,16 @@ def ensure_schema(conn: Connection[Any]) -> list[str]:
         """
     )
     applied = {
-        _version_of(row) for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        str(version)
+        for version in conn.exec_driver_sql("SELECT version FROM schema_migrations").scalars()
     }
     newly = [version for version, _ in MIGRATIONS if version not in applied]
     for version, statements in MIGRATIONS:
         if version in applied:
             continue
         for statement in statements:
-            conn.execute(statement)
-        conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
-    conn.commit()
+            conn.exec_driver_sql(statement)
+        conn.exec_driver_sql("INSERT INTO schema_migrations (version) VALUES (%s)", (version,))
     return newly
 
 

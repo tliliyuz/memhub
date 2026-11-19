@@ -1,8 +1,7 @@
-"""迁移幂等性：dict 行与 tuple 行都必须成立。
+"""迁移幂等性：DDL 走冻结基线，`schema_migrations` 保证只应用一次。
 
-回归背景：连接池配置了 `row_factory=dict_row`，而 `ensure_schema` 用 `row[0]` 读版本，
-空库首次迁移不读行所以永远正常，第二次（重启 / timer / provision）立刻 KeyError。
-PG 测试在本机默认跳过，所以这里用假连接把两种行工厂都钉住。
+回归背景：旧实现从连接行里取版本，dict/tuple 两种行工厂曾导致第二次迁移 KeyError。
+现在 `ensure_schema` 只依赖执行器接口，用假连接把「第二次必须是空操作」钉住。
 """
 
 from __future__ import annotations
@@ -12,50 +11,39 @@ from typing import Any
 from memhub.ingest.migrations import MIGRATIONS, ensure_schema
 
 
+class FakeResult:
+    def __init__(self, rows: list[Any] | None = None) -> None:
+        self._rows = rows or []
+
+    def scalars(self) -> list[Any]:
+        return self._rows
+
+
 class FakeConn:
-    def __init__(self, *, dict_rows: bool) -> None:
-        self.dict_rows = dict_rows
+    def __init__(self) -> None:
         self.applied: list[str] = []
         self.ddl: list[str] = []
-        self._rows: list[Any] = []
 
-    def _row(self, version: str) -> Any:
-        return {"version": version} if self.dict_rows else (version,)
-
-    def execute(self, sql: str, params: tuple[object, ...] | None = None) -> FakeConn:
+    def exec_driver_sql(self, sql: str, params: tuple[object, ...] | None = None) -> FakeResult:
         stripped = " ".join(sql.split())
         if stripped.startswith("CREATE TABLE IF NOT EXISTS schema_migrations"):
-            return self
+            return FakeResult()
         if stripped.startswith("SELECT version FROM schema_migrations"):
-            self._rows = [self._row(version) for version in self.applied]
-            return self
+            return FakeResult(list(self.applied))
         if stripped.startswith("INSERT INTO schema_migrations"):
             assert params is not None
             self.applied.append(str(params[0]))
-            return self
+            return FakeResult()
         self.ddl.append(stripped)
-        return self
-
-    def fetchall(self) -> list[Any]:
-        return self._rows
-
-    def commit(self) -> None:
-        return None
+        return FakeResult()
 
 
 def _statement_count() -> int:
     return sum(len(statements) for _, statements in MIGRATIONS)
 
 
-def test_second_migration_is_a_noop_with_dict_rows() -> None:
-    conn = FakeConn(dict_rows=True)
+def test_second_migration_is_a_noop() -> None:
+    conn = FakeConn()
     assert ensure_schema(conn) == [version for version, _ in MIGRATIONS]
-    assert ensure_schema(conn) == [], "第二次必须是空操作，不能抛 KeyError"
-    assert len(conn.ddl) == _statement_count()
-
-
-def test_second_migration_is_a_noop_with_tuple_rows() -> None:
-    conn = FakeConn(dict_rows=False)
-    assert ensure_schema(conn) == [version for version, _ in MIGRATIONS]
-    assert ensure_schema(conn) == []
+    assert ensure_schema(conn) == [], "第二次必须是空操作，不能重复执行 DDL"
     assert len(conn.ddl) == _statement_count()

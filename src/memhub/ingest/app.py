@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -180,7 +181,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
 
-    def auth(authorization: str | None, device_id: str) -> None:
+    async def auth(authorization: str | None, device_id: str) -> None:
         """校验 token 与 device 绑定。
 
         生产：`v1.<device>.<HMAC>`，签名密钥来自环境，token 与设备一一对应；
@@ -195,7 +196,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         )
         if not accepted:
             raise ApiError(ErrorCode.TOKEN_INVALID, "invalid device token")
-        if not state.is_registered(device_id):
+        if not await state.is_registered(device_id):
             raise ApiError(ErrorCode.DEVICE_REVOKED, "device not registered")
 
     @app.exception_handler(ApiError)
@@ -226,7 +227,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/devices/register")
-    def register(
+    async def register(
         body: DeviceRegister,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
@@ -242,7 +243,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
             # 契约 0.3：生产的 device_id 必填；服务端自动生成只留给 dev stub。
             raise ApiError(ErrorCode.BAD_REQUEST, "device_id is required in prod")
         device_id = body.device_id or f"dev-{int(datetime.now(UTC).timestamp())}"
-        state.register_device(device_id, name=body.name, platform=body.platform)
+        await state.register_device(device_id, name=body.name, platform=body.platform)
         token = issue_device_token(token_secret, device_id) if token_secret else dev_token
         return _ok(
             {
@@ -253,27 +254,27 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         )
 
     @app.get("/ingest/cursor")
-    def cursor(
+    async def cursor(
         device_id: Annotated[str, Query()],
         source_id: Annotated[str, Query()],
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        auth(authorization, device_id)
-        source_rev, files = state.get_cursor(device_id, source_id)
+        await auth(authorization, device_id)
+        source_rev, files = await state.get_cursor(device_id, source_id)
         data = CursorData(
             source_id=source_id,
             source_rev=source_rev,
-            cursor=state.cursor_summary(device_id, source_id),
+            cursor=await state.cursor_summary(device_id, source_id),
             files=files,
         )
         return _ok(data.model_dump(mode="json"))
 
     @app.post("/ingest/raw")
-    def raw(
+    async def raw(
         body: IngestRequest,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        auth(authorization, body.device_id)
+        await auth(authorization, body.device_id)
         for batch_file in body.files:
             if "\x00" in batch_file.content:
                 raise ApiError(
@@ -284,7 +285,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         if raw_root is not None and quota is not None:
             # 配额在落盘前判断：满了就 1008 让采集端降级，绝不把磁盘写满。
             # 估算只算新 sha——重放已收下的批次不受影响，否则客户端会永久卡死。
-            incoming = estimate_new_bytes(raw_root, body)
+            incoming = await asyncio.to_thread(estimate_new_bytes, raw_root, body)
             try:
                 quota.check(incoming)
             except QuotaExceeded as exc:
@@ -300,21 +301,21 @@ def create_app(store: StateStore | None = None) -> FastAPI:
             # 先落盘再 apply：apply 的后续校验失败只会留下无害的内容寻址孤儿文件，
             # 而反过来（先 apply 后落盘）一旦落盘失败，重放就再也补不回落盘的字节。
             try:
-                save_batch(raw_root, body)
+                await asyncio.to_thread(save_batch, raw_root, body)
             except OSError:
                 # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
                 quota.invalidate()
                 raise
             quota.record(incoming)
-        result: IngestResult = state.apply(body)
+        result: IngestResult = await state.apply(body)
         return _ok(result.model_dump(mode="json"))
 
     @app.post("/ingest/heartbeat")
-    def heartbeat(
+    async def heartbeat(
         body: Heartbeat,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        auth(authorization, body.device_id)
+        await auth(authorization, body.device_id)
         return _ok({"commands": []})
 
     @app.get("/debug/sources")

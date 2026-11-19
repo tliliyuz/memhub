@@ -2,6 +2,8 @@
 
 生产实现是 `memhub.ingest.postgres.PostgresStore`（云上共享 PG 实例的独立 database）。
 本模块只定接口与内存实现；API 层只依赖 `StateStore` 协议，换实现不用改路由。
+接口是 **async** 的（ADR-0005）：生产实现走 SQLAlchemy async engine，内存实现是
+纯 dict 操作，不会阻塞事件循环。
 
 **这里不存知识**：知识是 `knowledge/**/*.md` + git（ADR-0002），原始增量是文件系统里的
 `raw_store/`。本模块的行都是「推到哪儿了、收过哪批、谁注册过」这类运行状态。
@@ -28,19 +30,19 @@ class CursorConflict(Exception):
 
 
 class StateStore(Protocol):
-    """运行态读写的全部契约。所有方法都必须能在多线程下安全调用。"""
+    """运行态读写的全部契约。所有方法都是 async，且可并发调用。"""
 
-    def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
+    async def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
         """幂等登记设备；已存在时只更新元数据，不动游标。"""
         ...
 
-    def is_registered(self, device_id: str) -> bool: ...
+    async def is_registered(self, device_id: str) -> bool: ...
 
-    def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]: ...
+    async def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]: ...
 
-    def cursor_summary(self, device_id: str, source_id: str) -> Cursor: ...
+    async def cursor_summary(self, device_id: str, source_id: str) -> Cursor: ...
 
-    def apply(self, request: IngestRequest) -> IngestResult:
+    async def apply(self, request: IngestRequest) -> IngestResult:
         """落一批增量：幂等重放、游标冲突、去重、更新游标，一次事务完成。"""
         ...
 
@@ -69,27 +71,27 @@ class MemoryStore:
         self.seen_shas: set[tuple[str, str]] = set()
 
     # -- devices ---------------------------------------------------------
-    def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
+    async def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
         self.devices[device_id] = {"name": name, "platform": platform}
 
-    def is_registered(self, device_id: str) -> bool:
+    async def is_registered(self, device_id: str) -> bool:
         return device_id in self.devices
 
     # -- cursors ---------------------------------------------------------
-    def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
+    async def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
         state = self.sources.get((device_id, source_id))
         if state is None:
             return 0, []
         return state.source_rev, sorted(state.files.values(), key=lambda f: f.path)
 
-    def cursor_summary(self, device_id: str, source_id: str) -> Cursor:
+    async def cursor_summary(self, device_id: str, source_id: str) -> Cursor:
         state = self.sources.get((device_id, source_id))
         if state is None:
             return Cursor()
         return Cursor(files=len(state.files), bytes=state.total_bytes, last_at=state.last_at)
 
     # -- ingest ----------------------------------------------------------
-    def apply(
+    async def apply(
         self,
         request: IngestRequest,
         *,
@@ -145,7 +147,7 @@ class MemoryStore:
             batch_id=request.batch_id,
             accepted=accepted,
             duplicates=duplicates,
-            cursor=self.cursor_summary(request.device_id, request.source_id),
+            cursor=await self.cursor_summary(request.device_id, request.source_id),
         )
         self.batches[key] = ReplayedBatch(at=now, result=result)
         return result
