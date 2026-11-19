@@ -142,7 +142,7 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 | POST | `/api/v1/kb/uploads` | `multipart/form-data`：`project`（知识库 id）+ `files`（可多个）；201 返回 `{batch_id, project, accepted:[{name, sha256, chars}], rejected:[{name, reason}], queued:true}` |
 | GET | `/api/v1/kb/uploads/{batch_id}` | `{batch_id, project, created_at, total, counts:{queued,processed,failed,missing}, files:[{name, sha256, status, attempts?}]}` |
 
-- 允许后缀 `.md` / `.txt` / `.jsonl`，UTF-8，单文件 ≤60000 字符，单批 ≤20 个文件；`project` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
+- 允许后缀 `.md` / `.txt` / `.jsonl`，UTF-8，单文件 ≤60000 字符，单批 ≤20 个文件；`project` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`，且必须是**已存在的知识库目录**（`<knowledge>/<project>/` 不存在 → 404/`1011`）——否则提炼时会凭空建出一个没有来源的空库。
 - 单个文件不合规进 `rejected`（`unsupported_type` / `not_utf8` / `empty` / `too_large` / `invalid_name`），其余文件照常接收；整批没有可接受的 → 422/`1012`，`data.rejected` 给出原因。
 - 内容按 sha256 内容寻址：同一内容重复上传只落一份，worker 也只提炼一次。
 - 落盘：`<DATA_DIR>/raw_store/kb-console/<project>/<sha[:2]>/<sha>.json`（`source_type=docs`，worker 按 docs profile 提炼到 `<knowledge>/<project>/`）；批次清单在 `<DATA_DIR>/uploads/<batch_id>.json`，`uploads/` 不在 worker 扫描范围内。

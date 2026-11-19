@@ -80,6 +80,16 @@ async def _dirs(store: KnowledgeStore) -> list[str]:
     return sorted(names)
 
 
+async def exists(store: KnowledgeStore, kb_id: str) -> bool:
+    """轻量存在性判断：真源根下一级目录即知识库（与 `_dirs` 的判定一致）。
+
+    不给上传路径用 `list_kbs`：它会逐库扫全部节点，只为判断一个 id 不值当。
+    """
+    if kb_id.startswith(("_", ".")):
+        return False
+    return await AsyncPath(store.root / kb_id).is_dir()
+
+
 async def _edges(store: KnowledgeStore, project: str) -> list[dict[str, Any]]:
     path = store.edges_path(project)
     if not await AsyncPath(path).is_file():

@@ -540,7 +540,11 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any] | JSONResponse:
         if uploads is None:
             return _uploads_unavailable()
-        return await uploads.accept(project, files)
+        return await uploads.accept(
+            project,
+            files,
+            project_exists=lambda kb_id: catalog.exists(api.store, kb_id),
+        )
 
     @app.get("/api/v1/kb/uploads/{batch_id}", response_model=None)
     async def upload_status(batch_id: str) -> dict[str, Any] | JSONResponse:

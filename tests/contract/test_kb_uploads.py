@@ -16,7 +16,7 @@ from memhub.kb.api import create_app
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, Path]]:
     knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
+    (knowledge / "memory-hub").mkdir(parents=True)
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
 
@@ -156,9 +156,21 @@ def test_rejects_invalid_project_and_too_many_files(env: tuple[TestClient, Path]
     assert too_many.json()["code"] == 1012
 
 
+def test_unknown_project_is_rejected(env: tuple[TestClient, Path]) -> None:
+    client, data_dir = env
+    response = client.post(
+        "/api/v1/kb/uploads",
+        data={"project": "not-there"},
+        files=[("files", ("a.md", b"# a", "text/plain"))],
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == 1011
+    assert not (data_dir / "raw_store" / "kb-console" / "not-there").exists()
+
+
 def test_queue_full_returns_1013(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
+    (knowledge / "memory-hub").mkdir(parents=True)
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
     monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))

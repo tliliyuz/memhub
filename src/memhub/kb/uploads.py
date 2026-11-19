@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -89,13 +89,23 @@ class KbUploads:
 
     # ---- 上传 ----
 
-    async def accept(self, project: str, files: Sequence[UploadFile]) -> dict[str, Any]:
+    async def accept(
+        self,
+        project: str,
+        files: Sequence[UploadFile],
+        *,
+        project_exists: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> dict[str, Any]:
         if not KB_ID_RE.match(project):
             raise UploadInvalid(
                 "知识库 id 只能用小写字母/数字/./_/-，且以字母或数字开头",
                 {"project": project},
                 status=422,
             )
+        # 只收已存在的知识库：拼错的 project 会在提炼时凭空建出一个空库目录，
+        # 管理台的库列表里就会多出一个没有节点、也说不清来源的幽灵库。
+        if project_exists is not None and not await project_exists(project):
+            raise UploadInvalid(f"知识库不存在: {project}", {"project": project}, status=404)
         if not files:
             raise UploadInvalid("至少上传一个文件", {"files": "empty"}, status=422)
         if len(files) > MAX_FILES:
@@ -183,6 +193,8 @@ class KbUploads:
                 for batch_file in accepted
             ],
         }
+        # raw 已落盘而清单写失败时，这个批次就查不到了；重传同一内容会拿到新
+        # batch_id，raw 按 sha 去重、不会重复提炼。宁可这样也不回滚已收到的数据。
         await self._write_manifest(manifest)
         return {
             "batch_id": batch_id,

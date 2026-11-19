@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（上传：只接受已存在的知识库）
+
+- `fix(kb)`：`POST /api/v1/kb/uploads` 校验 `project` 对应的 `<knowledge>/<project>/` 目录存在，不存在返回 404/`1011`。此前只校验 id 格式——拼错的 project 会被 worker 提炼时凭空建出一个空库目录，而管理台按真源一级目录枚举知识库，就会多出一个 0 节点的「幽灵库」。新增 `catalog.exists()` 轻量判断（不逐库扫节点）。
+- `docs`：`kb-admin-api.md` §4.7 写明存在性校验与 404 语义。
+- 验证：`pytest` 154 passed + 9 skipped（新增项目不存在与 LLM URL 归一用例）；`ruff check/format`、mypy strict（33 文件）、七个治理门禁全部通过。
+
 ## 2026-11-19（worker：LLM 端点兼容带 `/v1` 的 base_url）
 
 - `fix(worker)`：`MEMHUB_LLM_BASE_URL` 以 `/v1` 结尾时，客户端此前会拼成 `/v1/v1/messages`，端点返回 404 且错误信息看起来像凭据问题。现在两种写法都归一为 `/v1/messages`；新增 `tests/unit/test_llm.py` 覆盖带/不带 `/v1` 与结尾斜杠四种形态。
