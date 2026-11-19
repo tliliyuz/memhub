@@ -4,7 +4,7 @@
 
 - `fix(ingest)`：`ensure_schema` 用 `row[0]` 读版本，而连接池的行工厂是 `dict_row` → **第二次**迁移必 `KeyError`。空库首迁不读行，所以本地和首次部署都正常，线上 purge timer / `provision-device` / 容器重启才炸。现按行类型取 `version`；并补了 dict 行与 tuple 行两种假连接的回归测试（PG 测试本机默认跳过，这类问题只能靠它拦）。
 - `fix(cli)`：`memhub api` 启动时显式 `migrate()`（有 `MEMHUB_DB_URL` 时）并打印结果，容器重启不再依赖「有人先跑过一次 purge」才有表。
-- 验证：84 passed + 8 skipped（PG 契约用例本机默认跳过；本次靠假连接测试覆盖两种行工厂）。
+- 验证：本地 Docker PG 16 上连续三次 `migrate()` → `['0001_state'] / [] / []`，`register_device` 正常；全量 **92 passed**（含此前默认跳过的 8 条 PG 契约，`MEMHUB_TEST_DB_URL` 指向临时库）。另补 dict/tuple 两种行工厂的假连接回归测试。
 
 ## 2026-11-19（关闭开放注册）
 
