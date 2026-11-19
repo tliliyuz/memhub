@@ -3,8 +3,8 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-18 |
-| 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、编码约定 |
+| 最后更新 | 2026-11-19 |
+| 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、编码约定 |
 
 ## 1. 环境准备
 
@@ -64,6 +64,7 @@ prompts/      各 source_type 的抽取 profile
 | 格式 | `ruff format --check .` |
 | 类型 | `mypy src` |
 | 环境键集 | `python scripts/check_env_example_keys.py` |
+| 文档链接与结构 | `python scripts/check_document_format.py` |
 | 启动依赖 | `docker compose -f deploy/compose.yaml up -d` |
 | 本机运行 | `memhub --version` |
 
@@ -87,9 +88,20 @@ prompts/      各 source_type 的抽取 profile
 - 不提交 `.env`、`data/`、`raw_store/`、投影产物、真实会话内容。
 - **有意未采用**「禁止 `Co-Authored-By` 签名行」的检查：本仓库的运行环境会给提交自动追加署名，加检查会与工具链冲突。署名只存在于 git 元数据，不进入源码、文档或发布物；对外发布物由 `deploy/` 与镜像构建产出，不含提交信息。
 
-## 6. 分支
+## 6. 分支与 worktree 闭环
 
-`feat/<topic>` / `fix/<topic>` / `docs/<topic>`；完成后验证 → 合并 main → 删分支 → 更新 [CHANGELOG](CHANGELOG.md)。
+授权边界：
+
+- 未经负责人针对当前操作的明确授权，只执行只读 Git 命令（`status`、`diff`、`log`、`show`）。
+- 本地提交需要负责人针对当前操作的明确授权；一次授权不延伸到后续提交。
+- 推送远端、改写历史需要单独授权；本地提交授权不覆盖推送。
+- 不得在未授权时执行 `git reset --hard`、`git checkout --`、`git clean` 等破坏性操作。
+
+worktree 闭环（硬约束）：
+
+- **所有**代码修改（含功能、Bug 修复、文档与治理变更）都在独立分支 + 独立 worktree 中完成，禁止直接在 `main` 上实现。例外：负责人对当次操作显式授权的直提（如小型仓库的急救修复）。
+- worktree 必须由 `git worktree add .claude/worktree/<主题> -b <分支>` 创建；复制目录、只切分支不建 worktree 均不满足闭环。
+- 完成后：验证 → 提交 → 合并回 `main` → `git worktree remove` + `git branch -d` 清理 → 在 [CHANGELOG](../CHANGELOG.md) 记录实际变化；涉及迁移的，同时记录迁移态六要素。
 
 ## 7. 依赖引入
 
