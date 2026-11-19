@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDownLeft, ArrowUpRight, Plus, Save, Trash2, XCircle } from 'lucide-react'
+import { ArrowDownLeft, ArrowUpRight, Database, Plus, Save, Trash2, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   PREDICATES,
@@ -132,6 +132,15 @@ function NodeDetailPage() {
             {frontmatter.entity_kind && (
               <Badge variant='outline'>{frontmatter.entity_kind}</Badge>
             )}
+            <Button asChild variant='ghost' size='sm' className='h-6 px-2 text-xs'>
+              <Link
+                to='/kb/$project'
+                params={{ project: frontmatter.project }}
+                className='font-mono'
+              >
+                <Database className='size-3' /> {frontmatter.project}
+              </Link>
+            </Button>
             <span className='font-mono text-xs text-muted-foreground'>{detail.id}</span>
           </div>
           <h1 className='text-2xl font-bold tracking-tight'>{frontmatter.title}</h1>

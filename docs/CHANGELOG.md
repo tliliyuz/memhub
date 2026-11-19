@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-19（知识库隔离导航 + 自绘图谱 + 旧 wiki 导入）
+
+- `feat(kb)`：新增 `memhub.kb.catalog`——知识库（= 真源一级目录）成为一等公民：`GET/POST /api/v1/kb/projects`、`PATCH /api/v1/kb/projects/{project}`；显示名/描述存在 `<knowledge>/.kbs.json`，目录存在但未登记的库按目录名兜底。`GET /api/v1/kb/graph?project=` 直接读 markdown 真源返回**单库子图**（节点 + 解析后的边 + 度数 + 未解析边数），不依赖 `kg.json`。
+- `feat(web)`：管理台改成知识库优先：`/` 是知识库列表（新建/编辑/卡片入口），`/kb/$project` 概览（规模、类型分布、最近更新），`/kb/$project/nodes` 只列本库节点，`/kb/$project/graph` 只画本库图谱；侧栏按库动态展开（概览/节点/图谱），并保留全部节点与全局图谱。旧 `/nodes`、`/graph` 仍然可用。
+- `feat(web)`：图谱页不再内联 semantica explorer，改用 Cytoscape + fCoSE 自绘：kind 配色、度数定大小、`≤60` 节点直接显示标签，更大的图只在枢纽/搜索命中/悬停邻域显示；支持类型过滤、隐藏废弃/孤立、搜索定位、适应画布与重新布局；点节点弹详情卡并跳转节点页。全局图谱按知识库分色。
+- `fix(web)`：cytoscape 会注入未分层的 `.__________cytoscape_container{position:relative}`，优先级高于 Tailwind utilities；容器不能再靠 `absolute inset-0` 定位（会被压成 0 高、画布空白），改为 `size-full` 并用 `ResizeObserver` 同步尺寸。
+- `feat(scripts)`：新增 `scripts/import_legacy_wiki.py`，把旧 `me/wiki`（Obsidian 风格）一次性迁移到新真源：type → kind 映射、description 前置引用块、`[[wikilinks]]` 解析成 `related_to` 边、来源记 `wiki`、层级 `canonical`，最后统一 git 提交；幂等（已存在即跳过）。
+- 已导入 4 个库共 376 个节点、2620 条边：sdp-tag 206/1191、cloudworld 90/580、memory-hub 41/464、cloud-server 39/359；无法解析的 wiki 链接 176 条（只计数，不阻塞）。
+- 验证：`pytest` 129 passed + 8 skipped；`ruff check/format`、mypy strict、`pnpm build` 通过；ego-browser 实测知识库列表 5 个库、sdp-tag 图谱 206 节点/1191 边可读、点节点出详情卡、全局图谱按库分簇。
+
 ## 2026-11-19（本地管理台：kb-api + 前端 + 图谱）
 
 - 运行形态（用户决定）：**线上服务停掉，前后端全在本地，只有数据库连云端**，跑稳再上云。`deploy/README.md` §0 记录命令与 SSH 隧道约定。

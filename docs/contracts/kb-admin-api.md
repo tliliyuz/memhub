@@ -112,7 +112,24 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 审计 issue 类型：`contradiction`（矛盾）、`broken_link`（断链 / 未解析边）、`orphan`（孤立节点）、`low_confidence`（置信度低）、`stale`（长期未更新）。修复入口都是节点编辑。
 
-### 4.6 投影
+### 4.6 知识库（project）与子图
+
+真源按 `<knowledge>/<project>/` 隔离，**project 就是知识库**：`sdp-tag`、`memory-hub`
+各自一批节点，边文件也是每个库一份（`<project>/_edges.jsonl`），天然不会混库。
+
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| GET | `/api/v1/kb/projects` | `{items:[{id, name, description, nodes, edges, updated_at, created_at}], total}`；扫描真源一级目录，并合并 `.kbs.json` 里的显示名/描述 |
+| POST | `/api/v1/kb/projects` | 201；`{id, name?, description?}`；`id` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$` 且目录不存在，否则 `1012` |
+| PATCH | `/api/v1/kb/projects/{project}` | `{name?, description?}`；只改 `.kbs.json` 元数据，不动 markdown；库不存在 → `1011` |
+| GET | `/api/v1/kb/graph?project=` | `{project, nodes:[{id, title, kind, tier, entity_kind, tags, degree, updated_at}], edges:[{source, target, predicate}], unresolved_edges}` |
+
+- `graph` 只返回该库自己的节点；边端点按完整 id 或「库内唯一 slug」解析，解析不到的计入 `unresolved_edges`，不影响其他边。
+- `degree` 双向计数，节点按 `(-degree, id)` 排序，方便画图时先看枢纽。
+- 这个接口直接读 markdown 真源，**不依赖 `kg.json` 投影**；管理台的图谱页就用它（不再内联 semantica explorer）。
+- `.kbs.json` 是唯一由 kb-api 维护的元数据文件（显示名/描述），写操作同样走 `.memhub-write.lock`。
+
+### 4.7 投影
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
@@ -122,7 +139,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 - 写操作后默认 1.5s 防抖重建一次（`MEMHUB_KB_AUTO_REBUILD=0` 关闭）。
 - 设置了 `MEMHUB_KB_GRAPH_PORT` 时，重建完成后由 kb-api 重启托管的 explorer 子进程（explorer 只在启动时读 `kg.json`）。
 
-### 4.7 前端
+### 4.8 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 

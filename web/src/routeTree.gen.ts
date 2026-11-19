@@ -16,6 +16,9 @@ import { Route as AppGraphRouteImport } from './routes/_app.graph'
 import { Route as AppTrashRouteImport } from './routes/_app.trash'
 import { Route as AppNodesIndexRouteImport } from './routes/_app.nodes.index'
 import { Route as AppNodesSplatRouteImport } from './routes/_app.nodes.$'
+import { Route as AppKbProjectIndexRouteImport } from './routes/_app.kb.$project.index'
+import { Route as AppKbProjectGraphRouteImport } from './routes/_app.kb.$project.graph'
+import { Route as AppKbProjectNodesRouteImport } from './routes/_app.kb.$project.nodes'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -51,6 +54,21 @@ const AppNodesSplatRoute = AppNodesSplatRouteImport.update({
   path: '/nodes/$',
   getParentRoute: () => AppRoute,
 } as any)
+const AppKbProjectIndexRoute = AppKbProjectIndexRouteImport.update({
+  id: '/kb/$project/',
+  path: '/kb/$project/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppKbProjectGraphRoute = AppKbProjectGraphRouteImport.update({
+  id: '/kb/$project/graph',
+  path: '/kb/$project/graph',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppKbProjectNodesRoute = AppKbProjectNodesRouteImport.update({
+  id: '/kb/$project/nodes',
+  path: '/kb/$project/nodes',
+  getParentRoute: () => AppRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -59,6 +77,9 @@ export interface FileRoutesByFullPath {
   '/trash': typeof AppTrashRoute
   '/nodes/$': typeof AppNodesSplatRoute
   '/nodes/': typeof AppNodesIndexRoute
+  '/kb/$project/graph': typeof AppKbProjectGraphRoute
+  '/kb/$project/nodes': typeof AppKbProjectNodesRoute
+  '/kb/$project/': typeof AppKbProjectIndexRoute
 }
 export interface FileRoutesByTo {
   '/audit': typeof AppAuditRoute
@@ -67,6 +88,9 @@ export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
   '/nodes/$': typeof AppNodesSplatRoute
   '/nodes': typeof AppNodesIndexRoute
+  '/kb/$project/graph': typeof AppKbProjectGraphRoute
+  '/kb/$project/nodes': typeof AppKbProjectNodesRoute
+  '/kb/$project': typeof AppKbProjectIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -77,12 +101,33 @@ export interface FileRoutesById {
   '/_app/': typeof AppIndexRoute
   '/_app/nodes/$': typeof AppNodesSplatRoute
   '/_app/nodes/': typeof AppNodesIndexRoute
+  '/_app/kb/$project/graph': typeof AppKbProjectGraphRoute
+  '/_app/kb/$project/nodes': typeof AppKbProjectNodesRoute
+  '/_app/kb/$project/': typeof AppKbProjectIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/audit' | '/graph' | '/trash' | '/nodes/$' | '/nodes/'
+  fullPaths:
+    | '/'
+    | '/audit'
+    | '/graph'
+    | '/trash'
+    | '/nodes/$'
+    | '/nodes/'
+    | '/kb/$project/graph'
+    | '/kb/$project/nodes'
+    | '/kb/$project/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/audit' | '/graph' | '/trash' | '/' | '/nodes/$' | '/nodes'
+  to:
+    | '/audit'
+    | '/graph'
+    | '/trash'
+    | '/'
+    | '/nodes/$'
+    | '/nodes'
+    | '/kb/$project/graph'
+    | '/kb/$project/nodes'
+    | '/kb/$project'
   id:
     | '__root__'
     | '/_app'
@@ -92,6 +137,9 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/_app/nodes/$'
     | '/_app/nodes/'
+    | '/_app/kb/$project/graph'
+    | '/_app/kb/$project/nodes'
+    | '/_app/kb/$project/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -149,6 +197,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppNodesSplatRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/kb/$project/': {
+      id: '/_app/kb/$project/'
+      path: '/kb/$project'
+      fullPath: '/kb/$project/'
+      preLoaderRoute: typeof AppKbProjectIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/kb/$project/graph': {
+      id: '/_app/kb/$project/graph'
+      path: '/kb/$project/graph'
+      fullPath: '/kb/$project/graph'
+      preLoaderRoute: typeof AppKbProjectGraphRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/kb/$project/nodes': {
+      id: '/_app/kb/$project/nodes'
+      path: '/kb/$project/nodes'
+      fullPath: '/kb/$project/nodes'
+      preLoaderRoute: typeof AppKbProjectNodesRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
@@ -159,6 +228,9 @@ interface AppRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
   AppNodesSplatRoute: typeof AppNodesSplatRoute
   AppNodesIndexRoute: typeof AppNodesIndexRoute
+  AppKbProjectGraphRoute: typeof AppKbProjectGraphRoute
+  AppKbProjectNodesRoute: typeof AppKbProjectNodesRoute
+  AppKbProjectIndexRoute: typeof AppKbProjectIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -168,6 +240,9 @@ const AppRouteChildren: AppRouteChildren = {
   AppIndexRoute: AppIndexRoute,
   AppNodesSplatRoute: AppNodesSplatRoute,
   AppNodesIndexRoute: AppNodesIndexRoute,
+  AppKbProjectGraphRoute: AppKbProjectGraphRoute,
+  AppKbProjectNodesRoute: AppKbProjectNodesRoute,
+  AppKbProjectIndexRoute: AppKbProjectIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

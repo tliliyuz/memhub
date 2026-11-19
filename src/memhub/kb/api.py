@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, Kind, Predicate, QuestionStatus, Tier
-from memhub.kb import manage, query
+from memhub.kb import catalog, manage, query
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 
@@ -143,6 +143,21 @@ class RestoreRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     trash: str = Field(min_length=1)
+
+
+class KbCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    name: str = ""
+    description: str = ""
+
+
+class KbUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    description: str | None = None
 
 
 class _RebuildState:
@@ -357,6 +372,26 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/kb/stats")
     def stats() -> dict[str, Any]:
         return manage.stats(api.store)
+
+    # ---- 知识库（project）----
+
+    @app.get("/api/v1/kb/projects")
+    def list_projects() -> dict[str, Any]:
+        return catalog.list_kbs(api.store)
+
+    @app.post("/api/v1/kb/projects", status_code=201)
+    def create_project(body: KbCreate) -> dict[str, Any]:
+        return catalog.create_kb(
+            api.store, kb_id=body.id, name=body.name, description=body.description
+        )
+
+    @app.patch("/api/v1/kb/projects/{project}")
+    def update_project(project: str, body: KbUpdate) -> dict[str, Any]:
+        return catalog.update_kb(api.store, project, name=body.name, description=body.description)
+
+    @app.get("/api/v1/kb/graph")
+    def knowledge_graph(project: str = Query(min_length=1)) -> dict[str, Any]:
+        return catalog.graph(api.store, project)
 
     # ---- 节点 ----
 

@@ -163,6 +163,36 @@ def test_projection_status_counts_existing_graph(client: TestClient, tmp_path: P
     assert status["edges"] == 1
 
 
+def test_projects_and_scoped_graph(client: TestClient) -> None:
+    created = _create(client)
+    node_id = str(created["id"])
+
+    projects = client.get("/api/v1/kb/projects").json()
+    assert [item["id"] for item in projects["items"]] == ["memhub"]
+    assert projects["items"][0]["nodes"] == 1
+
+    made = client.post(
+        "/api/v1/kb/projects",
+        json={"id": "sdp-tag", "name": "SDP 标签", "description": "评测体系"},
+    )
+    assert made.status_code == 201
+    assert made.json()["name"] == "SDP 标签"
+
+    renamed = client.patch("/api/v1/kb/projects/sdp-tag", json={"description": "改过"})
+    assert renamed.json()["description"] == "改过"
+
+    graph = client.get("/api/v1/kb/graph", params={"project": "memhub"}).json()
+    assert [node["id"] for node in graph["nodes"]] == [node_id]
+    assert graph["edges"] == []
+
+    empty = client.get("/api/v1/kb/graph", params={"project": "sdp-tag"}).json()
+    assert empty["nodes"] == []
+
+    missing = client.get("/api/v1/kb/graph", params={"project": "nope"})
+    assert missing.status_code == 404
+    assert missing.json()["code"] == 1011
+
+
 def test_create_rejects_unknown_fields(client: TestClient) -> None:
     response = client.post("/api/v1/kb/nodes", json={"kind": "fact", "title": "x", "bogus": 1})
     assert response.status_code == 422

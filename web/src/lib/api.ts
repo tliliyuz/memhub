@@ -118,6 +118,40 @@ export type Projection = {
   stale: boolean
 }
 
+export type KnowledgeBase = {
+  id: string
+  name: string
+  description: string
+  nodes: number
+  edges: number
+  updated_at: string | null
+  created_at: string | null
+}
+
+export type GraphNode = {
+  id: string
+  title: string
+  kind: Kind
+  tier: Tier
+  entity_kind: EntityKind | null
+  tags: string[]
+  degree: number
+  updated_at: string
+}
+
+export type GraphEdge = {
+  source: string
+  target: string
+  predicate: Predicate
+}
+
+export type KnowledgeGraph = {
+  project: string
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+  unresolved_edges: number
+}
+
 export type TrashItem = {
   id: string
   title: string
@@ -279,6 +313,20 @@ export const api = {
     ),
   projection: () => request<Projection>('/api/v1/kb/projection'),
   rebuild: () => request<Projection>('/api/v1/kb/rebuild', { method: 'POST' }),
+  projects: () =>
+    request<{ items: KnowledgeBase[]; total: number }>('/api/v1/kb/projects'),
+  createProject: (payload: { id: string; name?: string; description?: string }) =>
+    request<KnowledgeBase>('/api/v1/kb/projects', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  updateProject: (id: string, payload: { name?: string; description?: string }) =>
+    request<KnowledgeBase>(`/api/v1/kb/projects/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  graph: (project: string) =>
+    request<KnowledgeGraph>(`/api/v1/kb/graph${queryString({ project })}`),
 }
 
 export const KINDS: { value: Kind; label: string }[] = [
