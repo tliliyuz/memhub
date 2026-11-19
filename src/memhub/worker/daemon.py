@@ -147,6 +147,9 @@ def process_file(
     file_path = str(payload.get("path", path.name))
 
     text = _document_text(payload)[: config.max_input_chars]
+    # 日志里要能区分「渲染后为空」和「模型拒抽」：两者在 `+0 new` 上完全同形，
+    # 排查时只能靠这一行字符数判断问题出在渲染还是提示词。
+    print(f"[worker] text {path.name}: {len(text)} chars", flush=True)
     if not text.strip():
         return 0, 0, 0
 

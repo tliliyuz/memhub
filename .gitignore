@@ -29,6 +29,9 @@ Thumbs.db
 *.log
 logs/
 
+# 本地端到端联调（raw_store / 投影 / 截图）
+.e2e/
+
 # build artifacts
 src/*.egg-info/
 build/

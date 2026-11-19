@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（服务端端到端联调）
+
+- 验证：按容器里的真实链路走了一遍——`/devices/register` → `/ingest/raw` 推送一枚真实 Claude Code 会话（190 KB）→ `raw_store` 内容寻址落盘 → `memhub worker --once` 调真实模型抽取 → `memhub project` 投影 → `memhub serve` explorer 页面渲染 **6 节点 / 4 边**（截图确认图谱画布、边标签、类型图例均正常）。
+- 观察：第一枚会话 190 KB 但绝大多数事件是 `attachment` / `queue-operation` 等非对话类型，`render_jsonl` 只留下 127 字符，模型返回 0 节点属预期；换一枚对话密集的会话即抽出 6 节点。说明「渲染后为空」和「模型拒抽」在 `+0 new` 这个输出上无法区分——后续可在 worker 日志里补渲染字符数。
+- `chore`：`.e2e/`（本地联调目录）加入 `.gitignore`。
+
 ## 2026-11-19（per-device token 与交付包）
 
 - `feat(ingest)`：`/devices/register` 改为签发 HMAC per-device token（`v1.<device>.<mac>`），token 与设备绑定；冒用/篡改返回 401。`MEMHUB_ENV=prod` 下缺 `MEMHUB_DEVICE_TOKEN_SECRET` 拒绝启动，且 `MEMHUB_DEV_TOKEN` 被代码忽略（对齐 ENVIRONMENT.md 既有约定）。此前 prod 下 register 会把共享 token 发给任何人。
