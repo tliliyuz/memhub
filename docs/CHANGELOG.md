@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-19（worker 守护进程）
+
+- `feat(worker)`：新增 `memhub worker`——raw_store → 抽取 → merge 进 markdown 真源的串行守护进程（池=1）。窗口门控 `--window 21:00-02:00`（本地时间、跨午夜），窗口外只休眠不占资源；`--once` 供 timer 单轮执行。
+- `feat(worker)`：启动先做 LLM 端点 TCP 自检，不可达 exit 2（不进循环空转）；运行期失败按指数退避（间隔 ×2^n，封顶 30 分钟）；单文件失败留在原地下轮重试，进程退出码 1 表示部分失败、0 全部成功。
+- `feat(worker)`：处理完成即原子移动到 `processed_raw/`（两个进程抢同一文件只有一个得手）；`.jsonl` 增量整段无法解析为事件时回退原文，不静默丢增量。
+- 验证：75 passed（含 PG 契约），ruff / format / mypy strict 通过。
+
 ## 2026-11-19（raw_store 落盘）
 
 - `feat(ingest)`：`/ingest/raw` 现在把原始增量真正落盘到 `<DATA_DIR>/raw_store/<device>/<source>/<sha[:2]>/<sha>.json`——内容寻址、原子写（tmp + replace）、重放/重复推送天然幂等；这是 worker 的唯一输入，此前只推进游标不落字节会丢数据。

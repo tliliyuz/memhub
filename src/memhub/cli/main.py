@@ -56,6 +56,16 @@ def main(argv: list[str] | None = None) -> int:
         "--keep-hours", type=int, default=25, help="保留最近 N 小时的批次（默认 25）"
     )
 
+    worker = sub.add_parser("worker", help="提炼守护进程：raw_store → 知识真源（串行）")
+    worker.add_argument("--once", action="store_true", help="只跑一轮后退出（timer 用）")
+    worker.add_argument(
+        "--window", default="21:00-02:00", help="处理窗口（本地时间，HH:MM-HH:MM；空串=全天）"
+    )
+    worker.add_argument("--interval", type=float, default=300.0, help="轮询间隔秒数")
+    worker.add_argument("--limit", type=int, default=20, help="每轮最多处理文件数")
+    worker.add_argument("--data-dir", default=None)
+    worker.add_argument("--knowledge-dir", default=None)
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -70,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
         return _mcp(args)
     if args.command == "purge-expired":
         return _purge_expired(args)
+    if args.command == "worker":
+        return _worker(args)
     parser.print_help()
     return 0
 
@@ -239,6 +251,42 @@ def _purge_expired(args: argparse.Namespace) -> int:
         store.close()
     print(f"已清理 {deleted} 条过期批次记录")
     return 0
+
+
+def _worker(args: argparse.Namespace) -> int:
+    """提炼守护进程。退出码：0 无失败；1 有失败；2 配置/LLM 端点错误。"""
+    from memhub.worker.daemon import WorkerConfig, probe_endpoint, run_forever, run_round
+
+    data_dir = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
+    knowledge_dir = args.knowledge_dir or os.environ.get("MEMHUB_KNOWLEDGE_DIR", "")
+    if not data_dir or not knowledge_dir:
+        print("缺少 MEMHUB_DATA_DIR / MEMHUB_KNOWLEDGE_DIR", file=sys.stderr)
+        return 2
+    base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
+    api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    if not base_url or not api_key:
+        print("缺少 MEMHUB_LLM_BASE_URL / MEMHUB_LLM_API_KEY", file=sys.stderr)
+        return 2
+    try:
+        probe_endpoint(base_url)
+    except LLMError as exc:
+        # 端点不可达时直接退出：进循环只会空转把日志写满（上次事故的教训）。
+        print(f"LLM 端点自检失败: {exc}", file=sys.stderr)
+        return 2
+
+    client, model = _llm_client()
+    config = WorkerConfig(
+        data_dir=Path(data_dir),
+        knowledge_dir=Path(knowledge_dir),
+        model=model,
+        window=args.window or None,
+        interval=args.interval,
+        limit=args.limit,
+    )
+    if args.once:
+        report = run_round(client, config)
+        return 1 if report.failed else 0
+    return run_forever(client, config)
 
 
 if __name__ == "__main__":
