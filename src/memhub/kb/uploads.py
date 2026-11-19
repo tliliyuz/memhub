@@ -94,7 +94,7 @@ class KbUploads:
         project: str,
         files: Sequence[UploadFile],
         *,
-        project_exists: Callable[[str], Awaitable[bool]] | None = None,
+        project_exists: Callable[[str], Awaitable[bool]],
     ) -> dict[str, Any]:
         if not KB_ID_RE.match(project):
             raise UploadInvalid(
@@ -104,7 +104,7 @@ class KbUploads:
             )
         # 只收已存在的知识库：拼错的 project 会在提炼时凭空建出一个空库目录，
         # 管理台的库列表里就会多出一个没有节点、也说不清来源的幽灵库。
-        if project_exists is not None and not await project_exists(project):
+        if not await project_exists(project):
             raise UploadInvalid(f"知识库不存在: {project}", {"project": project}, status=404)
         if not files:
             raise UploadInvalid("至少上传一个文件", {"files": "empty"}, status=422)
