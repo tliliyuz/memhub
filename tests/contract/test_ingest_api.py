@@ -189,11 +189,13 @@ def test_prod_ignores_dev_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setenv("MEMHUB_ENV", "prod")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", "shared-dev")
     with TestClient(create_app()) as fresh:
         token = fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+            headers={"Authorization": "Bearer prov-secret"},
         ).json()["data"]["device_token"]
         assert token != "shared-dev"
         denied = fresh.get(
@@ -202,6 +204,54 @@ def test_prod_ignores_dev_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
             headers={"Authorization": "Bearer shared-dev"},
         )
         assert denied.status_code == 401
+
+
+def test_prod_requires_provision_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """生产缺 provision token 拒绝启动——否则注册端点等于开放自助领 token。"""
+    monkeypatch.setenv("MEMHUB_ENV", "prod")
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.delenv("MEMHUB_PROVISION_TOKEN", raising=False)
+    with pytest.raises(RuntimeError, match="MEMHUB_PROVISION_TOKEN"):
+        create_app()
+
+
+def test_register_requires_provision_token_when_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
+    monkeypatch.delenv("MEMHUB_DEV_TOKEN", raising=False)
+    payload = {"device_id": DEVICE, "name": "test", "platform": "win32"}
+    with TestClient(create_app()) as fresh:
+        assert fresh.post("/devices/register", json=payload).status_code == 401
+        wrong = fresh.post(
+            "/devices/register", json=payload, headers={"Authorization": "Bearer nope"}
+        )
+        assert wrong.status_code == 401
+        ok = fresh.post(
+            "/devices/register",
+            json=payload,
+            headers={"Authorization": "Bearer prov-secret"},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["data"]["device_token"].startswith("v1.")
+
+
+def test_prod_requires_device_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """契约 0.3：生产 device_id 必填，服务端自动生成只留给 dev stub。"""
+    monkeypatch.setenv("MEMHUB_ENV", "prod")
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
+    with TestClient(create_app()) as fresh:
+        response = fresh.post(
+            "/devices/register",
+            json={"name": "test", "platform": "win32"},
+            headers={"Authorization": "Bearer prov-secret"},
+        )
+        assert response.status_code == 400
 
 
 def test_per_device_token_is_issued_and_scoped(

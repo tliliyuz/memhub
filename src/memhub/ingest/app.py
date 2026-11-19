@@ -137,6 +137,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     # 文档约定：prod 下忽略 MEMHUB_DEV_TOKEN，避免误配成共享后门。
     dev_token = "" if prod else os.environ.get("MEMHUB_DEV_TOKEN", "")
     token_secret = os.environ.get("MEMHUB_DEVICE_TOKEN_SECRET", "")
+    provision_token = os.environ.get("MEMHUB_PROVISION_TOKEN", "")
     data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
     if prod and not data_dir:
         # 生产没有 DATA_DIR 意味着原始增量无处可落：宁可不启动，也不要静默丢数据。
@@ -144,6 +145,10 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     if prod and not token_secret:
         # 没有签发密钥就只能共享 dev token，等于任何设备都能冒领。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DEVICE_TOKEN_SECRET")
+    if prod and not provision_token:
+        # 开放注册 = 任何人自助领 token 往知识库里灌内容。契约要求注册是用户态操作，
+        # 用户体系还没做，先用 provision token 把口子关上。
+        raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
     raw_root = Path(data_dir) if data_dir else None
     state = store or build_store()
     app = FastAPI(title="memhub ingest", version="0.1.0")
@@ -195,9 +200,21 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/devices/register")
-    def register(body: DeviceRegister) -> dict[str, object]:
+    def register(
+        body: DeviceRegister,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
         if not token_secret and not dev_token:
             raise ApiError(ErrorCode.INTERNAL, "server has no device token configured")
+        if provision_token:
+            supplied = ""
+            if authorization and authorization.startswith("Bearer "):
+                supplied = authorization.removeprefix("Bearer ")
+            if not hmac.compare_digest(supplied, provision_token):
+                raise ApiError(ErrorCode.TOKEN_INVALID, "invalid provision token")
+        if prod and body.device_id is None:
+            # 契约 0.3：生产的 device_id 必填；服务端自动生成只留给 dev stub。
+            raise ApiError(ErrorCode.BAD_REQUEST, "device_id is required in prod")
         device_id = body.device_id or f"dev-{int(datetime.now(UTC).timestamp())}"
         state.register_device(device_id, name=body.name, platform=body.platform)
         token = issue_device_token(token_secret, device_id) if token_secret else dev_token

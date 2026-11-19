@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,9 @@ from memhub.worker.prompts import load_profile
 from memhub.worker.render import render_jsonl
 
 SKELETON_PAGES = {"schema.md", "log.md", "purpose.md"}
+DEVICE_ID_RE = re.compile(
+    r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,6 +76,13 @@ def main(argv: list[str] | None = None) -> int:
     api = sub.add_parser("api", help="启动 ingest-api（绑定地址由 MEMHUB_HTTP_HOST 决定）")
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
 
+    provision = sub.add_parser(
+        "provision-device", help="在库里登记设备并把 per-device token 打到标准输出"
+    )
+    provision.add_argument("--device-id", required=True, help="客户端生成的 UUID v4")
+    provision.add_argument("--name", required=True)
+    provision.add_argument("--platform", required=True)
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -90,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         return _worker(args)
     if args.command == "api":
         return _api(args)
+    if args.command == "provision-device":
+        return _provision_device(args)
     parser.print_help()
     return 0
 
@@ -321,6 +334,38 @@ def resolve_bind_host(allow_non_loopback: bool = False) -> str:
         print(f"拒绝绑定非回环地址 {host}（需要 --allow-non-loopback 显式放行）", file=sys.stderr)
         raise SystemExit(2)  # 2 = 配置错误（与 worker 的退出码约定一致）
     return host
+
+
+def _provision_device(args: argparse.Namespace) -> int:
+    """运维侧登记设备并取回 token。
+
+    生产把 `/devices/register` 用 provision token 关掉了（开放注册等于任何人都能
+    往知识库灌内容）；桌面端用户态注册还没做，这一版由运维在服务器上执行本命令。
+    token 只打到标准输出：调用方自己写进 OS 凭据库，不得落 json / shell history。
+    """
+    from memhub.ingest.app import issue_device_token
+
+    if not DEVICE_ID_RE.match(args.device_id):
+        print(f"device_id 必须是 UUID v4：{args.device_id!r}", file=sys.stderr)
+        return 2
+    dsn = os.environ.get("MEMHUB_DB_URL", "")
+    secret = os.environ.get("MEMHUB_DEVICE_TOKEN_SECRET", "")
+    if not dsn:
+        print("缺少 MEMHUB_DB_URL（登记必须落到共享库）", file=sys.stderr)
+        return 2
+    if not secret:
+        print("缺少 MEMHUB_DEVICE_TOKEN_SECRET", file=sys.stderr)
+        return 2
+    from memhub.ingest.postgres import PostgresStore
+
+    store = PostgresStore(dsn, min_size=1, max_size=1)
+    try:
+        store.migrate()
+        store.register_device(args.device_id, name=args.name, platform=args.platform)
+    finally:
+        store.close()
+    print(issue_device_token(secret, args.device_id))
+    return 0
 
 
 def _api(args: argparse.Namespace) -> int:

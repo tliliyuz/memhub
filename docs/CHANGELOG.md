@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（关闭开放注册）
+
+- `fix(ingest)`：`/devices/register` 此前在生产也是完全开放的——任何人都能自助领一枚合法 per-device token 往 raw_store 灌内容，最终污染知识库。契约 0.3 要求注册是**用户态操作**（桌面端持 `user_key`），用户体系还没落地；这一版用 `MEMHUB_PROVISION_TOKEN` 把口子关上：prod 缺该键拒绝启动，注册必须带 `Authorization: Bearer <provision_token>`，否则 401。prod 下 `device_id` 也改为必填（服务端自动生成只留给 dev stub）。
+- `feat(cli)`：新增 `memhub provision-device --device-id --name --platform`——服务器上运维登记设备并把 token 打到标准输出（校验 UUID v4、要求 `MEMHUB_DB_URL` 与签发密钥）。token 不落文件，由调用方写进 OS 凭据库。
+- 验证：82 passed + 8 skipped；`.env.example` 与 `ENVIRONMENT.md` 键集 17 键双向一致。
+
 ## 2026-11-19（抽取容错与毒文件隔离）
 
 - `fix(worker)`：模型自造谓词（实测 `alternative_to`）此前会让**整篇文档**校验失败、留在队列无限重试且每轮重新付费。现在未知谓词收敛为 `related_to`（关系真实，只是用词越界），非法节点/边逐条丢弃并计数告警；只有「模型给了条目但一条都不合法」才判失败——那种情况说明契约跑偏，静默空结果会掩盖问题。
