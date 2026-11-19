@@ -12,7 +12,7 @@
 ## 2026-11-19（治理：Git 授权放开为仅限制远端操作）
 
 - `docs`：根入口 `CLAUDE.md` / `AGENTS.md` §2 与 [DEVELOPMENT](guides/DEVELOPMENT.md) §6 的 Git 授权边界改为：本地写操作（提交、合并、变基、切换、worktree、分支与标签管理、清理等）默认授权，无需逐次确认；仅远端操作（`push`、`fetch`、`pull`、`clone`、修改 `remote`、推送标签、创建或更新 PR/release 等）需要负责人针对当前操作单独授权。本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。
-- `feat(guard)`：新增 [.claude/hooks/guard-git-write.py](../.claude/hooks/guard-git-write.py) 并经 [.claude/settings.json](../.claude/settings.json) 注册 PreToolUse 钩子——只读命令与全部本地写操作放行；`push`、`fetch`、`pull`、`clone`、`ls-remote`、`remote` 改写、推送标签、`send-email`、`request-pull`、`lfs` 远端动作与 `archive --remote` 返回 `ask`。复合命令按 `&&`、`||`、`;`、`|` 逐段判定，`bash -c 'git push'` 旁路同样拦截；§5 的「不禁止 `Co-Authored-By`」保持不变，钩子不做署名拦截。
+- `feat(guard)`：新增 [.claude/hooks/guard-git-write.py](../.claude/hooks/guard-git-write.py) 并经 [.claude/settings.json](../.claude/settings.json) 注册 PreToolUse 钩子——只读命令与全部本地写操作放行；`push`、`fetch`、`pull`、`clone`、`ls-remote`、`remote` 改写、推送标签、`send-email`、`request-pull`、`lfs` 远端动作与 `archive --remote` 返回 `ask`。复合命令按 `&&`、`||`、`;`、`|` 逐段判定，`bash -c 'git push'` 旁路同样拦截；§5 的「不禁止 `Co-Authored-By`」当时保持不变，钩子不做署名拦截（§5 随后已改为禁止工具署名行，见同日治理条目）。
 - 验证：`python scripts/check_document_format.py`、`git diff --check` 通过；`CLAUDE.md` 与 `AGENTS.md` 字节一致；钩子探针覆盖放行与拦截两组共 30 条命令，`commit`、`reset --hard`、`clean -fd`、`branch -D`、`worktree add`、`tag -d`、`lfs install`、`submodule status`、`stash` 等放行，`push`、`fetch`、`pull`、`remote show/set-url`、`lfs push`、`archive --remote`、`submodule update`、`send-email`、`request-pull`、`bash -c "git push"`、`git status && git push` 均返回 `ask`；`grep "git push"` 与 `python -c "print('git push')"` 不误拦。
 
 ## 2026-11-19（全仓 I/O 异步化：kb / worker / mcp / cli）
