@@ -51,22 +51,33 @@
 - `memhub-disk-guard.timer`：按「已用/总量」算 80% 阈值（不写死可用值），告警附带 top-5 目录。
 - 应用日志：按大小滚动，保留 3 份；日志中不得出现 token、密钥、正文原文。
 
-## 6. systemd
+## 6. 运行形态（已定：容器）
 
-| unit | 作用 |
+| 组件 | 形态 |
 |:---|:---|
-| `memhub-ingest.service` | uvicorn ingest-api |
-| `memhub-worker.service` | 提炼 worker（串行） |
-| `memhub-kb.service` | kb-api + MCP |
-| `memhub-rebuild.timer` | 定期重建投影（kg/vector/fts） |
-| `memhub-disk-guard.timer` | 水位检查与告警 |
-| `memhub-git-gc.timer` | 真源仓库 gc |
+| ingest-api | compose 常驻容器 `memhub/app`，`127.0.0.1:8700:8700` |
+| worker | compose 常驻容器 `memhub/app-worker`，内部窗口门控 21:00-02:00 |
+| purge / rebuild | systemd timer 跑 `docker run --rm` 一次性子命令 |
+
+镜像从 `wheelhouse` 离线构建（`docker build --network=none`），不在机上编译、不连 PyPI。
+数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器经 `host-gateway`/回环访问；
+`MEMHUB_DB_URL` 等密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
+
+一次性子命令（timer 用）：
+
+| 命令 | 作用 | 退出码 |
+|:---|:---|:---|
+| `memhub purge-expired` | 删 25h 外的批次记录 | 0 正常 / 2 配置错 |
+| `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
+| `memhub project --knowledge-dir ... --out ...` | 重建图谱投影 | 0 / 2 |
+
+timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控，不需要 timer。
 
 ## 7. 部署顺序
 
 1. 改 daemon.json → reload docker
 2. 写 nginx location（保留 acme webroot）→ `nginx -t` → reload
 3. 起容器（compose up -d）
-4. 装 systemd unit/timer
+4. 装 systemd timer（purge / rebuild）
 5. 冒烟：`/healthz`、`/api/v1/ingest/cursor`、`/mcp` 握手
 6. 观察 24h 磁盘/内存曲线再开全量采集

@@ -1,0 +1,18 @@
+# memhub worker 镜像（离线可构建；含 semantica engine 依赖）
+# 构建：docker build --network=none -f deploy/Dockerfile.worker -t memhub/app-worker:0.1.0 .
+# 前置：deploy/dist/wheelhouse-worker/ 里有 memhub wheel 与全部依赖 wheel。
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/var/lib/memhub/home
+
+WORKDIR /app
+COPY deploy/dist/wheelhouse-worker /wheelhouse
+RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres,engine]==0.1.0"
+
+USER 999:987
+
+# 常驻进程，内部按 21:00-02:00 窗口门控；--once 供 systemd timer 单轮调用。
+CMD ["memhub", "worker", "--window", "21:00-02:00"]

@@ -1,0 +1,59 @@
+# memhub 部署模板（服务器 43.142.18.23）
+# 用法：docker compose -f /opt/memhub/app/compose.yml up -d
+#
+# 约束（与 cloud-server-86 对齐）：
+# - 日志必须限流：这台机曾因 json-file 无限制写满 26G 盘。
+# - 根文件系统只读；唯一可写卷是 /var/lib/memhub；/tmp 用限额 tmpfs。
+# - 容器内进程以主机 memhub 用户（999:987）运行，数据文件归属正确。
+# - **network_mode: host**：PostgreSQL 与 nginx 都只听宿主机 127.0.0.1，
+#   桥接网络里的容器够不到 loopback；host 网络下 ingest 必须显式绑 127.0.0.1，
+#   否则 0.0.0.0 会把 8700 暴露到公网。
+# - 公网统一由宿主机 nginx 进入。
+
+x-defaults: &defaults
+  user: "999:987"
+  env_file: /etc/memhub/env
+  network_mode: host
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  volumes:
+    - /var/lib/memhub:/var/lib/memhub
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: 50m
+      max-file: "3"
+
+services:
+  ingest:
+    <<: *defaults
+    image: memhub/app:0.1.0
+    container_name: memhub-ingest
+    command:
+      - python
+      - -m
+      - uvicorn
+      - memhub.ingest.app:create_app
+      - --factory
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8700"
+    mem_limit: 700m
+    memswap_limit: 700m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8700/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    <<: *defaults
+    image: memhub/app-worker:0.1.0
+    container_name: memhub-worker
+    # 窗口在容器内门控；错峰表：21:00-02:00 提炼，02:00-05:00 让给 eval L2。
+    command: ["memhub", "worker", "--window", "21:00-02:00", "--limit", "20"]
+    mem_limit: 1200m
+    memswap_limit: 1200m

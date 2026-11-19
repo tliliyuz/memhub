@@ -1,0 +1,21 @@
+# memhub ingest-api 镜像（离线可构建）
+# 构建：docker build --network=none -f deploy/Dockerfile.ingest -t memhub/app:0.1.0 .
+# 前置：deploy/dist/wheelhouse-ingest/ 里有 memhub wheel 与全部依赖 wheel。
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/var/lib/memhub/home
+
+WORKDIR /app
+COPY deploy/dist/wheelhouse-ingest /wheelhouse
+RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres]==0.1.0"
+
+# 与主机上的 memhub 系统用户一致；uid/gid 不在镜像 passwd 里也没关系（HOME 已显式设置）。
+USER 999:987
+EXPOSE 8700
+
+# 监听 0.0.0.0 以便 docker 端口映射；主机侧只发布到 127.0.0.1。
+CMD ["python", "-m", "uvicorn", "memhub.ingest.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8700"]
