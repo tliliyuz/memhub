@@ -1,8 +1,12 @@
 """知识库管理 API（kb-api，全异步 IO）。
 
 本地单用户管理台的后端：列表/搜索/详情/新增/编辑/废弃/归档删除/边编辑/审计，
-外加投影重建。所有写操作落到 markdown 真源（见 `memhub.kb.manage`），
+外加投影重建与知识库上传。所有写操作落到 markdown 真源（见 `memhub.kb.manage`），
 写完可选自动重建 `kg.json` 投影。
+
+上传（`/api/v1/kb/uploads`）把文件直接送进提炼队列：落盘走 `memhub.queue.rawstore`，
+与 `/ingest/raw` 共用同一套 raw_store 布局与配额，不经过采集协议（见 `memhub.kb.uploads`）。
+未配置 `MEMHUB_DATA_DIR` 时上传接口返回 503，其余接口不受影响。
 
 只绑回环地址、无鉴权：管理台与 worker、collector 跑在同一台机器上，
 公网入口（如果将来有）由 nginx + oauth2-proxy 负责，不在本层做会话。
@@ -23,23 +27,41 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 from anyio import Path as AsyncPath
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from memhub.contract import Edge, EntityKind, Kind, Predicate, QuestionStatus, Tier
+from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, QuestionStatus, Tier
 from memhub.kb import catalog, manage, proc, query
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
+from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
+from memhub.queue.rawstore import RawStoreQuota
 
 DEFAULT_GRAPH = "kb/kg.json"
 REBUILD_DEBOUNCE_SECONDS = 1.5
+DEFAULT_QUEUE_MAX_BYTES = 1024**3
+
+
+def _env_bytes(name: str, default: int) -> int:
+    """读字节数配置；非法值直接启动失败，而不是悄悄退回默认值。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{name} 必须是整数字节数: {raw!r}") from exc
+    if value <= 0:
+        raise SystemExit(f"{name} 必须为正数: {value}")
+    return value
+
 
 _log = logging.getLogger(__name__)
 
@@ -313,6 +335,12 @@ def create_app() -> FastAPI:
         auto_rebuild=auto_rebuild,
         on_rebuilt=graph_restarter.restart if graph_restarter else None,
     )
+    data_dir_raw = os.environ.get("MEMHUB_DATA_DIR", "").strip()
+    uploads: KbUploads | None = None
+    if data_dir_raw:
+        data_dir = Path(data_dir_raw).expanduser()
+        queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
+        uploads = KbUploads(data_dir, RawStoreQuota(data_dir / "raw_store", queue_max))
 
     app = FastAPI(title="memhub kb-api", version="0.1.0")
     app.state.kb = api
@@ -336,6 +364,34 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=404,
             content={"code": 1011, "message": str(exc), "data": {}},
+        )
+
+    @app.exception_handler(UploadInvalid)
+    async def on_upload_invalid(_: Request, exc: Exception) -> JSONResponse:
+        if not isinstance(exc, UploadInvalid):
+            raise exc
+        if exc.status >= 500:
+            code = int(ErrorCode.INTERNAL)
+        elif exc.status == 404:
+            code = int(ErrorCode.KB_NOT_FOUND)
+        else:
+            code = int(ErrorCode.KB_INVALID)
+        return JSONResponse(
+            status_code=exc.status,
+            content={"code": code, "message": exc.message, "data": exc.data},
+        )
+
+    @app.exception_handler(UploadQueueFull)
+    async def on_upload_queue_full(_: Request, exc: Exception) -> JSONResponse:
+        if not isinstance(exc, UploadQueueFull):
+            raise exc
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": int(ErrorCode.KB_QUEUE_FULL),
+                "message": "提炼队列已满，请稍后重试",
+                "data": {"used": exc.used, "limit": exc.limit, "incoming": exc.incoming},
+            },
         )
 
     async def _write(action: Awaitable[dict[str, Any]]) -> dict[str, Any]:
@@ -464,6 +520,33 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/kb/trash/restore")
     async def restore_trash(body: RestoreRequest) -> dict[str, Any]:
         return await _write(manage.restore_node(api.store, body.trash))
+
+    # ---- 上传（送进提炼队列）----
+
+    def _uploads_unavailable() -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": int(ErrorCode.INTERNAL),
+                "message": "未配置 MEMHUB_DATA_DIR，上传不可用",
+                "data": {},
+            },
+        )
+
+    @app.post("/api/v1/kb/uploads", status_code=201, response_model=None)
+    async def create_upload(
+        project: Annotated[str, Form(min_length=1)],
+        files: Annotated[list[UploadFile], File(...)],
+    ) -> dict[str, Any] | JSONResponse:
+        if uploads is None:
+            return _uploads_unavailable()
+        return await uploads.accept(project, files)
+
+    @app.get("/api/v1/kb/uploads/{batch_id}", response_model=None)
+    async def upload_status(batch_id: str) -> dict[str, Any] | JSONResponse:
+        if uploads is None:
+            return _uploads_unavailable()
+        return await uploads.status(batch_id)
 
     # ---- 检索与审计 ----
 

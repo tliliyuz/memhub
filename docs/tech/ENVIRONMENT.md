@@ -19,7 +19,7 @@
 |:---|:---|:---|:---|:---|
 | `MEMHUB_ENV` | 否 | `dev` | 全栈 | 非 `dev/prod` 启动失败 |
 | `MEMHUB_LOG_LEVEL` | 否 | `INFO` | 全栈 | 非法值启动失败 |
-| `MEMHUB_DATA_DIR` | 是 | — | ingest/worker | 启动失败 |
+| `MEMHUB_DATA_DIR` | 是 | — | ingest/worker；kb-api（可选） | ingest/worker 缺失启动失败；kb-api 缺失时上传接口返回 503，其余接口正常（也可用 `memhub kb --data-dir` 指定） |
 | `MEMHUB_KNOWLEDGE_DIR` | 是 | — | kb/worker | 不存在则启动失败（不自动创建真源目录） |
 | `MEMHUB_DB_URL` | 否 | 空（退回内存态，仅 dev） | ingest | 格式 `postgresql://user@host:port/db`；生产必填，prod 下为空启动失败 |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
@@ -31,7 +31,7 @@
 | `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
 | `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；`/devices/register` 必须带 `Authorization: Bearer <provision_token>`，否则 401——用户体系未落地前用它关闭开放注册 |
 | `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的共享 token；`MEMHUB_ENV=prod` 时**被忽略**（代码层不读取） |
-| `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest | raw_store 用量上限；超限返回 `1008`（只按新增 sha 计，重放不受影响）；非法值启动失败 |
+| `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest / kb-api | raw_store 用量上限；ingest 超限返回 `1008`、kb 上传返回 `1013`（只按新增 sha 计，重放不受影响）；非法值启动失败 |
 | `MEMHUB_PROCESSED_MAX_BYTES` | 否 | `2147483648` | purge-expired | `processed_raw/` 总量上限，配合 7 天保留期按最旧优先裁剪；非法值退出 2 |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |

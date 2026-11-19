@@ -76,6 +76,7 @@ raw 片段 ──► value_filter ──► extract ──► merge ──► gi
 ### kb-api
 - 检索：FTS + 向量 + 图邻接，三路融合；默认 `tier=canonical`。
 - 写入：只给治理 agent 用（见 mcp-tools.md）。
+- 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
 - 真源操作走 git：每次写产生一个 commit，可回滚。
 
 ### mcp-server

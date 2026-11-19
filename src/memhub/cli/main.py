@@ -103,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     kb.add_argument("--port", type=int, default=None, help="默认 8701（MEMHUB_KB_HTTP_PORT）")
     kb.add_argument("--web-dist", default=None, help="前端构建产物目录（含 index.html）")
     kb.add_argument(
+        "--data-dir",
+        default=None,
+        help="提炼队列数据目录（缺省 MEMHUB_DATA_DIR）；配置后开放 /api/v1/kb/uploads",
+    )
+    kb.add_argument(
         "--spawn-graph", action="store_true", help="同时托管 explorer，并在投影重建后自动重启"
     )
     kb.add_argument("--graph-port", type=int, default=8703, help="explorer 端口（默认 8703）")
@@ -475,6 +480,10 @@ async def _kb(args: argparse.Namespace) -> int:
         await AsyncPath(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
     )
     web_dist = args.web_dist or os.environ.get("MEMHUB_KB_WEB_DIST", "")
+    data_dir_raw = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
+    if data_dir_raw:
+        # 上传要落 raw_store：解析成绝对路径再交给 create_app，避免受启动目录影响。
+        os.environ["MEMHUB_DATA_DIR"] = str(await AsyncPath(data_dir_raw).resolve())
     os.environ["MEMHUB_KNOWLEDGE_DIR"] = str(knowledge)
     os.environ["MEMHUB_KB_GRAPH"] = str(graph_out)
     if web_dist:
@@ -487,6 +496,10 @@ async def _kb(args: argparse.Namespace) -> int:
         print(f"投影: {graph_out}", flush=True)
     if args.spawn_graph:
         print(f"explorer 由 kb-api 托管: http://127.0.0.1:{args.graph_port}/", flush=True)
+    if data_dir_raw:
+        print(f"上传→提炼队列: {os.environ['MEMHUB_DATA_DIR']}", flush=True)
+    else:
+        print("上传未启用（未配置 MEMHUB_DATA_DIR / --data-dir）", flush=True)
     await _run_server(
         "memhub.kb.api:create_app",
         host="127.0.0.1",

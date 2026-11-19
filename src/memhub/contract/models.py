@@ -232,6 +232,7 @@ class ErrorCode(IntEnum):
     KB_CONFLICT = 1010
     KB_NOT_FOUND = 1011
     KB_INVALID = 1012
+    KB_QUEUE_FULL = 1013
     INTERNAL = 2001
 
 

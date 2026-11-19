@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-19（知识库上传：文件直接进提炼队列）
+
+- `feat(kb)`：新增 `POST /api/v1/kb/uploads`（multipart：`project` + `files`）与 `GET /api/v1/kb/uploads/{batch_id}`——文件落 `<DATA_DIR>/raw_store/kb-console/<project>/`（`source_type=docs`），复用 `memhub.queue.rawstore` 的内容寻址布局与配额，不经过采集协议（device token/游标/批次幂等都不适用）；批次清单写 `<DATA_DIR>/uploads/<batch_id>.json`；状态按 `processed_raw` / `pending_review` / `state/failures.json` / raw_store 逐文件推导。限制 `.md/.txt/.jsonl`、≤60000 字符、单批 ≤20 文件。
+- `feat(contract)`：新增错误码 `1013 KB_QUEUE_FULL`（503，仅 KB 上传使用；`MEMHUB_QUEUE_MAX_BYTES` 超限）。
+- `feat(cli)`：`memhub kb` 新增 `--data-dir`（缺省 `MEMHUB_DATA_DIR`），解析成绝对路径后交给 kb-api；未配置时上传接口返回 503，其余接口与启动不受影响。
+- `docs`：`kb-admin-api.md` 升到 0.2，新增 §4.7 上传与 `1013`；`ENVIRONMENT.md` 的 `MEMHUB_DATA_DIR`、`MEMHUB_QUEUE_MAX_BYTES` 读取方加入 kb-api；architecture 的 kb-api 职责补上传入口。
+- `test`：新增 `tests/contract/test_kb_uploads.py`，覆盖落盘路径、逐文件状态推导、部分拒绝/整批拒绝、项目 id 校验、配额 1013、未知批次 404 与未配置 DATA_DIR 的 503。
+- 验证：`pytest` 149 passed + 9 skipped（PG 契约按开关跳过）；`ruff check/format`、mypy strict（33 文件）、七个治理门禁全部通过。
+
 ## 2026-11-19（分层：提炼队列落盘抽为 queue 模块）
 
 - `refactor(queue)`：`ingest/rawstore.py` 整体移入 `src/memhub/queue/rawstore.py`——内容寻址布局、原子写、`tree_size`/`estimate_new_bytes`、`RawStoreQuota` 行为不变，`ingest/app.py` 与单元测试只改 import。原因：kb-api 的知识库上传要落同一个 raw_store，但不该让 `kb/` 依赖采集协议层（鉴权、游标、<200ms 约束）。

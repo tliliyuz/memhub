@@ -1,7 +1,7 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.1
-> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、投影重建。
+> 版本: 0.2
+> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、投影重建。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
 ## 1. 定位
@@ -10,6 +10,7 @@
 - **markdown 是真源**：所有写操作都落到 `knowledge/` 下的 markdown + `_edges.jsonl`，写完可选触发投影重建（`kg.json`）。API 不直接改投影。
 - **单写者假设**：写操作与 worker 的 merge 共用进程间文件锁 `.memhub-write.lock`，同一时刻只有一个写者；锁超过 120s 视为陈旧接管。
 - 真源在 git 仓库内时，每次写成功尝试提交一次（非致命：提交失败不影响写操作返回）。
+- **上传是唯一不直接写真源的入口**：它把文件送进提炼队列（raw_store），由 worker 异步提炼成 markdown；接口返回只代表「已收到并排队」。
 
 启动：
 
@@ -30,7 +31,8 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 |:---|:---|:---|
 | `1010` KB_CONFLICT | 409 | 修订号不匹配（乐观并发） |
 | `1011` KB_NOT_FOUND | 404 | 节点 / 回收站条目 / 接口不存在 |
-| `1012` KB_INVALID | 400 / 422 | 请求字段非法、frontmatter 校验失败（`data.errors` 给出 `loc/msg/type`） |
+| `1012` KB_INVALID | 400 / 422 | 请求字段非法、frontmatter 校验失败（`data.errors` 给出 `loc/msg/type`）；上传整批无可用文件时 `data.rejected` 给出逐文件原因 |
+| `1013` KB_QUEUE_FULL | 503 | 提炼队列已满（`data:{used,limit,incoming}`），稍后重试；上传专用，与采集端的 `1008` 语义相同但属于本 API 的错误码区间 |
 | `2001` INTERNAL | 500 | 投影重建等内部错误 |
 
 请求体一律 `extra="forbid"`：多传字段返回 422 + `1012`。
@@ -129,7 +131,26 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 - 这个接口直接读 markdown 真源，**不依赖 `kg.json` 投影**；管理台的图谱页就用它（不再内联 semantica explorer）。
 - `.kbs.json` 是唯一由 kb-api 维护的元数据文件（显示名/描述），写操作同样走 `.memhub-write.lock`。
 
-### 4.7 投影
+### 4.7 上传（送进提炼队列）
+
+把文件直接投进提炼队列，与采集器推送共用同一套 raw_store 布局与配额；不需要
+device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb --data-dir`），
+未配置时两个接口都返回 503/`2001`，其余接口不受影响。
+
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| POST | `/api/v1/kb/uploads` | `multipart/form-data`：`project`（知识库 id）+ `files`（可多个）；201 返回 `{batch_id, project, accepted:[{name, sha256, chars}], rejected:[{name, reason}], queued:true}` |
+| GET | `/api/v1/kb/uploads/{batch_id}` | `{batch_id, project, created_at, total, counts:{queued,processed,failed,missing}, files:[{name, sha256, status, attempts?}]}` |
+
+- 允许后缀 `.md` / `.txt` / `.jsonl`，UTF-8，单文件 ≤60000 字符，单批 ≤20 个文件；`project` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`。
+- 单个文件不合规进 `rejected`（`unsupported_type` / `not_utf8` / `empty` / `too_large` / `invalid_name`），其余文件照常接收；整批没有可接受的 → 422/`1012`，`data.rejected` 给出原因。
+- 内容按 sha256 内容寻址：同一内容重复上传只落一份，worker 也只提炼一次。
+- 落盘：`<DATA_DIR>/raw_store/kb-console/<project>/<sha[:2]>/<sha>.json`（`source_type=docs`，worker 按 docs profile 提炼到 `<knowledge>/<project>/`）；批次清单在 `<DATA_DIR>/uploads/<batch_id>.json`，`uploads/` 不在 worker 扫描范围内。
+- 状态逐文件推导，与 worker 的搬运动作一致：`processed_raw/<rel>` → `processed`；`pending_review/<rel>` → `failed`；`state/failures.json[rel]` 有计数 → `failed`（带 `attempts`）；仍在 raw_store → `queued`。worker 只在时间窗口内搬运，白天长时间 `queued` 属正常排队，不是故障。
+- 队列总量受 `MEMHUB_QUEUE_MAX_BYTES` 约束，超限 503/`1013`。kb-api 与 ingest-api 是两个进程、各持一份 30 秒刷新的用量缓存，跨进程并发推送/上传可能短暂超出上限（容忍一个刷新窗口）。
+- 批次 id 非法或清单不存在 → 404/`1011`。
+
+### 4.8 投影
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
@@ -139,7 +160,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 - 写操作后默认 1.5s 防抖重建一次（`MEMHUB_KB_AUTO_REBUILD=0` 关闭）。
 - 设置了 `MEMHUB_KB_GRAPH_PORT` 时，重建完成后由 kb-api 重启托管的 explorer 子进程（explorer 只在启动时读 `kg.json`）。
 
-### 4.8 前端
+### 4.9 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 
