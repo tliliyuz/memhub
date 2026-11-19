@@ -18,7 +18,8 @@
 | ingest-api | `127.0.0.1:8700` | `/api/v1/ingest/*`、`/devices/*` |
 | kb-api | `127.0.0.1:8701` | `/api/v1/kb/*` |
 | mcp | `127.0.0.1:8702` | `/mcp` |
-| explorer | `127.0.0.1:8703` | `/` |
+| explorer | `127.0.0.1:8703` | `/`（oauth2-proxy 凭据到位后；此前 nginx 不挂） |
+| oauth2-proxy | `127.0.0.1:4180` | 不直接对外；nginx `/oauth2/*` 与 `auth_request` 判决 |
 
 段位约定：memhub 用 8700-8710，只监听 loopback。同机 AI 评测中台用 8200-8299，互不重叠。
 `eval.memhub.work` 归评测中台，但需用户配 DNS 与证书；配好之前它只跑回环。
@@ -74,6 +75,8 @@ nginx 需要再加一段（explorer，只读可视化）：
 
 ```nginx
 location / {
+    auth_request /__explorer_auth;          # oauth2-proxy 凭据到位前不启用
+    error_page 401 = @explorer_login;
     proxy_pass http://127.0.0.1:8703;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
@@ -84,6 +87,13 @@ location / {
     proxy_read_timeout 60s;
 }
 ```
+
+完整 vhost 草案（含 `/oauth2/*`、`/__explorer_auth` 判决段、ACME webroot 与
+`/api/v1/` 的优先级说明）在 `deploy/nginx/memhub.vhost.conf`。
+认证网关已定为 **oauth2-proxy**（用户拍板，不做 basic auth 过渡）：
+凭据（GitHub OAuth App 的 client_id / client_secret / cookie secret）到位前
+`location /` 保持现状，explorer 容器先跑但不挂 nginx。cookie secret 32 字节
+随机（`openssl rand -base64 32`），只写 `/etc/memhub/env`（0600）。
 
 注意 explorer 的 API 只允许回环访问（`SEMANTICA_ALLOW_ANONYMOUS=true` 下无鉴权），
 nginx 把它挂到公网前请确认只暴露只读页面；需要登录墙时在 nginx 层加 basic auth。

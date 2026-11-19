@@ -9,6 +9,13 @@
 #   桥接网络里的容器够不到 loopback；host 网络下 ingest 必须显式绑 127.0.0.1，
 #   否则 0.0.0.0 会把 8700 暴露到公网。
 # - 公网统一由宿主机 nginx 进入。
+#
+# oauth2-proxy（认证网关，用户已拍板）：
+# - 监听 127.0.0.1:4180，不发布端口；公网只经 nginx 443。
+# - 凭据（CLIENT_ID / CLIENT_SECRET / COOKIE_SECRET）走 env_file 注入，
+#   /etc/memhub/env 0600；COOKIE_SECRET = `openssl rand -base64 32`，泄露即全员会话失效。
+# - 凭据未填时本服务启动会失败——这是有意的：凭据到位前 nginx 不挂 explorer，
+#   不需要它先跑起来。`docker compose up -d ingest worker explorer` 不含本服务。
 
 x-defaults: &defaults
   user: "999:987"
@@ -92,6 +99,41 @@ services:
     memswap_limit: 384m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8703/', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # 认证网关（用户已拍板：oauth2-proxy，explorer 不做 basic auth 过渡）。
+  # 凭据槽位留空：OAUTH2_PROXY_CLIENT_ID / OAUTH2_PROXY_CLIENT_SECRET /
+  # OAUTH2_PROXY_COOKIE_SECRET 只存在于 /etc/memhub/env（0600），不进 git/compose。
+  # COOKIE_SECRET 必须是 32 字节随机数的 base64：
+  #   openssl rand -base64 32
+  # 公网 443 → nginx /oauth2/* 与受保护的 / → 127.0.0.1:4180；本服务不发布端口。
+  oauth2-proxy:
+    <<: *defaults
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    container_name: memhub-oauth2-proxy
+    command:
+      - --http-address=127.0.0.1:4180
+      - --provider=github
+      - --upstream=http://127.0.0.1:8703
+      - --redirect-url=https://memhub.work/oauth2/callback
+      - --email-domain=*
+      - --cookie-name=memhub_oauth2
+      - --cookie-secure=true
+      - --cookie-httponly=true
+      - --pass-access-token=false
+      - --scope=user:email
+    environment:
+      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 128m
+    healthcheck:
+      # 探的是本进程监听，不带上游：上游挂了由 nginx 与 explorer 自己的健康检查暴露。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:4180/ping || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
