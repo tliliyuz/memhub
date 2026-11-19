@@ -8,7 +8,9 @@
 ## 2026-11-19（知识库隔离导航 + 自绘图谱 + 旧 wiki 导入）
 
 - `feat(kb)`：新增 `memhub.kb.catalog`——知识库（= 真源一级目录）成为一等公民：`GET/POST /api/v1/kb/projects`、`PATCH /api/v1/kb/projects/{project}`；显示名/描述存在 `<knowledge>/.kbs.json`，目录存在但未登记的库按目录名兜底。`GET /api/v1/kb/graph?project=` 直接读 markdown 真源返回**单库子图**（节点 + 解析后的边 + 度数 + 未解析边数），不依赖 `kg.json`。
-- `feat(web)`：管理台改成知识库优先：`/` 是知识库列表（新建/编辑/卡片入口），`/kb/$project` 概览（规模、类型分布、最近更新），`/kb/$project/nodes` 只列本库节点，`/kb/$project/graph` 只画本库图谱；侧栏按库动态展开（概览/节点/图谱），并保留全部节点与全局图谱。旧 `/nodes`、`/graph` 仍然可用。
+- `feat(web)`：管理台改成知识库优先：`/` 是知识库列表（新建/编辑/卡片入口），`/kb/$project` 概览（规模、类型分布、最近更新），`/kb/$project/nodes` 只列本库节点，`/kb/$project/graph` 只画本库图谱。层级入口收敛在知识库页：侧栏**不再平铺各库**，只保留「全部知识库 / 全部节点 / 全局图谱」；旧 `/nodes`、`/graph` 仍然可用。
+- `feat(web)`：知识库概览、节点列表、图谱和节点详情都加了面包屑与「返回」按钮（浏览器无历史时回落到上一级路径），深层跳转不再只能靠侧栏回一级。
+- `fix(web)`：节点表格的 facet `filterFn` 签名写错（把 Row 当成被比较的值），从概览点「类型分布」会得到空列表；改为 `(row, columnId, filterValue)` 后按类型/层级筛选正常，页脚计数也改为表格实际筛选结果。节点详情的置信度空值判断从 `=== null` 改为 `== null`，不再显示 `undefined`。
 - `feat(web)`：图谱页不再内联 semantica explorer，改用 Cytoscape + fCoSE 自绘：kind 配色、度数定大小、`≤60` 节点直接显示标签，更大的图只在枢纽/搜索命中/悬停邻域显示；支持类型过滤、隐藏废弃/孤立、搜索定位、适应画布与重新布局；点节点弹详情卡并跳转节点页。全局图谱按知识库分色。
 - `fix(web)`：cytoscape 会注入未分层的 `.__________cytoscape_container{position:relative}`，优先级高于 Tailwind utilities；容器不能再靠 `absolute inset-0` 定位（会被压成 0 高、画布空白），改为 `size-full` 并用 `ResizeObserver` 同步尺寸。
 - `feat(scripts)`：新增 `scripts/import_legacy_wiki.py`，把旧 `me/wiki`（Obsidian 风格）一次性迁移到新真源：type → kind 映射、description 前置引用块、`[[wikilinks]]` 解析成 `related_to` 边、来源记 `wiki`、层级 `canonical`，最后统一 git 提交；幂等（已存在即跳过）。

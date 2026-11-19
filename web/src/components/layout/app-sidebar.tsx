@@ -7,7 +7,6 @@ import {
   SidebarRail,
 } from '@/components/ui/sidebar'
 import { sidebarData } from './data/sidebar-data'
-import { KbNavGroup } from './kb-nav-group'
 import { NavGroup } from './nav-group'
 import { NavUser } from './nav-user'
 import { AppTitle } from './app-title'
@@ -20,7 +19,6 @@ export function AppSidebar() {
         <AppTitle />
       </SidebarHeader>
       <SidebarContent>
-        <KbNavGroup />
         {sidebarData.navGroups.map((props) => (
           <NavGroup key={props.title} {...props} />
         ))}

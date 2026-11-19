@@ -9,6 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   type ColumnDef,
   type ColumnFiltersState,
+  type FilterFn,
   type SortingState,
   flexRender,
   getCoreRowModel,
@@ -58,6 +59,7 @@ import {
   DataTablePagination,
   DataTableToolbar,
 } from '@/components/data-table'
+import { BackButton } from '@/components/layout/back-button'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
@@ -69,10 +71,16 @@ type NodesBrowserProps = {
   project?: string
   initialKind?: Kind
   initialTier?: Tier
+  /** 面包屑（知识库 > 库 > 节点），提供时会在标题上方显示并带返回按钮。 */
+  breadcrumbs?: React.ReactNode
+  /** 没有浏览历史时的返回目标。 */
+  backTo?: string
 }
 
-const facetFilter = (value: unknown, selected: unknown) =>
-  Array.isArray(selected) && selected.includes(value)
+// TanStack Table 的 filterFn 签名是 (row, columnId, filterValue)，
+// 不是 (value, selected)——按后者写会把整张表过滤成空。
+const facetFilter: FilterFn<NodeSummary> = (row, columnId, value) =>
+  Array.isArray(value) && value.includes(row.getValue(columnId))
 
 function buildColumns(showProject: boolean): ColumnDef<NodeSummary>[] {
   const columns: ColumnDef<NodeSummary>[] = [
@@ -155,6 +163,8 @@ export function NodesBrowser({
   project,
   initialKind,
   initialTier,
+  breadcrumbs,
+  backTo,
 }: NodesBrowserProps) {
   const showProject = !project
   const columns = useMemo(() => buildColumns(showProject), [showProject])
@@ -196,6 +206,8 @@ export function NodesBrowser({
     getFacetedUniqueValues: getFacetedUniqueValues(),
     initialState: { pagination: { pageSize: 20 } },
   })
+  // 列筛选（类型/层级/标签）在表格模型里生效，页脚要和表格实际显示的数量一致。
+  const visibleCount = table.getFilteredRowModel().rows.length
 
   return (
     <>
@@ -206,7 +218,13 @@ export function NodesBrowser({
 
       <Main className='flex flex-1 flex-col gap-4'>
         <div className='flex flex-wrap items-end justify-between gap-2'>
-          <div>
+          <div className='min-w-0'>
+            {breadcrumbs && (
+              <div className='mb-1 flex items-center gap-1 text-xs text-muted-foreground'>
+                <BackButton fallbackTo={backTo ?? '/nodes'} />
+                {breadcrumbs}
+              </div>
+            )}
             <h1 className='text-2xl font-bold tracking-tight'>{heading}</h1>
             <p className='text-sm text-muted-foreground'>{description}</p>
           </div>
@@ -283,8 +301,8 @@ export function NodesBrowser({
 
             <div className='flex items-center justify-between text-xs text-muted-foreground'>
               <span>
-                共 {filtered.length} 个节点
-                {filtered.length !== data.length && `（从 ${data.length} 中筛选）`}
+                共 {visibleCount} 个节点
+                {visibleCount !== data.length && `（从 ${data.length} 中筛选）`}
               </span>
               <DataTablePagination table={table} />
             </div>

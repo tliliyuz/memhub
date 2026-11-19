@@ -6,6 +6,7 @@ import { KINDS, api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { BackButton } from '@/components/layout/back-button'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
@@ -33,6 +34,7 @@ function KbGraphPage() {
       <Main fixed fluid className='flex h-[calc(100svh-4rem)] flex-col gap-2 p-4'>
         <div className='flex flex-wrap items-center justify-between gap-2'>
           <div className='flex items-center gap-1 text-sm'>
+            <BackButton fallbackTo={`/kb/${project}`} />
             <Link to='/' className='text-muted-foreground hover:underline'>
               知识库
             </Link>

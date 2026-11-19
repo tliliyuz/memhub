@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDownLeft, ArrowUpRight, Database, Plus, Save, Trash2, XCircle } from 'lucide-react'
+import { ArrowDownLeft, ArrowUpRight, ChevronRight, Database, Plus, Save, Trash2, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   PREDICATES,
@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Textarea } from '@/components/ui/textarea'
+import { BackButton } from '@/components/layout/back-button'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
@@ -66,7 +67,7 @@ function NodeDetailPage() {
     setTags(node.data.frontmatter.tags.join(', '))
     setTier(node.data.frontmatter.tier)
     setConfidence(
-      node.data.frontmatter.confidence === null
+      node.data.frontmatter.confidence == null
         ? ''
         : String(node.data.frontmatter.confidence),
     )
@@ -99,13 +100,19 @@ function NodeDetailPage() {
   })
 
   if (node.isLoading) {
-    return <p className='p-8 text-sm text-muted-foreground'>加载中…</p>
+    return (
+      <div className='space-y-2 p-8'>
+        <BackButton fallbackTo='/nodes' />
+        <p className='text-sm text-muted-foreground'>加载中…</p>
+      </div>
+    )
   }
   if (node.isError || !node.data) {
     return (
-      <div className='p-8'>
+      <div className='space-y-3 p-8'>
+        <BackButton fallbackTo='/nodes' />
         <p className='text-sm text-destructive'>{node.error?.message ?? '节点不存在'}</p>
-        <Button asChild variant='outline' className='mt-4'>
+        <Button asChild variant='outline'>
           <Link to='/nodes'>返回列表</Link>
         </Button>
       </div>
@@ -124,6 +131,30 @@ function NodeDetailPage() {
 
       <Main className='flex flex-1 flex-col gap-4'>
         <div className='space-y-1'>
+          <div className='flex flex-wrap items-center gap-1 text-xs text-muted-foreground'>
+            <BackButton fallbackTo={`/kb/${frontmatter.project}`} />
+            <Link to='/' className='hover:underline'>
+              知识库
+            </Link>
+            <ChevronRight className='size-3' />
+            <Link
+              to='/kb/$project'
+              params={{ project: frontmatter.project }}
+              className='font-mono hover:underline'
+            >
+              {frontmatter.project}
+            </Link>
+            <ChevronRight className='size-3' />
+            <Link
+              to='/kb/$project/nodes'
+              params={{ project: frontmatter.project }}
+              className='hover:underline'
+            >
+              节点
+            </Link>
+            <ChevronRight className='size-3' />
+            <span className='truncate'>{frontmatter.title}</span>
+          </div>
           <div className='flex flex-wrap items-center gap-2'>
             <Badge variant='outline'>{frontmatter.kind}</Badge>
             <Badge variant={frontmatter.tier === 'canonical' ? 'default' : 'secondary'}>
