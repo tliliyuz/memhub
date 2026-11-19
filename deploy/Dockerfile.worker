@@ -12,6 +12,11 @@ WORKDIR /app
 COPY deploy/dist/wheelhouse-worker /wheelhouse
 RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres,engine]==0.1.0"
 
+# prompts 在仓库根、不在 wheel 里；`worker/prompts.py` 按 site-packages 的
+# parents[3] 解析成 /usr/local/lib/python3.12/prompts。不烘进镜像时 worker
+# 启动即 FileNotFoundError（adb2fc3 首次 --once 已踩）。换 Python 小版本要同步路径。
+COPY prompts /usr/local/lib/python3.12/prompts
+
 USER 999:987
 
 # 常驻进程，内部按 21:00-02:00 窗口门控；--once 供 systemd timer 单轮调用。

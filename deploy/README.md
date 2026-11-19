@@ -81,6 +81,9 @@ docker build --network=none -f deploy/Dockerfile.worker -t memhub/app-worker:0.1
 docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 ```
 
+构建上下文根目录还必须含仓库根的 `prompts/`（worker 镜像会 `COPY prompts /usr/local/lib/python3.12/prompts`；
+wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）。
+
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
 `MEMHUB_DB_URL` 等密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
 schema 由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；

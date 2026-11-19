@@ -8,7 +8,8 @@
 - `fix(deploy)`：`deploy/nginx/memhub.vhost.conf` 的 `/` 与新增的 `^~ /api/v1/kb/` 都反代到 8701 并走 `auth_request /__memhub_auth`；页面未登录 302 到 GitHub，API 未登录返回 401 JSON（`1040`），fetch 不再被 302 带到 HTML 登录页。`/api/v1/`（采集）保持设备 token 自鉴权。
 - `docs(deploy)`：README 更新为本版形态；明确 `memhub mcp` 是 stdio 服务、不占 8702；schema 仍只有 `0001_state`，由 ingest 启动时幂等应用，无独立迁移命令。
 - `fix(deploy)`：oauth2-proxy 原先显式写了 `--scope=user:email`，覆盖掉 GitHub provider 的默认 `user:email read:org`；v7.6.0 的 `EnrichSession` 会无条件列组织（`/user/orgs`），于是回调 500 `You need at least read:org scope`。删掉该覆盖（用默认 scope），并加 `--whitelist-domain=memhub.work`，否则 `rd=https://memhub.work/` 被判非法、登录后只能回 `/`。
-- 验收（2026-11-19 19:13 CST）：首个真实设备 `APPLESAY004` 首推成功——collector `accepted 1, duplicates 0`，913,661 字节会话 → 线上 raw_store 970,899 字节（JSON 批次信封），`/ingest/cursor`、`/ingest/raw`、`/ingest/heartbeat` 均 200。
+- `fix(deploy)`：worker 镜像缺 `prompts/`——`worker/prompts.py` 按 `parents[3]` 解析，pip 安装后落在 `/usr/local/lib/python3.12/prompts`，而 Dockerfile 只装了 wheel，首次 `worker --once` 直接 `FileNotFoundError: sessions.md`。`Dockerfile.worker` 补 `COPY prompts /usr/local/lib/python3.12/prompts`。（后续应把 prompts 作为包数据随 wheel 分发，去掉对安装路径的推断；本版按镜像修复保持与线上一致。）
+- 验收（2026-11-19 19:13 CST）：首个真实设备 `APPLESAY004` 首推成功——collector `accepted 1, duplicates 0`，913,661 字节会话 → 线上 raw_store 970,899 字节（批次 JSON 信封 + 字符串转义，非 base64；e4 逐字节核对）。`/ingest/cursor`、`/ingest/raw`、`/ingest/heartbeat` 均 200。
 
 ## 2026-11-19（web：概览限高 + 图谱缩放性能）
 
