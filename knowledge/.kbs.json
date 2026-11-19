@@ -1,0 +1,24 @@
+{
+  "kbs": [
+    {
+      "id": "cloud-server",
+      "name": "cloud-server",
+      "description": "自托管记忆栈的服务器运维快照：腾讯云 CVM 与百度智能云宿主机"
+    },
+    {
+      "id": "cloudworld",
+      "name": "cloudworld",
+      "description": "memhub 云上部署与面板 API 踩坑：SNI/备案、bridge 端口、打包分层"
+    },
+    {
+      "id": "memory-hub",
+      "name": "memory-hub",
+      "description": "Memory Hub / Magpie 级联、Team Brain MCP 与 TencentDB Agent Memory 接入"
+    },
+    {
+      "id": "sdp-tag",
+      "name": "sdp-tag",
+      "description": "电商商品 AI 打标系统：术语、架构、评测 judge、回调/MQ 与排障信号"
+    }
+  ]
+}
