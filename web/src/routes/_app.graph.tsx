@@ -93,11 +93,11 @@ function GlobalGraphPage() {
 
           {selected && (
             <div className='pointer-events-none absolute inset-x-0 bottom-0 flex justify-end p-3'>
-              <Card className='pointer-events-auto w-80'>
-                <CardContent className='space-y-2 py-3'>
+              <Card className='pointer-events-auto w-[min(92vw,28rem)]'>
+                <CardContent className='space-y-3 py-4'>
                   <div className='flex items-start justify-between gap-2'>
                     <div className='min-w-0'>
-                      <div className='text-sm font-medium break-words'>
+                      <div className='text-base font-medium break-words'>
                         {selected.title}
                       </div>
                       <div className='mt-1 flex flex-wrap items-center gap-1'>
@@ -122,7 +122,7 @@ function GlobalGraphPage() {
                       <X className='size-3.5' />
                     </Button>
                   </div>
-                  <div className='font-mono text-[10px] break-all text-muted-foreground'>
+                  <div className='font-mono text-[11px] break-all text-muted-foreground'>
                     {selected.id}
                   </div>
                   <div className='grid grid-cols-2 gap-2'>

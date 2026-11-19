@@ -17,7 +17,7 @@ kg.json
 vector/
 fts.db
 state/
-data/
+/data/
 
 # editor / OS
 .vscode/

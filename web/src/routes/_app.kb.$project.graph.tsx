@@ -92,11 +92,11 @@ function KbGraphPage() {
 
           {selected && (
             <div className='pointer-events-none absolute inset-x-0 bottom-0 flex justify-end p-3'>
-              <Card className='pointer-events-auto w-80'>
-                <CardContent className='space-y-2 py-3'>
+              <Card className='pointer-events-auto w-[min(92vw,28rem)]'>
+                <CardContent className='space-y-3 py-4'>
                   <div className='flex items-start justify-between gap-2'>
                     <div className='min-w-0'>
-                      <div className='text-sm font-medium break-words'>
+                      <div className='text-base font-medium break-words'>
                         {selected.title}
                       </div>
                       <div className='mt-1 flex flex-wrap items-center gap-1'>
@@ -129,14 +129,14 @@ function KbGraphPage() {
                       {selected.tags.map((tag) => (
                         <span
                           key={tag}
-                          className='rounded bg-muted px-1.5 py-0.5 text-[10px]'
+                          className='rounded bg-muted px-2 py-0.5 text-[11px]'
                         >
                           {tag}
                         </span>
                       ))}
                     </div>
                   )}
-                  <div className='font-mono text-[10px] break-all text-muted-foreground'>
+                  <div className='font-mono text-[11px] break-all text-muted-foreground'>
                     {selected.id}
                   </div>
                   <Button asChild size='sm' className='w-full'>
