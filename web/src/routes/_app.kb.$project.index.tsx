@@ -59,8 +59,23 @@ function KbOverviewPage() {
   }
   const total = graph.data?.nodes.length ?? 0
   const kinds = KINDS.filter((item) => (counts.get(item.value) ?? 0) > 0)
-  const updatedAt =
-    kb?.updated_at ?? graph.data?.nodes[0]?.updated_at ?? null
+  // 兜底必须取最大 updated_at：图谱节点没有排序保证，nodes[0] 可能是很久以前的节点，
+  // 会让「最近更新」落后于下方「最近更新的节点」列表（尤其 projects 尚未返回时）。
+  const graphUpdatedAt = (graph.data?.nodes ?? []).reduce<string | null>(
+    (latest, node) =>
+      latest === null || node.updated_at > latest ? node.updated_at : latest,
+    null,
+  )
+  const updatedAt = [
+    kb?.updated_at,
+    recent.data?.items[0]?.updated_at,
+    graphUpdatedAt,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .reduce<string | null>(
+      (latest, value) => (latest === null || value > latest ? value : latest),
+      null,
+    )
 
   if (projects.isError) {
     return (

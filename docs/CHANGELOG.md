@@ -5,6 +5,7 @@
 - `feat(web)`：知识库页新增「上传文档」（ADR-0006）：目标库下拉、多选/拖拽 `.md`/`.txt`/`.jsonl`（单批 ≤20）、逐文件校验与拒绝原因；提交后轮询 `GET /api/v1/kb/uploads/{batch_id}`（5s，`counts.queued=0` 即停），只展示「已入队 / 已提炼 / 失败 / 缺失」，不直接编辑节点。队列满（1013）与未配置 DATA_DIR（503/2001）在弹窗内呈现。
 - `feat(web)`：`web/src/lib/api.ts` 新增 `uploadDocuments` / `uploadStatus`；`request()` 对 `FormData` 请求不再误设 `Content-Type: application/json`。
 - `fix(web)`：图谱页（全局与单库）选中节点的详情卡从固定 `w-80`（320px）放大到 `min(92vw, 28rem)`，标题字号与 id/标签字号上调，长标题更易读。
+- `fix(web)`：知识库概览的「最近更新」改为在库统计、最近节点列表与图谱节点三处取最大时间——`projects` 返回前或缓存较旧时，旧代码用未排序的 `nodes[0]` 兜底，日期会比下方「最近更新的节点」列表落后。
 - 验证：`pnpm typecheck`、`pnpm build` 通过；ego-browser 实测上传弹窗（空选择禁用、空库提示、提交后终态显示「已提炼」）与图谱详情卡放大效果，标签页已关闭。后端真实链路由 export-memhub-4e 以 `worker --once` 验证：batch `10d8af13…`，+13 节点 / 11 边，cloudworld 变为 103 节点 / 591 边。
 
 ## 2026-11-19（治理：Git 钩子覆盖 PowerShell）
