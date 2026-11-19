@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（oauth2-proxy 网关交付物）
+
+- `feat(deploy)`：用户拍板 explorer 暴露用 **oauth2-proxy**（不做 basic auth 过渡）。compose 新增网关服务（v7.6.0 固定 tag，host 网络监听 127.0.0.1:4180 不发端口，128m，read_only+tmpfs+日志限流照容器标准）；凭据槽位只走 env_file，**凭据缺失启动失败是有意的**，日常 `up -d` 不含此服务。
+- `feat(deploy)`：新增 `deploy/nginx/memhub.vhost.conf` 终稿草案——评审指出的现网缺失段已全部补齐（port-80 301、www server_name、安全头 always、TLS 1.2/1.3 加固、client_max_body_size 50m/20m、limit_req 全套与 429 JSON 信封、`/api/v1/healthz` 公网 404、/portal alias、upstream keepalive）。`location /` 双态切换用 `[ON]`/`[OFF]` 标注；**旧 sso 三个 location 显式移除**（后端已死，评审第 8 点）。limit_req zone 定义依赖 http 块既有配置，文件头有标注。
+- 验证：`/api/v1/` 刻意不过认证网关——collector 是设备 token 自鉴权的哑管道，套人类 OAuth 会话破坏「采集端无状态」约束。
+
 ## 2026-11-19（processed_raw 裁剪）
 
 - `fix(worker)`：`processed_raw/` 是 raw_store 的**完整副本**——文件处理成功后被移动过去，不受 `MEMHUB_QUEUE_MAX_BYTES` 约束。配额堵住了写入口，副本却会无限增长，磁盘照样能被写满（与上次事故同一条路径）。`purge-expired` 现在按「7 天保留期 + `MEMHUB_PROCESSED_MAX_BYTES`（默认 2 GiB）」双阈值、最旧优先裁剪，并回收空目录。
