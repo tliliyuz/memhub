@@ -31,7 +31,7 @@
 | `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
 | `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；`/devices/register` 必须带 `Authorization: Bearer <provision_token>`，否则 401——用户体系未落地前用它关闭开放注册 |
 | `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的共享 token；`MEMHUB_ENV=prod` 时**被忽略**（代码层不读取） |
-| `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest/worker | 超限返回 `1008` |
+| `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest | raw_store 用量上限；超限返回 `1008`（只按新增 sha 计，重放不受影响）；非法值启动失败 |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |
 

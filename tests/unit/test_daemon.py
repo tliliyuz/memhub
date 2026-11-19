@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from pathlib import Path
@@ -19,6 +20,7 @@ from memhub.worker.daemon import (
     iter_pending,
     parse_window,
     probe_endpoint,
+    purge_pending_review,
     run_forever,
     run_round,
 )
@@ -217,3 +219,35 @@ def test_failure_counter_resets_after_success(tmp_path: Path) -> None:
     assert run_round(FakeClient(error=LLMError("boom")), config).failed == 1
     assert run_round(FakeClient(), config).processed == 1
     assert json.loads(config.failures_path.read_text(encoding="utf-8")) == {}
+
+
+def test_purge_pending_review_removes_only_expired(tmp_path: Path) -> None:
+    """隔离区必须有人清理：毒文件不清理就是无限占盘。"""
+    root = tmp_path / "pending_review" / "dev" / "cc-sessions"
+    root.mkdir(parents=True)
+    old = root / "old.json"
+    fresh = root / "fresh.json"
+    old.write_text("old-bytes", encoding="utf-8")
+    fresh.write_text("new", encoding="utf-8")
+    stale = (datetime.now(UTC) - timedelta(days=40)).timestamp()
+    os.utime(old, (stale, stale))
+
+    removed, size = purge_pending_review(tmp_path, older_than=timedelta(days=30))
+
+    assert (removed, size) == (1, len("old-bytes"))
+    assert not old.exists()
+    assert fresh.exists()
+    assert purge_pending_review(tmp_path / "missing", older_than=timedelta(days=30)) == (0, 0)
+
+
+def test_purge_pending_review_reclaims_empty_dirs(tmp_path: Path) -> None:
+    root = tmp_path / "pending_review" / "dev" / "cc-sessions"
+    root.mkdir(parents=True)
+    stale_file = root / "old.json"
+    stale_file.write_text("x", encoding="utf-8")
+    stale = (datetime.now(UTC) - timedelta(days=40)).timestamp()
+    os.utime(stale_file, (stale, stale))
+
+    purge_pending_review(tmp_path, older_than=timedelta(days=30))
+
+    assert not (tmp_path / "pending_review").exists()

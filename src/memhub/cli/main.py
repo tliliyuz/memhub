@@ -59,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
     purge.add_argument(
         "--keep-hours", type=int, default=25, help="保留最近 N 小时的批次（默认 25）"
     )
+    purge.add_argument(
+        "--pending-review-days",
+        type=int,
+        default=30,
+        help="pending_review/ 隔离文件保留天数（默认 30；0 表示不清理）",
+    )
 
     worker = sub.add_parser("worker", help="提炼守护进程：raw_store → 知识真源（串行）")
     worker.add_argument("--once", action="store_true", help="只跑一轮后退出（timer 用）")
@@ -255,13 +261,23 @@ def _mcp(args: argparse.Namespace) -> int:
 
 
 def _purge_expired(args: argparse.Namespace) -> int:
-    """批次 TTL 清理：给 systemd timer 单独调用，不拉起 API 进程。"""
-    dsn = os.environ.get("MEMHUB_DB_URL", "")
-    if not dsn:
-        print("MEMHUB_DB_URL 未设置；内存实现无需清理", file=sys.stderr)
-        return 0
+    """批次 TTL 与隔离区清理：给 systemd timer 单独调用，不拉起 API 进程。"""
     from datetime import timedelta
 
+    from memhub.worker.daemon import purge_pending_review
+
+    data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
+    if data_dir and args.pending_review_days > 0:
+        # 隔离区不属于批次记录，DSN 缺省时也要清理：毒文件不清理会无限占盘。
+        files, size = purge_pending_review(
+            Path(data_dir), older_than=timedelta(days=args.pending_review_days)
+        )
+        print(f"已清理隔离区 {files} 个文件（{size} 字节）")
+
+    dsn = os.environ.get("MEMHUB_DB_URL", "")
+    if not dsn:
+        print("MEMHUB_DB_URL 未设置；内存实现无需清理批次", file=sys.stderr)
+        return 0
     from memhub.ingest.postgres import PostgresStore
 
     store = PostgresStore(dsn, min_size=1, max_size=1)

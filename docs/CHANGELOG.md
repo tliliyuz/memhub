@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-19（raw_store 配额与隔离区清理）
+
+- `feat(ingest)`：实现 `MEMHUB_QUEUE_MAX_BYTES`——它此前只写在文档里，代码从不读取，等于 raw_store 没有上限。现在 `/ingest/raw` 落盘前按「当前占用 + 本批新增」判断，超限返回 **1008/503**，采集端按契约降级；被拒批次一个字节都不落。新增量只算未落盘的 sha，**重放已收下的批次在满额时仍成功**，否则客户端会被永久卡死在一条已收下的数据上。用量缓存每 30 秒重扫一次纠偏（worker 夜间搬走文件后缓存会偏大），写盘失败则强制下次重扫。
+- `feat(worker)`：实现 `pending_review/` 清理策略——`memhub purge-expired` 每天顺带删除超过 30 天（`--pending-review-days`）的隔离文件并回收空目录。隔离区此前只进不出，和 raw_store 一起会把磁盘预算吃穿。
+- `docs(deploy)`：README 的「4 GiB raw_store 硬上限」改为「上限由 `MEMHUB_QUEUE_MAX_BYTES` 决定，`.env.example` 1 GiB，磁盘预算硬顶 4 GiB」——此前文档承诺的限额在代码里根本不存在。
+- 验证：93 passed + 8 skipped（PG 契约仍按 `MEMHUB_TEST_DB_URL` 开关）；ruff / format / mypy strict 通过。新增用例覆盖超限 1008 不落盘、重放放行、非法值启动失败、隔离区按 mtime 清理与空目录回收。
+
 ## 2026-11-19（explorer 上容器）
 
 - `feat(deploy)`：compose 增加 `explorer` 服务——复用 worker 镜像（需要 engine extra），`memhub serve --graph /var/lib/memhub/kb/kg.json --port 8703 --no-browser`，`HOME`/`TMPDIR` 指到 tmpfs，`restart: on-failure:5`。图谱不存在时 `serve` exit 2，因此**部署顺序是「先 rebuild 再起 explorer」**，写进 README §6/§7，并补了 nginx `/` 片段。

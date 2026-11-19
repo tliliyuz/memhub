@@ -31,7 +31,12 @@ from memhub.contract import (
     IngestResult,
     SourcesConfig,
 )
-from memhub.ingest.rawstore import save_batch
+from memhub.ingest.rawstore import (
+    QuotaExceeded,
+    RawStoreQuota,
+    estimate_new_bytes,
+    save_batch,
+)
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
 
 HTTP_STATUS: dict[ErrorCode, int] = {
@@ -122,6 +127,23 @@ def verify_device_token(secret: str, token: str, device_id: str) -> bool:
     return hmac.compare_digest(expected, token)
 
 
+DEFAULT_QUEUE_MAX_BYTES = 1024**3
+
+
+def _env_bytes(name: str, default: int) -> int:
+    """读字节数配置；非法值直接启动失败，而不是悄悄退回默认值。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} 必须是整数（字节数）：{raw!r}") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} 必须大于 0：{value}")
+    return value
+
+
 def build_store() -> StateStore:
     """`MEMHUB_DB_URL` 有值即用 PG；否则退回内存实现（仅 dev）。"""
     dsn = os.environ.get("MEMHUB_DB_URL", "")
@@ -150,6 +172,10 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         # 用户体系还没做，先用 provision token 把口子关上。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
     raw_root = Path(data_dir) if data_dir else None
+    # 即便当前没配 DATA_DIR 也要校验：配错的值应该在启动时就炸，而不是等哪天补上
+    # DATA_DIR 后突然把某个上限换成另一个数。
+    queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
+    quota = RawStoreQuota(raw_root / "raw_store", queue_max) if raw_root is not None else None
     state = store or build_store()
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
@@ -255,10 +281,31 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                     "binary content is not accepted",
                     {"path": batch_file.path},
                 )
-        if raw_root is not None:
+        if raw_root is not None and quota is not None:
+            # 配额在落盘前判断：满了就 1008 让采集端降级，绝不把磁盘写满。
+            # 估算只算新 sha——重放已收下的批次不受影响，否则客户端会永久卡死。
+            incoming = estimate_new_bytes(raw_root, body)
+            try:
+                quota.check(incoming)
+            except QuotaExceeded as exc:
+                raise ApiError(
+                    ErrorCode.QUEUE_BACKPRESSURE,
+                    "raw_store quota exceeded",
+                    {
+                        "used_bytes": exc.used,
+                        "limit_bytes": exc.limit,
+                        "incoming_bytes": exc.incoming,
+                    },
+                ) from exc
             # 先落盘再 apply：apply 的后续校验失败只会留下无害的内容寻址孤儿文件，
             # 而反过来（先 apply 后落盘）一旦落盘失败，重放就再也补不回落盘的字节。
-            save_batch(raw_root, body)
+            try:
+                save_batch(raw_root, body)
+            except OSError:
+                # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
+                quota.invalidate()
+                raise
+            quota.record(incoming)
         result: IngestResult = state.apply(body)
         return _ok(result.model_dump(mode="json"))
 

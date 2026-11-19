@@ -7,8 +7,17 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from memhub.contract import BatchFile, IngestRequest
-from memhub.ingest.rawstore import batch_dir, save_batch
+from memhub.ingest.rawstore import (
+    QuotaExceeded,
+    RawStoreQuota,
+    batch_dir,
+    estimate_new_bytes,
+    save_batch,
+    tree_size,
+)
 
 NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
 
@@ -63,3 +72,45 @@ def test_failed_write_leaves_no_tmp_files(tmp_path: Path) -> None:
     save_batch(tmp_path, request)
     leftovers = list(tmp_path.rglob("*.tmp"))
     assert leftovers == []
+
+
+def test_quota_counts_only_new_content(tmp_path: Path) -> None:
+    """已落盘的 sha 重放时不该占配额，否则客户端会被永久卡在一条已收下的数据上。"""
+    request = _request("hello")
+    save_batch(tmp_path, request)
+    assert estimate_new_bytes(tmp_path, request) == 0
+    assert estimate_new_bytes(tmp_path, _request("hello", path="sessions/other.jsonl")) == 0
+    assert estimate_new_bytes(tmp_path, _request("different")) > 0
+
+
+def test_quota_uses_actual_tree_size(tmp_path: Path) -> None:
+    save_batch(tmp_path, _request("hello"))
+    expected = sum(
+        path.stat().st_size for path in (tmp_path / "raw_store").rglob("*") if path.is_file()
+    )
+    assert expected > 0
+    assert tree_size(tmp_path / "raw_store") == expected
+
+
+def test_quota_rejects_when_full_and_tracks_writes(tmp_path: Path) -> None:
+    quota = RawStoreQuota(tmp_path / "raw_store", 1000, refresh_seconds=3600)
+    first = estimate_new_bytes(tmp_path, _request("hello"))
+    quota.check(first)
+    save_batch(tmp_path, _request("hello"))
+    quota.record(first)
+
+    with pytest.raises(QuotaExceeded) as excinfo:
+        quota.check(2000)
+    assert excinfo.value.limit == 1000
+    assert excinfo.value.used >= first
+
+    # 重放已收下的内容（增量 0）仍应放行。
+    quota.check(0)
+
+
+def test_quota_rescans_after_invalidate(tmp_path: Path) -> None:
+    quota = RawStoreQuota(tmp_path / "raw_store", 10_000, refresh_seconds=3600)
+    assert quota.used_bytes() == 0
+    save_batch(tmp_path, _request("hello"))
+    quota.invalidate()
+    assert quota.used_bytes() > 0

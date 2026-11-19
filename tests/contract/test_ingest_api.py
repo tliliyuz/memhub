@@ -296,3 +296,55 @@ def test_per_device_token_is_issued_and_scoped(
             headers={"Authorization": f"Bearer {tampered}"},
         )
         assert bad.status_code == 401
+
+
+def test_raw_store_quota_returns_1008_before_writing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """raw_store 满了返回 1008 而不是写满磁盘；被拒批次一个字节都不落。"""
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "600")
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        status, body = _push(fresh, [_file("a.jsonl", "x" * 1000)])
+        assert status == 503
+        assert body["code"] == 1008
+        assert body["data"]["limit_bytes"] == 600
+        assert list((tmp_path / "raw_store").rglob("*.json")) == []
+
+
+def test_quota_rejects_only_new_content_not_replays(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """配额按新增字节算：重放已收下的批次仍成功，新内容才被拒。"""
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "2000")
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        first = _file("a.jsonl", "small")
+        status, _ = _push(fresh, [first], batch_id="b-1")
+        assert status == 200
+
+        big = _file("b.jsonl", "y" * 3000)
+        status, body = _push(fresh, [big])
+        assert status == 503
+        assert body["code"] == 1008
+
+        # 同一批次重放（estimate=0）在配额已满时仍放行；否则客户端重试会被永久卡死。
+        status, body = _push(fresh, [first], batch_id="b-1")
+        assert status == 200
+        assert body["code"] == 0
+
+
+def test_invalid_queue_max_bytes_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "not-a-number")
+    with pytest.raises(RuntimeError, match="MEMHUB_QUEUE_MAX_BYTES"):
+        create_app()

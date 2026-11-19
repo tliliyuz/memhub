@@ -16,13 +16,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -153,6 +154,44 @@ def _save_failures(config: WorkerConfig, failures: dict[str, int]) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def purge_pending_review(
+    data_dir: Path, *, older_than: timedelta = timedelta(days=30)
+) -> tuple[int, int]:
+    """清理 `pending_review/` 里超过保留期的文件，返回（文件数, 字节数）。
+
+    隔离区只放「连续失败 3 次」的毒文件：人工排查完它就是纯占盘。没有清理策略时
+    它会和 raw_store 一起把磁盘预算吃穿（raw_store 有配额，隔离区没有），因此
+    由 purge-expired timer 每天顺手收一次。
+    """
+    root = data_dir / "pending_review"
+    if not root.is_dir():
+        return 0, 0
+    cutoff = time.time() - older_than.total_seconds()
+    removed = removed_bytes = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime >= cutoff:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            removed_bytes += stat.st_size
+    # 空目录一并回收，否则设备/source 目录会留一摞空壳。
+    for dirpath, _dirnames, _filenames in os.walk(root, topdown=False):
+        try:
+            Path(dirpath).rmdir()
+        except OSError:
+            pass
+    return removed, removed_bytes
 
 
 def _document_text(payload: dict[str, object]) -> str:
