@@ -240,7 +240,8 @@ export function GraphCanvas({
       container: containerRef.current,
       style: buildStyles(resolvedTheme),
       elements: [],
-      wheelSensitivity: 0.2,
+      // cytoscape 默认 1；0.2 时一格滚轮只缩放约 2%，整张图要滚几十下。
+      wheelSensitivity: 1,
       minZoom: 0.08,
       maxZoom: 4,
     })

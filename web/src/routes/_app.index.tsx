@@ -9,9 +9,10 @@ import {
   Network,
   Plus,
   RefreshCw,
+  Unlink,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, type KnowledgeBase } from '@/lib/api'
+import { KINDS, api, type KnowledgeBase } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -45,6 +46,7 @@ export const Route = createFileRoute('/_app/')({
 function KnowledgeBaseIndex() {
   const queryClient = useQueryClient()
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects })
+  const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
   const projection = useQuery({ queryKey: ['projection'], queryFn: api.projection })
 
   const rebuild = useMutation({
@@ -59,6 +61,13 @@ function KnowledgeBaseIndex() {
   const items = projects.data?.items ?? []
   const nodeTotal = items.reduce((sum, item) => sum + item.nodes, 0)
   const edgeTotal = items.reduce((sum, item) => sum + item.edges, 0)
+
+  const statsData = stats.data
+  const kindRows = KINDS.filter((item) => (statsData?.by_kind[item.value] ?? 0) > 0)
+  const projectRows = Object.entries(statsData?.by_project ?? {}).sort(
+    (a, b) => b[1] - a[1],
+  )
+  const projectMax = projectRows[0]?.[1] ?? 0
 
   return (
     <>
@@ -123,6 +132,120 @@ function KnowledgeBaseIndex() {
             </CardContent>
           </Card>
         )}
+
+        <section className='space-y-3'>
+          <div className='flex flex-wrap items-end justify-between gap-2'>
+            <div>
+              <h2 className='text-base font-semibold'>全局概览</h2>
+              <p className='text-xs text-muted-foreground'>
+                所有知识库的合计；库之间仍互相隔离，这里只做汇总，不跨库合并节点。
+              </p>
+            </div>
+            {statsData && statsData.orphans > 0 && (
+              <span className='text-xs text-muted-foreground'>
+                {statsData.orphans} 个孤立节点
+              </span>
+            )}
+          </div>
+
+          <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-4'>
+            <StatCard
+              icon={Database}
+              label='知识库'
+              value={items.length}
+              hint='knowledge/ 下的一级目录'
+            />
+            <StatCard
+              icon={BookOpenText}
+              label='知识节点'
+              value={statsData?.nodes ?? 0}
+              hint='所有库的 markdown 条目'
+            />
+            <StatCard
+              icon={Network}
+              label='关系'
+              value={statsData?.edges ?? 0}
+              hint='所有库内已解析的边'
+            />
+            <StatCard
+              icon={Unlink}
+              label='未解析边'
+              value={statsData?.unresolved_edges ?? 0}
+              hint='目标节点不存在或重名'
+            />
+          </div>
+
+          <div className='grid gap-4 lg:grid-cols-5'>
+            <Card className='lg:col-span-2'>
+              <CardHeader>
+                <CardTitle className='text-base'>类型分布</CardTitle>
+                <CardDescription>点类型跳到筛选后的全局节点列表。</CardDescription>
+              </CardHeader>
+              <CardContent className='space-y-2'>
+                {kindRows.length === 0 && (
+                  <p className='text-sm text-muted-foreground'>还没有节点。</p>
+                )}
+                {kindRows.map((item) => {
+                  const value = statsData?.by_kind[item.value] ?? 0
+                  return (
+                    <Link
+                      key={item.value}
+                      to='/nodes'
+                      search={{ kind: item.value }}
+                      className='block space-y-1 rounded-md p-1 hover:bg-accent/50'
+                    >
+                      <div className='flex items-center justify-between text-xs'>
+                        <span>{item.label}</span>
+                        <span className='text-muted-foreground'>{value}</span>
+                      </div>
+                      <div className='h-1.5 overflow-hidden rounded-full bg-muted'>
+                        <div
+                          className='h-full rounded-full bg-primary'
+                          style={{
+                            width: `${statsData?.nodes ? (value / statsData.nodes) * 100 : 0}%`,
+                          }}
+                        />
+                      </div>
+                    </Link>
+                  )
+                })}
+              </CardContent>
+            </Card>
+
+            <Card className='lg:col-span-3'>
+              <CardHeader>
+                <CardTitle className='text-base'>库分布</CardTitle>
+                <CardDescription>每个库的节点数；点库名进入该库概览。</CardDescription>
+              </CardHeader>
+              <CardContent className='space-y-2'>
+                {projectRows.length === 0 && (
+                  <p className='text-sm text-muted-foreground'>还没有知识库。</p>
+                )}
+                {projectRows.map(([id, value]) => (
+                  <Link
+                    key={id}
+                    to='/kb/$project'
+                    params={{ project: id }}
+                    className='block space-y-1 rounded-md p-1 hover:bg-accent/50'
+                  >
+                    <div className='flex items-center justify-between text-xs'>
+                      <span className='font-mono'>{id}</span>
+                      <span className='text-muted-foreground'>{value}</span>
+                    </div>
+                    <div className='h-1.5 overflow-hidden rounded-full bg-muted'>
+                      <div
+                        className='h-full rounded-full bg-primary'
+                        style={{
+                          width: `${projectMax ? (value / projectMax) * 100 : 0}%`,
+                        }}
+                      />
+                    </div>
+                  </Link>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
+        </section>
 
         <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
           {items.map((kb) => (
@@ -198,6 +321,31 @@ function KbCard({ kb }: { kb: KnowledgeBase }) {
               <GitFork /> 图谱
             </Link>
           </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  hint,
+}: {
+  icon: React.ElementType
+  label: string
+  value: number | string
+  hint: string
+}) {
+  return (
+    <Card>
+      <CardContent className='flex items-start gap-3 py-4'>
+        <Icon className='mt-0.5 size-4 text-muted-foreground' />
+        <div>
+          <div className='text-xs text-muted-foreground'>{label}</div>
+          <div className='text-2xl font-semibold tabular-nums'>{value}</div>
+          <div className='text-[11px] text-muted-foreground'>{hint}</div>
         </div>
       </CardContent>
     </Card>
