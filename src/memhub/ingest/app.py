@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, Query, Request
@@ -27,6 +28,7 @@ from memhub.contract import (
     IngestResult,
     SourcesConfig,
 )
+from memhub.ingest.rawstore import save_batch
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
 
 HTTP_STATUS: dict[ErrorCode, int] = {
@@ -101,6 +103,11 @@ def build_store() -> StateStore:
 
 def create_app(store: StateStore | None = None) -> FastAPI:
     dev_token = os.environ.get("MEMHUB_DEV_TOKEN", "")
+    data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
+    if os.environ.get("MEMHUB_ENV") == "prod" and not data_dir:
+        # 生产没有 DATA_DIR 意味着原始增量无处可落：宁可不启动，也不要静默丢数据。
+        raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DATA_DIR")
+    raw_root = Path(data_dir) if data_dir else None
     state = store or build_store()
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
@@ -184,6 +191,10 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                     "binary content is not accepted",
                     {"path": batch_file.path},
                 )
+        if raw_root is not None:
+            # 先落盘再 apply：apply 的后续校验失败只会留下无害的内容寻址孤儿文件，
+            # 而反过来（先 apply 后落盘）一旦落盘失败，重放就再也补不回落盘的字节。
+            save_batch(raw_root, body)
         result: IngestResult = state.apply(body)
         return _ok(result.model_dump(mode="json"))
 

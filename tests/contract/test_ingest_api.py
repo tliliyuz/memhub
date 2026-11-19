@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -147,3 +148,29 @@ def test_register_is_idempotent_for_same_device(client: TestClient) -> None:
     assert first["code"] == second["code"] == 0
     assert first["data"]["device_id"] == second["data"]["device_id"] == DEVICE
     assert first["data"]["device_token"] == second["data"]["device_token"]
+
+
+def test_raw_bytes_are_persisted_when_data_dir_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """采集器推上来的字节必须落盘——这是 worker 的唯一输入。"""
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        status, _ = _push(fresh, [_file("a.jsonl", "hello")])
+        assert status == 200
+    stored = list((tmp_path / "raw_store").rglob("*.json"))
+    assert len(stored) == 1
+    assert __import__("json").loads(stored[0].read_text(encoding="utf-8"))["content"] == "hello"
+
+
+def test_prod_requires_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """生产缺 DATA_DIR 时拒绝启动，不静默丢原始增量。"""
+    monkeypatch.setenv("MEMHUB_ENV", "prod")
+    monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
+    with pytest.raises(RuntimeError, match="MEMHUB_DATA_DIR"):
+        create_app()
