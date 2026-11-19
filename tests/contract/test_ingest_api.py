@@ -174,3 +174,75 @@ def test_prod_requires_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
     with pytest.raises(RuntimeError, match="MEMHUB_DATA_DIR"):
         create_app()
+
+
+def test_prod_requires_device_token_secret(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MEMHUB_ENV", "prod")
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("MEMHUB_DEVICE_TOKEN_SECRET", raising=False)
+    with pytest.raises(RuntimeError, match="MEMHUB_DEVICE_TOKEN_SECRET"):
+        create_app()
+
+
+def test_prod_ignores_dev_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """prod 下共享 dev token 即便被误配也不生效（文档约定）。"""
+    monkeypatch.setenv("MEMHUB_ENV", "prod")
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", "shared-dev")
+    with TestClient(create_app()) as fresh:
+        token = fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        ).json()["data"]["device_token"]
+        assert token != "shared-dev"
+        denied = fresh.get(
+            "/ingest/cursor",
+            params={"device_id": DEVICE, "source_id": "cc-sessions"},
+            headers={"Authorization": "Bearer shared-dev"},
+        )
+        assert denied.status_code == 401
+
+
+def test_per_device_token_is_issued_and_scoped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """生产 token 与设备绑定：签给别人设备的 token 用不了。"""
+    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.delenv("MEMHUB_DEV_TOKEN", raising=False)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    with TestClient(create_app()) as fresh:
+        registered = fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        ).json()
+        token = registered["data"]["device_token"]
+        assert token.startswith("v1.")
+
+        response = fresh.get(
+            "/ingest/cursor",
+            params={"device_id": DEVICE, "source_id": "cc-sessions"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+
+        # 同一枚 token 冒充另一个设备
+        fresh.post(
+            "/devices/register",
+            json={"device_id": str(uuid.uuid4()), "name": "other", "platform": "win32"},
+        )
+        forged = fresh.get(
+            "/ingest/cursor",
+            params={"device_id": str(uuid.uuid4()), "source_id": "cc-sessions"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert forged.status_code == 401
+
+        # 篡改签名的 token
+        tampered = token[:-4] + ("aaaa" if not token.endswith("aaaa") else "bbbb")
+        bad = fresh.get(
+            "/ingest/cursor",
+            params={"device_id": DEVICE, "source_id": "cc-sessions"},
+            headers={"Authorization": f"Bearer {tampered}"},
+        )
+        assert bad.status_code == 401

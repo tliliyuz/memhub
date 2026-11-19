@@ -28,8 +28,8 @@
 | `MEMHUB_LLM_API_KEY` | 是 | — | worker | 启动失败；日志中永不出现 |
 | `MEMHUB_LLM_MODEL_FILTER` | 是 | — | worker/value_filter | 启动失败 |
 | `MEMHUB_LLM_MODEL_EXTRACT` | 是 | — | worker/extract | 启动失败 |
-| `MEMHUB_DEVICE_TOKEN_SECRET` | 是 | — | ingest | 启动失败；轮换即令全部 device_token 失效 |
-| `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的固定 token；`MEMHUB_ENV=prod` 时忽略并告警 |
+| `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
+| `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的共享 token；`MEMHUB_ENV=prod` 时**被忽略**（代码层不读取） |
 | `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest/worker | 超限返回 `1008` |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |

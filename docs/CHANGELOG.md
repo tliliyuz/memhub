@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-19（per-device token 与交付包）
+
+- `feat(ingest)`：`/devices/register` 改为签发 HMAC per-device token（`v1.<device>.<mac>`），token 与设备绑定；冒用/篡改返回 401。`MEMHUB_ENV=prod` 下缺 `MEMHUB_DEVICE_TOKEN_SECRET` 拒绝启动，且 `MEMHUB_DEV_TOKEN` 被代码忽略（对齐 ENVIRONMENT.md 既有约定）。此前 prod 下 register 会把共享 token 发给任何人。
+- `feat(cli)`：`memhub worker --dry-run`——校目录/配置后退出，供容器冒烟，不探 LLM。
+- `chore(deploy)`：wheelhouse 改为 manylinux2014 + manylinux_2_28 并集下载并清理旧平台重复件；镜像内 `pip freeze` 生成 `deploy/lock-ingest.txt` / `lock-worker.txt`；`deploy/dist/MANIFEST.md` 提供每文件 sha256（164.8 MB 总计）。
+- 验证：离线 `--network=none` 构建两镜像成功；`engine-import-ok`（numpy/pandas/scipy/sklearn/pyarrow/semantica.context）；worker dry-run 与 prod 拒绝启动均实测；74 passed + 8 skipped。
+
 ## 2026-11-19（api 入口与绑定地址防护）
 
 - `feat(cli)`：新增 `memhub api`——ingest-api 的唯一启动入口。绑定地址按 `MEMHUB_HTTP_HOST` 优先、缺省 `127.0.0.1`；非回环地址必须 `--allow-non-loopback` 显式放行，否则 exit 2。host 网络部署下没有端口映射兜底，绑错即公网裸奔，因此把防护收进代码而非 compose 文本。

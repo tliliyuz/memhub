@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,6 +94,34 @@ def _ok(data: object) -> dict[str, object]:
     return {"code": 0, "message": "ok", "data": data}
 
 
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def issue_device_token(secret: str, device_id: str) -> str:
+    """`v1.<device_id>.<HMAC>`：token 与设备绑定，服务端可无状态校验。
+
+    共享 dev token 只用于本地联调；生产每个设备一枚，泄露只影响该设备，
+    吊销走 devices.revoked_at（auth 里查）。
+    """
+    mac = hmac.new(secret.encode(), device_id.encode(), hashlib.sha256).digest()
+    return f"v1.{_b64(device_id.encode())}.{_b64(mac[:24])}"
+
+
+def verify_device_token(secret: str, token: str, device_id: str) -> bool:
+    try:
+        version, encoded_id, _mac = token.split(".")
+        if version != "v1":
+            return False
+        padded = encoded_id + "=" * (-len(encoded_id) % 4)
+        if base64.urlsafe_b64decode(padded.encode()).decode() != device_id:
+            return False
+    except (ValueError, UnicodeDecodeError):
+        return False
+    expected = issue_device_token(secret, device_id)
+    return hmac.compare_digest(expected, token)
+
+
 def build_store() -> StateStore:
     """`MEMHUB_DB_URL` 有值即用 PG；否则退回内存实现（仅 dev）。"""
     dsn = os.environ.get("MEMHUB_DB_URL", "")
@@ -102,21 +133,36 @@ def build_store() -> StateStore:
 
 
 def create_app(store: StateStore | None = None) -> FastAPI:
-    dev_token = os.environ.get("MEMHUB_DEV_TOKEN", "")
+    prod = os.environ.get("MEMHUB_ENV") == "prod"
+    # 文档约定：prod 下忽略 MEMHUB_DEV_TOKEN，避免误配成共享后门。
+    dev_token = "" if prod else os.environ.get("MEMHUB_DEV_TOKEN", "")
+    token_secret = os.environ.get("MEMHUB_DEVICE_TOKEN_SECRET", "")
     data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
-    if os.environ.get("MEMHUB_ENV") == "prod" and not data_dir:
+    if prod and not data_dir:
         # 生产没有 DATA_DIR 意味着原始增量无处可落：宁可不启动，也不要静默丢数据。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DATA_DIR")
+    if prod and not token_secret:
+        # 没有签发密钥就只能共享 dev token，等于任何设备都能冒领。
+        raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DEVICE_TOKEN_SECRET")
     raw_root = Path(data_dir) if data_dir else None
     state = store or build_store()
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
 
     def auth(authorization: str | None, device_id: str) -> None:
-        """校验 Bearer 与 device 绑定；dev 下所有设备共享同一个 dev token。"""
-        if not dev_token:
-            raise ApiError(ErrorCode.TOKEN_INVALID, "server has no dev token configured")
-        if authorization != f"Bearer {dev_token}":
+        """校验 token 与 device 绑定。
+
+        生产：`v1.<device>.<HMAC>`，签名密钥来自环境，token 与设备一一对应；
+        本地联调：所有设备共享 `MEMHUB_DEV_TOKEN`（该路径在生产配置下不可用）。
+        """
+        supplied = ""
+        if authorization and authorization.startswith("Bearer "):
+            supplied = authorization.removeprefix("Bearer ")
+        accepted = bool(
+            (dev_token and hmac.compare_digest(supplied, dev_token))
+            or (token_secret and verify_device_token(token_secret, supplied, device_id))
+        )
+        if not accepted:
             raise ApiError(ErrorCode.TOKEN_INVALID, "invalid device token")
         if not state.is_registered(device_id):
             raise ApiError(ErrorCode.DEVICE_REVOKED, "device not registered")
@@ -150,14 +196,15 @@ def create_app(store: StateStore | None = None) -> FastAPI:
 
     @app.post("/devices/register")
     def register(body: DeviceRegister) -> dict[str, object]:
-        if not dev_token:
-            raise ApiError(ErrorCode.INTERNAL, "server has no dev token configured")
+        if not token_secret and not dev_token:
+            raise ApiError(ErrorCode.INTERNAL, "server has no device token configured")
         device_id = body.device_id or f"dev-{int(datetime.now(UTC).timestamp())}"
         state.register_device(device_id, name=body.name, platform=body.platform)
+        token = issue_device_token(token_secret, device_id) if token_secret else dev_token
         return _ok(
             {
                 "device_id": device_id,
-                "device_token": dev_token,
+                "device_token": token,
                 "created_at": datetime.now(UTC).isoformat(),
             }
         )

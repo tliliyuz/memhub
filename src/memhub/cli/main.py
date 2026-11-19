@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--limit", type=int, default=20, help="每轮最多处理文件数")
     worker.add_argument("--data-dir", default=None)
     worker.add_argument("--knowledge-dir", default=None)
+    worker.add_argument(
+        "--dry-run", action="store_true", help="只校验目录/配置并打印计划后退出（冒烟用）"
+    )
 
     api = sub.add_parser("api", help="启动 ingest-api（绑定地址由 MEMHUB_HTTP_HOST 决定）")
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
@@ -267,6 +270,16 @@ def _worker(args: argparse.Namespace) -> int:
     if not data_dir or not knowledge_dir:
         print("缺少 MEMHUB_DATA_DIR / MEMHUB_KNOWLEDGE_DIR", file=sys.stderr)
         return 2
+    if args.dry_run:
+        # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰文件。
+        raw_root = Path(data_dir) / "raw_store"
+        print(
+            f"[dry-run] data={data_dir} knowledge={knowledge_dir} "
+            f"raw_root={'exists' if raw_root.is_dir() else 'missing'} "
+            f"window={args.window or 'all-day'} once={args.once}",
+            flush=True,
+        )
+        return 0
     base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     if not base_url or not api_key:
