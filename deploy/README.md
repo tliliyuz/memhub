@@ -27,7 +27,7 @@
 
 | 项 | 预算 |
 |:---|:---|
-| 内存峰值 | ≤1.4 GiB（compose 限额 ingest 512m + worker 900m；实测 ingest ≈60MB、worker 抽取一枚 60K 字符会话 ≈155MB） |
+| 内存峰值 | ≤1.4 GiB（compose 限额 ingest 384m + worker 640m + explorer 384m；实测 ingest ≈60MB、worker 抽一枚 60K 字符会话 ≈155MB、explorer 渲染 ≈151MB） |
 | 磁盘 | ≤12 GiB（knowledge 5G / raw_store 4G 硬上限 / 日志 2G / 余量） |
 | raw_store 上限 | 4 GiB，超出时 ingest 返回 `1008`，采集端降级 |
 | 告警水位 | 磁盘 ≥80% 已用；可用内存 <300 MiB |
@@ -41,7 +41,7 @@
 - 重写 `memhub.work` vhost（不新开子域）：
   - `/api/` → 127.0.0.1:8700/8701（按前缀分流）
   - `/mcp` → 127.0.0.1:8702
-  - `/` → 127.0.0.1:8703
+  - `/` → 127.0.0.1:8703（explorer，只读页面；片段见 §6）
   - **保留** `/.well-known/acme-challenge/` 的 webroot，否则续期静默失败
 - `api.memhub.work` 当前指向已死的 127.0.0.1:8096，需一并处理，不留死域名。
 - `memhub.work/portal` 现为静态页；去留待用户决定（保留为 `/portal/` 或撤掉）。
@@ -59,11 +59,32 @@
 |:---|:---|
 | ingest-api | compose 常驻容器 `memhub/app:0.1.0`，`network_mode: host`，容器内绑 `127.0.0.1:8700`（**没有 `ports:`**，host 网络下端口映射无效） |
 | worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-02:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
+| explorer | compose 常驻容器，复用 worker 镜像（需要 engine extra），绑 `127.0.0.1:8703`，由 nginx 挂到 `/`；`HOME`/`TMPDIR` 指到 tmpfs |
 | purge / rebuild | systemd timer 跑 `docker run --rm` 一次性子命令 |
 
 镜像从 `wheelhouse` 离线构建（`docker build --network=none`），不在机上编译、不连 PyPI。
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
 `MEMHUB_DB_URL` 等密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
+
+**顺序约束**：explorer 读的是 rebuild 产出的 `kg.json`，**先跑一次 rebuild、再起 explorer**。图谱不存在时 `memhub serve` 直接 exit 2，`on-failure:5` 会让它连续重启 5 次后停住——这是有意的，别改 `unless-stopped` 把错误藏进重启循环。
+
+nginx 需要再加一段（explorer，只读可视化）：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8703;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 60s;
+}
+```
+
+注意 explorer 的 API 只允许回环访问（`SEMANTICA_ALLOW_ANONYMOUS=true` 下无鉴权），
+nginx 把它挂到公网前请确认只暴露只读页面；需要登录墙时在 nginx 层加 basic auth。
 
 一次性子命令（timer 用）：
 
@@ -118,7 +139,7 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 
 1. 改 daemon.json → reload docker
 2. 写 nginx location（保留 acme webroot）→ `nginx -t` → reload
-3. 起容器（compose up -d）
+3. 起容器（compose up -d）：先 ingest / worker；**先跑一次 rebuild 再起 explorer**
 4. 装 systemd timer（purge / rebuild）
-5. 冒烟：`/healthz`、`/api/v1/ingest/cursor`、`/mcp` 握手
+5. 冒烟：`/healthz`、`/api/v1/ingest/cursor`、`/`（explorer 页面）、`/mcp` 握手
 6. 观察 24h 磁盘/内存曲线再开全量采集

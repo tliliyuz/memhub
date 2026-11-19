@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（explorer 上容器）
+
+- `feat(deploy)`：compose 增加 `explorer` 服务——复用 worker 镜像（需要 engine extra），`memhub serve --graph /var/lib/memhub/kb/kg.json --port 8703 --no-browser`，`HOME`/`TMPDIR` 指到 tmpfs，`restart: on-failure:5`。图谱不存在时 `serve` exit 2，因此**部署顺序是「先 rebuild 再起 explorer」**，写进 README §6/§7，并补了 nginx `/` 片段。
+- `perf(deploy)`：按实测重排内存限额——ingest 384m（实测 59MB）、worker 640m（实测 155MB）、explorer 384m（实测 151MB），合计 1.4G，守住 1.5G 硬顶。
+- 验证：本机 `--network=none` 构建 worker 镜像后以 `--read-only` + tmpfs + 非 root 999:987 起 explorer 容器，容器内 `GET /` 200、启动日志正常、`docker stats` 151.5MiB（Docker Desktop 的 host 网络不映射到 Windows 回环，因此从容器内探测）。
+
 ## 2026-11-19（迁移幂等性与启动建表）
 
 - `fix(ingest)`：`ensure_schema` 用 `row[0]` 读版本，而连接池的行工厂是 `dict_row` → **第二次**迁移必 `KeyError`。空库首迁不读行，所以本地和首次部署都正常，线上 purge timer / `provision-device` / 容器重启才炸。现按行类型取 `version`；并补了 dict 行与 tuple 行两种假连接的回归测试（PG 测试本机默认跳过，这类问题只能靠它拦）。

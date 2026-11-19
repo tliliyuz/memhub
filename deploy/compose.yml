@@ -36,9 +36,9 @@ services:
     # 非回环需 --allow-non-loopback。部署后 `ss -lntp | grep 8700` 必须是
     # 127.0.0.1:8700，看到 0.0.0.0/[::] 立即回滚。
     # host 网络下没有 ports:，也不应该有——它会被忽略，只会误导。
-    # 实测：空载 50MB，推一枚 190KB 批次后峰值 59MB（本机 venv），512m 是 8 倍余量。
-    mem_limit: 512m
-    memswap_limit: 512m
+    # 实测：空载 50MB，推一枚 190KB 批次后峰值 59MB（本机 venv），384m 是 6 倍余量。
+    mem_limit: 384m
+    memswap_limit: 384m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8700/healthz', timeout=3)"]
       interval: 30s
@@ -59,7 +59,39 @@ services:
     # （--once 只跑一轮、不受窗口限制；退出码 0 全成功 / 1 有失败 / 2 配置错）
     command: ["memhub", "worker", "--window", "21:00-02:00", "--limit", "20"]
     restart: "on-failure:5"
-    # 实测：抽一枚 60K 字符会话（5 段、54 节点 / 36 边）峰值 ~155MB（本机 venv）。
-    # 900m 是 5 倍余量；1200m 会把 ingest+worker 顶到 1.9G，超出与 eval 中台约定的 1.5G 硬顶。
-    mem_limit: 900m
-    memswap_limit: 900m
+    # 实测：抽一枚 60K 字符会话（5 段、54 节点 / 36 边）峰值 ~155MB（本机 venv），
+    # 单并发 + 60K 输入上限让峰值有界。640m 是 4 倍余量。
+    # 三个服务合计 384+640+384=1.4G，守住与 eval 中台约定的 1.5G 硬顶。
+    mem_limit: 640m
+    memswap_limit: 640m
+
+  explorer:
+    <<: *defaults
+    # 复用 worker 镜像：serve 需要 engine extra（semantica）与 python-multipart。
+    image: memhub/app-worker:0.1.0
+    container_name: memhub-explorer
+    # 只读可视化：读 rebuild timer 产出的 kg.json，绑回环 8703，由 nginx 挂到 /。
+    # 图谱不存在时 serve 直接 exit 2 —— 部署顺序必须是「先跑一次 rebuild」再起本服务，
+    # 否则会连续重启 5 次后停住（on-failure:5 就是为这种情况设的）。
+    command:
+      - memhub
+      - serve
+      - --graph
+      - /var/lib/memhub/kb/kg.json
+      - --port
+      - "8703"
+      - --no-browser
+    # HOME 默认在只读 rootfs 外的卷上，但 explorer 只需要一个可写缓存目录；
+    # 用 tmpfs 里的 /tmp，重启即清，不污染数据卷。
+    environment:
+      HOME: /tmp
+      TMPDIR: /tmp
+    restart: "on-failure:5"
+    # 实测：加载 6 节点图谱并渲染首页后容器占用 151MB，384m 是 2.5 倍余量。
+    mem_limit: 384m
+    memswap_limit: 384m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8703/', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
