@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（治理：Git 授权放开为仅限制远端操作）
+
+- `docs`：根入口 `CLAUDE.md` / `AGENTS.md` §2 与 [DEVELOPMENT](guides/DEVELOPMENT.md) §6 的 Git 授权边界改为：本地写操作（提交、合并、变基、切换、worktree、分支与标签管理、清理等）默认授权，无需逐次确认；仅远端操作（`push`、`fetch`、`pull`、`clone`、修改 `remote`、推送标签、创建或更新 PR/release 等）需要负责人针对当前操作单独授权。本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。
+- `docs`：本仓未注册 Git 授权钩子，边界由文本约束与自查执行，已在 §6 注明。
+- 验证：`python scripts/check_document_format.py`、`git diff --check` 通过；`CLAUDE.md` 与 `AGENTS.md` 字节一致。
+
 ## 2026-11-19（全仓 I/O 异步化：kb / worker / mcp / cli）
 
 - 负责人收紧要求：**从数据库驱动到所有 I/O 一律 async，除特殊情况禁止同步函数**。在上一提交（数据访问层 ORM 化）基础上完成第二阶段，逐模块改造：
