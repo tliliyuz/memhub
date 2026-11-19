@@ -91,7 +91,7 @@ prompts/      各 source_type 的抽取 profile
 - 一次提交只做一件事：一个行为、一次重构、一份文档。
 - 格式：`<type>(<scope>): <中文摘要>`，`type ∈ feat|fix|docs|refactor|test|chore|perf`，摘要 ≤50 字。
 - 不提交 `.env`、`data/`、`raw_store/`、投影产物、真实会话内容。
-- **有意未采用**「禁止 `Co-Authored-By` 签名行」的检查：本仓库的运行环境会给提交自动追加署名，加检查会与工具链冲突。署名只存在于 git 元数据，不进入源码、文档或发布物；对外发布物由 `deploy/` 与镜像构建产出，不含提交信息。
+- 提交信息只描述实际改动，**不加 `Co-Authored-By` 等工具署名行**；`scripts/check_commit_message.py` 在 `commit-msg` 阶段强制（与评测仓同源）。署名属于提交信息正文，不属于源码、文档或发布物。
 
 ## 6. 分支、Git 授权与 worktree 闭环
 
