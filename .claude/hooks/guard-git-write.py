@@ -201,6 +201,9 @@ GLOBAL_OPTS_NO_ARG = frozenset(
 )
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 SHELL_NAMES_RE = re.compile(r"^(?:bash|sh|zsh|dash|fish|pwsh|powershell|cmd)(?:\.exe)?$")
+# PowerShell 常用 `& git push` 调用运算符与 `git.exe` 写法；两者都当作 git。
+GIT_TOKENS = frozenset({"git", "git.exe"})
+CALL_OPERATORS = frozenset({"&", "."})
 
 
 def emit_decision(decision: str, reason: str) -> None:
@@ -268,6 +271,9 @@ def parse_git_segment(segment: str) -> tuple[str, list[str]] | None:
     index = 0
     while index < len(tokens) and ENV_ASSIGN_RE.match(tokens[index]):
         index += 1
+    # PowerShell 调用运算符：`& git push` / `. git push`。
+    while index < len(tokens) and tokens[index] in CALL_OPERATORS:
+        index += 1
     if index >= len(tokens):
         return None
     # `bash -c 'git push'` / `powershell -Command "git push"` 旁路：解包内层命令。
@@ -279,7 +285,7 @@ def parse_git_segment(segment: str) -> tuple[str, list[str]] | None:
                 if nested is not None:
                     return nested
                 break
-    if tokens[index] != "git":
+    if tokens[index].lower() not in GIT_TOKENS:
         return None
     index += 1
     while index < len(tokens):
@@ -372,7 +378,7 @@ def main() -> int:
     except (ValueError, TypeError):
         return 0
     command = (payload.get("tool_input") or {}).get("command") or ""
-    if "git" not in command:
+    if "git" not in command.lower():
         return 0
 
     result = classify(command)
