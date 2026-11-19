@@ -188,3 +188,32 @@ def test_backoff_grows_on_repeated_failure(tmp_path: Path) -> None:
     )
     assert code == 1
     assert sleeps == [120.0, 240.0, 480.0]
+
+
+def test_repeated_failure_quarantines_file(tmp_path: Path) -> None:
+    """连续失败到上限就移进 pending_review：毒文件不能每轮都重新付费重试。"""
+    _push(tmp_path, "hello")
+    config = _config(tmp_path, max_attempts=3)
+
+    for _ in range(3):
+        report = run_round(FakeClient(error=LLMError("boom")), config)
+        assert report.failed == 1
+
+    assert iter_pending(config.raw_root, config.processed_root) == []
+    quarantined = list(config.pending_root.rglob("*.json"))
+    assert len(quarantined) == 1, "原始字节要留下来给人排查"
+    assert json.loads(config.failures_path.read_text(encoding="utf-8")) == {}
+
+    # 隔离后不再占用队列，后续轮次也不该再调模型。
+    client = FakeClient(error=LLMError("boom"))
+    assert run_round(client, config) == RoundReport()
+    assert client.calls == 0
+
+
+def test_failure_counter_resets_after_success(tmp_path: Path) -> None:
+    _push(tmp_path, _session_line("用户说：重试要退避。"))
+    config = _config(tmp_path, max_attempts=2)
+
+    assert run_round(FakeClient(error=LLMError("boom")), config).failed == 1
+    assert run_round(FakeClient(), config).processed == 1
+    assert json.loads(config.failures_path.read_text(encoding="utf-8")) == {}

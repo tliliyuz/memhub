@@ -6,10 +6,12 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from memhub.contract import SourceKind, SourceRef, Tier
 from memhub.kb.projection import build_graph
 from memhub.kb.store import KnowledgeStore
-from memhub.worker.extract import extract_document
+from memhub.worker.extract import ExtractionFailed, extract_document
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 
@@ -113,3 +115,56 @@ def test_projection_builds_nodes_and_resolves_edges(tmp_path: Path) -> None:
     assert report.edges == 1
     assert report.unresolved == []
     assert graph is not None
+
+
+def _node(slug: str, **overrides: object) -> dict[str, object]:
+    node: dict[str, object] = {
+        "kind": "fact",
+        "entity_kind": None,
+        "title": slug,
+        "slug": slug,
+        "body": f"## 要点\n{slug}",
+        "tags": [],
+        "confidence": 0.8,
+    }
+    node.update(overrides)
+    return node
+
+
+def test_unknown_predicate_falls_back_instead_of_failing() -> None:
+    """实测模型会自造谓词（alternative_to）；丢整篇文档比收敛成 related_to 更糟。"""
+    payload = {
+        "nodes": [_node("a"), _node("b")],
+        "edges": [{"source": "a", "predicate": "alternative_to", "target": "b"}],
+    }
+    extraction = extract_document(
+        FakeClient([payload]), template=load_profile("wiki"), path="a.md", text="内容", model="m"
+    )
+    assert [edge.predicate.value for edge in extraction.edges] == ["related_to"]
+
+
+def test_one_bad_node_does_not_lose_the_rest() -> None:
+    payload = {
+        "nodes": [
+            _node("good"),
+            _node("bad-entity", kind="entity"),  # kind=entity 但缺 entity_kind
+        ],
+        "edges": [],
+    }
+    extraction = extract_document(
+        FakeClient([payload]), template=load_profile("wiki"), path="a.md", text="内容", model="m"
+    )
+    assert [node.slug for node in extraction.nodes] == ["good"]
+
+
+def test_all_nodes_invalid_still_fails_loudly() -> None:
+    """全部不合法说明契约跑偏，静默产出空结果会掩盖问题。"""
+    payload = {"nodes": [_node("x", kind="entity")], "edges": []}
+    with pytest.raises(ExtractionFailed, match="全部校验失败"):
+        extract_document(
+            FakeClient([payload]),
+            template=load_profile("wiki"),
+            path="a.md",
+            text="内容",
+            model="m",
+        )

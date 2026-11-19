@@ -48,6 +48,7 @@ class WorkerConfig:
     window: str | None = None
     interval: float = 300.0
     limit: int = 20
+    max_attempts: int = 3
 
     @property
     def raw_root(self) -> Path:
@@ -56,6 +57,14 @@ class WorkerConfig:
     @property
     def processed_root(self) -> Path:
         return self.data_dir / "processed_raw"
+
+    @property
+    def pending_root(self) -> Path:
+        return self.data_dir / "pending_review"
+
+    @property
+    def failures_path(self) -> Path:
+        return self.data_dir / "state" / "failures.json"
 
 
 @dataclass
@@ -119,6 +128,31 @@ def _mark_processed(config: WorkerConfig, path: Path) -> None:
     target = config.processed_root / relative
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(path), str(target))
+
+
+def _move_to(config: WorkerConfig, path: Path, root: Path) -> None:
+    relative = path.relative_to(config.raw_root)
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), str(target))
+
+
+def _load_failures(config: WorkerConfig) -> dict[str, int]:
+    try:
+        data = json.loads(config.failures_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): int(value) for key, value in data.items() if isinstance(value, int)}
+
+
+def _save_failures(config: WorkerConfig, failures: dict[str, int]) -> None:
+    path = config.failures_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _document_text(payload: dict[str, object]) -> str:
@@ -186,15 +220,38 @@ def run_round(
     """处理一批待提炼文件；不抛单文件异常。"""
     current = report or RoundReport()
     templates: dict[str, str] = {}
+    failures = _load_failures(config)
+    dirty = False
     for path in iter_pending(config.raw_root, config.processed_root)[: config.limit]:
+        relative = str(path.relative_to(config.raw_root))
         try:
             created, updated, edges = process_file(client, config, path, templates=templates)
         except (ExtractionFailed, LLMError, OSError, ValueError) as exc:
             current.failed += 1
             current.errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
-            print(f"[worker] fail {path.name}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            attempts = failures.get(relative, 0) + 1
+            dirty = True
+            if attempts >= config.max_attempts:
+                # 毒文件不能让队列永远红着：再试下去每轮都在同一处付费失败。
+                # 移出 raw_store，留原始字节 + 失败原因给人看。
+                _move_to(config, path, config.pending_root)
+                failures.pop(relative, None)
+                print(
+                    f"[worker] quarantine {path.name}: 连续 {attempts} 次失败"
+                    f" → pending_review/ ({type(exc).__name__}: {exc})",
+                    file=sys.stderr,
+                )
+            else:
+                failures[relative] = attempts
+                print(
+                    f"[worker] fail {path.name} ({attempts}/{config.max_attempts}):"
+                    f" {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
             continue
         _mark_processed(config, path)
+        if failures.pop(relative, None) is not None:
+            dirty = True
         current.processed += 1
         current.created += created
         current.updated += updated
@@ -203,6 +260,8 @@ def run_round(
             f"[worker] ok {path.name}: +{created} new, {updated} updated, {edges} edges",
             flush=True,
         )
+    if dirty:
+        _save_failures(config, failures)
     return current
 
 

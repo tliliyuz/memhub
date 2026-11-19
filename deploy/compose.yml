@@ -36,8 +36,9 @@ services:
     # 非回环需 --allow-non-loopback。部署后 `ss -lntp | grep 8700` 必须是
     # 127.0.0.1:8700，看到 0.0.0.0/[::] 立即回滚。
     # host 网络下没有 ports:，也不应该有——它会被忽略，只会误导。
-    mem_limit: 700m
-    memswap_limit: 700m
+    # 实测：空载 50MB，推一枚 190KB 批次后峰值 59MB（本机 venv），512m 是 8 倍余量。
+    mem_limit: 512m
+    memswap_limit: 512m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8700/healthz', timeout=3)"]
       interval: 30s
@@ -49,9 +50,16 @@ services:
     image: memhub/app-worker:0.1.0
     container_name: memhub-worker
     # 窗口在容器内门控；错峰表：21:00-02:00 提炼，02:00-05:00 让给 eval L2。
+    # 窗口外是**常驻 sleep**（每 interval 醒一次看表），进程不退出，所以 unless-stopped
+    # 不会造成重启循环。唯一会退出的是启动自检：配置缺失或 LLM 端点不可达 → exit 2。
+    # 那种情况重试也不会变好，因此用 on-failure:5 而不是 unless-stopped——
+    # 连续 5 次后停住，`docker ps -a` 一眼能看到，不会每分钟白起一次。
     # timer 场景不用本服务，直接一次性执行：
     #   docker run --rm ... memhub/app-worker:0.1.0 memhub worker --once
     # （--once 只跑一轮、不受窗口限制；退出码 0 全成功 / 1 有失败 / 2 配置错）
     command: ["memhub", "worker", "--window", "21:00-02:00", "--limit", "20"]
-    mem_limit: 1200m
-    memswap_limit: 1200m
+    restart: on-failure:5
+    # 实测：抽一枚 60K 字符会话（5 段、54 节点 / 36 边）峰值 ~155MB（本机 venv）。
+    # 900m 是 5 倍余量；1200m 会把 ingest+worker 顶到 1.9G，超出与 eval 中台约定的 1.5G 硬顶。
+    mem_limit: 900m
+    memswap_limit: 900m

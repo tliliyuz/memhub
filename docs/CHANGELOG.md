@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-19（抽取容错与毒文件隔离）
+
+- `fix(worker)`：模型自造谓词（实测 `alternative_to`）此前会让**整篇文档**校验失败、留在队列无限重试且每轮重新付费。现在未知谓词收敛为 `related_to`（关系真实，只是用词越界），非法节点/边逐条丢弃并计数告警；只有「模型给了条目但一条都不合法」才判失败——那种情况说明契约跑偏，静默空结果会掩盖问题。
+- `feat(worker)`：连续失败达上限（默认 3 次）的文件移入 `pending_review/`，原始字节保留待人工排查；失败计数落 `state/failures.json`，成功即清零。兑现了架构文档里「失败 3 次进 pending_review」的承诺，避免毒文件把队列永远染红。
+- `fix(deploy)`：README 与 compose 对齐——容器是 `network_mode: host`，不存在 `127.0.0.1:8700:8700` 端口映射；内存限额改为 ingest 512m + worker 900m（实测 59MB / 155MB，留 5-8 倍余量），合计 1.4G 回到与评测中台约定的 1.5G 硬顶以内。
+- `fix(deploy)`：worker 的 `restart` 由 `unless-stopped` 改为 `on-failure:5`。窗口外是常驻 sleep 不会退出，重启循环的真实来源是启动自检失败（缺配置 / LLM 不可达）——那种情况重试不会变好，连续 5 次后停住更利于发现。
+- `docs(deploy)`：补 purge / rebuild 两个 timer 的完整 `docker run` 参数，逐项与 compose 对齐。
+- 验证：79 passed + 8 skipped；本机真实链路复跑，此前必失败的那枚会话现产出 **54 节点 / 36 边**，被丢弃的 6 节点 / 4 边有明确计数日志。
+
 ## 2026-11-19（服务端端到端联调）
 
 - 验证：按容器里的真实链路走了一遍——`/devices/register` → `/ingest/raw` 推送一枚真实 Claude Code 会话（190 KB）→ `raw_store` 内容寻址落盘 → `memhub worker --once` 调真实模型抽取 → `memhub project` 投影 → `memhub serve` explorer 页面渲染 **6 节点 / 4 边**（截图确认图谱画布、边标签、类型图例均正常）。
