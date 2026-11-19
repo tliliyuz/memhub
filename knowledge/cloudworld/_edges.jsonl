@@ -578,3 +578,14 @@
 {"source": "cloudworld/fact/n-868c811e", "predicate": "related_to", "target": "cloudworld/fact/n-d8fae4a9", "source_doc": "cloudworld/fact/n-868c811e"}
 {"source": "cloudworld/fact/n-868c811e", "predicate": "related_to", "target": "cloudworld/entity/n-bf32c1bf", "source_doc": "cloudworld/fact/n-868c811e"}
 {"source": "cloudworld/fact/n-868c811e", "predicate": "related_to", "target": "cloudworld/entity/cloud-world-cli", "source_doc": "cloudworld/fact/n-868c811e"}
+{"source": "cloudworld/entity/kb-api", "predicate": "exposes", "target": "cloudworld/entity/kb-upload-endpoint", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/kb-upload-endpoint-persists-to-raw-store", "predicate": "about", "target": "cloudworld/entity/kb-api", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/kb-upload-endpoint-persists-to-raw-store", "predicate": "about", "target": "cloudworld/entity/kb-upload-endpoint", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/kb-upload-endpoint-persists-to-raw-store", "predicate": "about", "target": "cloudworld/entity/raw-store", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/worker-extracts-with-docs-profile", "predicate": "about", "target": "cloudworld/entity/worker", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/worker-extracts-with-docs-profile", "predicate": "about", "target": "cloudworld/entity/docs-profile", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/worker-writes-to-knowledge-project-directory", "predicate": "about", "target": "cloudworld/entity/worker", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/worker-writes-to-knowledge-project-directory", "predicate": "about", "target": "cloudworld/entity/knowledge-project-directory", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/smoke-document-verifies-queued-to-processed", "predicate": "about", "target": "cloudworld/entity/kb-upload-smoke-document", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/fact/smoke-document-verifies-queued-to-processed", "predicate": "about", "target": "cloudworld/entity/queued-to-processed-status-transition", "source_doc": "kb-upload-smoke.md"}
+{"source": "cloudworld/entity/kb-upload-smoke-document", "predicate": "related_to", "target": "cloudworld/entity/memhub-upload-acceptance", "source_doc": "kb-upload-smoke.md"}
