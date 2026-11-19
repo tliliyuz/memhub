@@ -37,6 +37,21 @@ class NotFound(QueryError):
     code = 3001
 
 
+def records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
+    """读全部节点；管理端列表复用同一套解析（坏 frontmatter 跳过）。"""
+    return _records(store, project)
+
+
+def terms(query: str) -> list[str]:
+    """查询词（含中文二元组）；管理端搜索与检索组共用。"""
+    return _terms(query)
+
+
+def score(record: NodeRecord, wanted: list[str]) -> float:
+    """关键词打分；管理端列表只用 >0 判断命中，不展示具体分值。"""
+    return _score(record, wanted)
+
+
 @dataclass(frozen=True)
 class NodeRecord:
     id: str

@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-11-19（本地管理台：kb-api + 前端 + 图谱）
+
+- 运行形态（用户决定）：**线上服务停掉，前后端全在本地，只有数据库连云端**，跑稳再上云。`deploy/README.md` §0 记录命令与 SSH 隧道约定。
+- `feat(kb)`：新增 `memhub kb`（kb-api，`127.0.0.1:8701`，无鉴权、只绑回环）——节点列表/搜索/详情、新建、部分更新（`expected_revision` 内容寻址并发，冲突 409/`1010`）、废弃（tier+`superseded_by`+正文追加说明）、归档删除（`_trash/` + 移边 + 恢复）、出边整体替换、审计、统计、投影重建。写操作共用跨进程锁 `.memhub-write.lock`（120s 陈旧接管），成功后可选 `git` 提交。
+- `feat(kb)`：投影重建防抖 1.5s；设置 `MEMHUB_KB_GRAPH_PORT` 时由 kb-api 托管 explorer 子进程、重建后重启（explorer 只在启动时读 `kg.json`）。
+- `fix(kb)`：冷启动时 `/api/v1/kb/projection` 的节点/边数此前读的是进程内计数（恒为 0），改为直接读现有 `kg.json`。
+- `fix(kb)`：投影节点 `content` 改放**标题**——semantica 把它当画布标签，此前放全文导致图上每个节点都是一段长文、互相压字；正文改为 `properties.body`（仍参与搜索）。
+- `fix(kb)`：`git add` 会顺手把运行时锁文件 `.memhub-write.lock` 带进提交，已用 pathspec 排除；提交失败现在会打 warning（此前静默吞掉）。
+- `feat(web)`：复用 DynamicFocusGroup/apps/web（底层 satnaing/shadcn-admin `e16c87f`，MIT）搭建管理台：概览、节点表格（服务端分页 + 类型/层级 facet + 全文过滤）、节点详情编辑/出边编辑/废弃/删除、回收站恢复、审计、图谱页（explorer iframe + 重建并刷新）。来源与许可见 `web/README.md`。
+- `feat(contract)`：新增错误码 `1010 KB_CONFLICT / 1011 KB_NOT_FOUND / 1012 KB_INVALID`；契约文档 `docs/contracts/kb-admin-api.md`。
+- 验证：122 passed + 8 skipped（PG 契约按开关跳过）；ruff / format / mypy strict 通过；`pnpm build` 通过；ego-browser 实测概览 48 节点/26 边、节点编辑保存往返（修订号变化、toast）、图谱页渲染并可见 about 边。
+
 ## 2026-11-19（上线当日回改）
 
 - `fix(deploy)`：部署时由 peer 发现并修正的 5 处，已同步回仓库：① vhost `/api/v1/` 的 `proxy_pass` 必须带尾斜杠，否则前缀原样透传、采集路由全 404；② 补 `error_page 429 = @memhub_limited;`，否则限流信封是死 location；③ compose oauth2-proxy 的 `environment: ${VAR}` 会把 env_file 值覆盖成空串（`${}` 只查宿主 shell/.env），已删除映射、只留 env_file；④ v7.6.0 镜像 distroless，无 shell/wget，healthcheck 删除；⑤ `/portal` 实际目录为 `/var/www/portal/` 并补 `/portal` → `/portal/` 301。

@@ -36,3 +36,8 @@ logs/
 src/*.egg-info/
 build/
 deploy/dist/
+
+# 前端（web/.gitignore 也覆盖，这里兜底）
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo

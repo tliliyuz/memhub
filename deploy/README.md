@@ -2,6 +2,18 @@
 
 > 状态：draft（未上机）。机上执行由 `cloud-server-86` 会话负责，任何改变现状的操作需用户确认。
 
+## 0. 当前运行形态（2026-11-19 用户决定）
+
+先本地跑稳定、再上云：
+
+- 线上服务已停（nginx / 四容器 / timers 的状态以 `cloud-server-86` 回报为准），云端**只保留 PostgreSQL**。
+- 前端（`web/dist`，由 kb-api 托管）、kb-api、worker、collector、explorer 全部在本地跑：
+  `memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json --web-dist web/dist --spawn-graph --graph-port 8703`，
+  浏览器访问 `http://127.0.0.1:8701/`，图谱为同页 iframe（`127.0.0.1:8703`）。
+- 本地进程连云端库：`MEMHUB_DB_URL=postgresql://memhub_app@127.0.0.1:5432/memhub_prod`，5432 由 SSH 隧道转发到云端
+  （`ssh -N -L 5432:127.0.0.1:5432 <user>@43.142.18.23`），密码只从本地 `.env` / OS 凭据库读取。
+- 下面的端口、资源、nginx 段落是**上云形态**的规划，本地阶段不生效。
+
 ## 1. 主机
 
 | 项 | 值 |

@@ -31,10 +31,13 @@ def build_graph(store: KnowledgeStore) -> tuple[object, ProjectionReport]:
 
     for node_id in store.list_ids():
         node, body = store.read(node_id)
+        # semantica 把 `content` 当节点标签渲染（画布/搜索建议都用它），
+        # 所以这里放短标题；正文作为属性保留，仍参与搜索与检查器展示。
         added = graph.add_node(
             node_id,
             node.kind.value,
-            content=body[:MAX_CONTENT],
+            content=node.title,
+            body=body[:MAX_CONTENT],
             title=node.title,
             project=node.project,
             tier=node.tier.value,

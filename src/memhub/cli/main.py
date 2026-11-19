@@ -88,6 +88,16 @@ def main(argv: list[str] | None = None) -> int:
     api = sub.add_parser("api", help="启动 ingest-api（绑定地址由 MEMHUB_HTTP_HOST 决定）")
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
 
+    kb = sub.add_parser("kb", help="启动知识库管理 API（本地管理台后端 + 静态前端）")
+    kb.add_argument("--knowledge-dir", default=None)
+    kb.add_argument("--graph-out", default=None, help="投影输出路径（默认 kb/kg.json）")
+    kb.add_argument("--port", type=int, default=None, help="默认 8701（MEMHUB_KB_HTTP_PORT）")
+    kb.add_argument("--web-dist", default=None, help="前端构建产物目录（含 index.html）")
+    kb.add_argument(
+        "--spawn-graph", action="store_true", help="同时托管 explorer，并在投影重建后自动重启"
+    )
+    kb.add_argument("--graph-port", type=int, default=8703, help="explorer 端口（默认 8703）")
+
     provision = sub.add_parser(
         "provision-device", help="在库里登记设备并把 per-device token 打到标准输出"
     )
@@ -113,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         return _worker(args)
     if args.command == "api":
         return _api(args)
+    if args.command == "kb":
+        return _kb(args)
     if args.command == "provision-device":
         return _provision_device(args)
     parser.print_help()
@@ -405,6 +417,42 @@ def _provision_device(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(issue_device_token(secret, args.device_id))
+    return 0
+
+
+def _kb(args: argparse.Namespace) -> int:
+    """本地知识库管理台：kb-api + （可选）explorer 子进程。
+
+    只绑回环：这是单用户管理面，没有公网入口。前端构建产物缺失时纯 API 运行，
+    开发期用 Vite 的 5173 端口直连。
+    """
+    import uvicorn
+
+    knowledge = _knowledge_dir(args.knowledge_dir).resolve()
+    if not knowledge.is_dir():
+        print(f"知识库目录不存在: {knowledge}", file=sys.stderr)
+        return 2
+    graph_out = Path(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
+    web_dist = args.web_dist or os.environ.get("MEMHUB_KB_WEB_DIST", "")
+    os.environ["MEMHUB_KNOWLEDGE_DIR"] = str(knowledge)
+    os.environ["MEMHUB_KB_GRAPH"] = str(graph_out)
+    if web_dist:
+        os.environ["MEMHUB_KB_WEB_DIST"] = str(Path(web_dist).resolve())
+    if args.spawn_graph:
+        os.environ["MEMHUB_KB_GRAPH_PORT"] = str(args.graph_port)
+    port = args.port or int(os.environ.get("MEMHUB_KB_HTTP_PORT", "8701"))
+    print(f"memhub kb-api: http://127.0.0.1:{port}/  真源={knowledge}", flush=True)
+    if graph_out.is_file():
+        print(f"投影: {graph_out}", flush=True)
+    if args.spawn_graph:
+        print(f"explorer 由 kb-api 托管: http://127.0.0.1:{args.graph_port}/", flush=True)
+    uvicorn.run(
+        "memhub.kb.api:create_app",
+        factory=True,
+        host="127.0.0.1",
+        port=port,
+        log_level=os.environ.get("MEMHUB_LOG_LEVEL", "INFO").lower(),
+    )
     return 0
 
 

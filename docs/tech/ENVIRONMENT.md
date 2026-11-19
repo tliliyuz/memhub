@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-18 |
+| 最后更新 | 2026-11-19 |
 | 适用范围 | 环境变量键集、默认值、读取方、失败语义 |
 | 不负责 | 部署拓扑、契约字段 |
 
@@ -35,6 +35,10 @@
 | `MEMHUB_PROCESSED_MAX_BYTES` | 否 | `2147483648` | purge-expired | `processed_raw/` 总量上限，配合 7 天保留期按最旧优先裁剪；非法值退出 2 |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |
+| `MEMHUB_KB_GRAPH` | 否 | `kb/kg.json` | kb-api / explorer | 投影输出路径；不存在时 `/api/v1/kb/projection` 报 `stale=true` |
+| `MEMHUB_KB_WEB_DIST` | 否 | 空 | kb-api | 留空只提供 API、不托管前端；目录里没有 `index.html` 时同样跳过静态托管 |
+| `MEMHUB_KB_AUTO_REBUILD` | 否 | `1` | kb-api | `0/off/false` 关闭写后防抖重建，需手动 `POST /api/v1/kb/rebuild` |
+| `MEMHUB_KB_GRAPH_PORT` | 否 | 空 | kb-api | 非空则托管 `python -m semantica.explorer` 子进程并在重建后重启；空则不自启（explorer 由外部管理） |
 
 ## 3. 模型调用
 
