@@ -249,13 +249,26 @@ export function GraphCanvas({
     // 调试/自动化定位用：容器元素上挂一份实例，不参与渲染。
     ;(containerRef.current as HTMLElement & { __cy?: Core }).__cy = cy
 
-    const applyLabels = () => {
+    let lastLabelSig = ''
+    const applyLabels = (force = false) => {
       // 大图整体缩放时降低标签密度：≤60 全显示，中图放大到 0.85，大图到 1.05；
       // 枢纽/命中/选中节点始终带标签，overview 也能读出主干。
       const count = cy.nodes().length
       const labelZoom = count > 150 ? 1.05 : count > 60 ? 0.85 : 0
       const showAll = count <= 60 || cy.zoom() >= labelZoom
       const showEdges = cy.zoom() >= 1.35
+      // 滚轮缩放时 zoom 事件每帧都触发，而标签只取决于「档位」是否跨过阈值。
+      // 这里按会改变可见标签的状态做签名，未跨档直接跳过——否则 400+ 节点、
+      // 2000+ 边每次滚轮都全量写 data，缩放就会一顿一顿的。
+      const sig = [
+        count,
+        showAll,
+        showEdges,
+        cy.nodes('.match').map((node) => node.id()).join(','),
+        cy.nodes(':selected').map((node) => node.id()).join(','),
+      ].join('|')
+      if (!force && sig === lastLabelSig) return
+      lastLabelSig = sig
       cy.batch(() => {
         cy.nodes().forEach((node) => {
           const show =
@@ -311,7 +324,11 @@ export function GraphCanvas({
       if (event.target === cy) onSelectRef.current?.(null)
     })
 
-    ;(cy as Core & { applyLabels?: () => void }).applyLabels = applyLabels
+    type LabelApi = { applyLabels?: (force?: boolean) => void; resetLabels?: () => void }
+    ;(cy as Core & LabelApi).applyLabels = applyLabels
+    ;(cy as Core & LabelApi).resetLabels = () => {
+      lastLabelSig = ''
+    }
 
     return () => {
       observer.disconnect()
@@ -322,9 +339,11 @@ export function GraphCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const applyLabels = () => {
-    const cy = cyRef.current as (Core & { applyLabels?: () => void }) | null
-    cy?.applyLabels?.()
+  const applyLabels = (force = false) => {
+    const cy = cyRef.current as
+      | (Core & { applyLabels?: (force?: boolean) => void; resetLabels?: () => void })
+      | null
+    cy?.applyLabels?.(force)
   }
 
   // 数据变化：重建元素并重新布局。
@@ -353,7 +372,7 @@ export function GraphCanvas({
     })
     cy.style(buildStyles(resolvedTheme))
     cy.layout(layoutOptions(true)).run()
-    applyLabels()
+    applyLabels(true)
     // colorOf 依赖同一次渲染的数据，elementsKey 已覆盖其输入。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [elementsKey])
@@ -430,6 +449,8 @@ export function GraphCanvas({
         showAll || node.hasClass('hub') || node.hasClass('match') || node.selected()
       node.data('display', show ? String(node.data('title')) : '')
     })
+    // 标签由这里按自己的阈值直接写了一遍，清掉缓存让下次缩放重新计算。
+    ;(cy as Core & { resetLabels?: () => void }).resetLabels?.()
   }
 
   const toggleKind = (kind: Kind) => {

@@ -9,6 +9,7 @@ import {
   Network,
   Plus,
   RefreshCw,
+  Search as SearchIcon,
   Unlink,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -46,6 +47,7 @@ export const Route = createFileRoute('/_app/')({
 
 function KnowledgeBaseIndex() {
   const queryClient = useQueryClient()
+  const [filter, setFilter] = useState('')
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects })
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
   const projection = useQuery({ queryKey: ['projection'], queryFn: api.projection })
@@ -62,6 +64,12 @@ function KnowledgeBaseIndex() {
   const items = projects.data?.items ?? []
   const nodeTotal = items.reduce((sum, item) => sum + item.nodes, 0)
   const edgeTotal = items.reduce((sum, item) => sum + item.edges, 0)
+  const needle = filter.trim().toLowerCase()
+  const shownItems = needle
+    ? items.filter((kb) =>
+        `${kb.id} ${kb.name} ${kb.description}`.toLowerCase().includes(needle),
+      )
+    : items
 
   const statsData = stats.data
   const kindRows = KINDS.filter((item) => (statsData?.by_kind[item.value] ?? 0) > 0)
@@ -217,51 +225,85 @@ function KnowledgeBaseIndex() {
             <Card className='lg:col-span-3'>
               <CardHeader>
                 <CardTitle className='text-base'>库分布</CardTitle>
-                <CardDescription>每个库的节点数；点库名进入该库概览。</CardDescription>
+                <CardDescription>
+                  共 {projectRows.length} 个库，按节点数排序；点库名进入该库概览。
+                </CardDescription>
               </CardHeader>
-              <CardContent className='space-y-2'>
+              <CardContent>
                 {projectRows.length === 0 && (
                   <p className='text-sm text-muted-foreground'>还没有知识库。</p>
                 )}
-                {projectRows.map(([id, value]) => (
-                  <Link
-                    key={id}
-                    to='/kb/$project'
-                    params={{ project: id }}
-                    className='block space-y-1 rounded-md p-1 hover:bg-accent/50'
-                  >
-                    <div className='flex items-center justify-between text-xs'>
-                      <span className='font-mono'>{id}</span>
-                      <span className='text-muted-foreground'>{value}</span>
-                    </div>
-                    <div className='h-1.5 overflow-hidden rounded-full bg-muted'>
-                      <div
-                        className='h-full rounded-full bg-primary'
-                        style={{
-                          width: `${projectMax ? (value / projectMax) * 100 : 0}%`,
-                        }}
-                      />
-                    </div>
-                  </Link>
-                ))}
+                {/* 库数量随使用增长；限高内部滚动，避免卡片被撑高。 */}
+                <div className='max-h-72 space-y-2 overflow-y-auto pe-1'>
+                  {projectRows.map(([id, value]) => (
+                    <Link
+                      key={id}
+                      to='/kb/$project'
+                      params={{ project: id }}
+                      className='block space-y-1 rounded-md p-1 hover:bg-accent/50'
+                    >
+                      <div className='flex items-center justify-between text-xs'>
+                        <span className='font-mono'>{id}</span>
+                        <span className='text-muted-foreground'>{value}</span>
+                      </div>
+                      <div className='h-1.5 overflow-hidden rounded-full bg-muted'>
+                        <div
+                          className='h-full rounded-full bg-primary'
+                          style={{
+                            width: `${projectMax ? (value / projectMax) * 100 : 0}%`,
+                          }}
+                        />
+                      </div>
+                    </Link>
+                  ))}
+                </div>
               </CardContent>
             </Card>
           </div>
         </section>
 
-        <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
-          {items.map((kb) => (
-            <KbCard key={kb.id} kb={kb} />
-          ))}
-          {!projects.isLoading && items.length === 0 && (
-            <Card className='border-dashed sm:col-span-2 xl:col-span-3'>
-              <CardContent className='flex flex-col items-center gap-2 py-12 text-sm text-muted-foreground'>
-                <Database className='size-8 opacity-40' />
-                <span>还没有知识库。新建一个，或者把已有 markdown 目录放进 knowledge/。</span>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+        <section className='space-y-3'>
+          <div className='flex flex-wrap items-center justify-between gap-2'>
+            <h2 className='text-base font-semibold'>
+              知识库列表
+              <span className='ms-1.5 text-sm font-normal text-muted-foreground'>
+                {items.length}
+              </span>
+            </h2>
+            {items.length > 8 && (
+              <div className='relative'>
+                <SearchIcon className='pointer-events-none absolute top-1.5 left-2 size-3.5 text-muted-foreground' />
+                <Input
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  placeholder='过滤知识库…'
+                  className='h-7 w-52 pl-7 text-xs'
+                />
+              </div>
+            )}
+          </div>
+
+          <div className='grid gap-3 sm:grid-cols-2 xl:grid-cols-3'>
+            {shownItems.map((kb) => (
+              <KbCard key={kb.id} kb={kb} />
+            ))}
+            {!projects.isLoading && items.length === 0 && (
+              <Card className='border-dashed sm:col-span-2 xl:col-span-3'>
+                <CardContent className='flex flex-col items-center gap-2 py-12 text-sm text-muted-foreground'>
+                  <Database className='size-8 opacity-40' />
+                  <span>
+                    还没有知识库。新建一个，或者把已有 markdown 目录放进 knowledge/。
+                  </span>
+                </CardContent>
+              </Card>
+            )}
+            {shownItems.length === 0 && items.length > 0 && (
+              <p className='py-6 text-sm text-muted-foreground sm:col-span-2 xl:col-span-3'>
+                没有匹配「{filter.trim()}」的知识库。
+              </p>
+            )}
+          </div>
+        </section>
 
         <p className='text-xs text-muted-foreground'>
           共 {items.length} 个知识库 · {nodeTotal} 个节点 · {edgeTotal} 条边
