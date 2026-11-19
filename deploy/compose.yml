@@ -15,6 +15,7 @@ x-defaults: &defaults
   env_file: /etc/memhub/env
   network_mode: host
   read_only: true
+  stop_grace_period: 30s
   tmpfs:
     - /tmp:size=64m,mode=1777
   volumes:
@@ -31,16 +32,10 @@ services:
     <<: *defaults
     image: memhub/app:0.1.0
     container_name: memhub-ingest
-    command:
-      - python
-      - -m
-      - uvicorn
-      - memhub.ingest.app:create_app
-      - --factory
-      - --host
-      - 127.0.0.1
-      - --port
-      - "8700"
+    # 绑定地址由代码决定：MEMHUB_HTTP_HOST 优先，缺省 127.0.0.1；
+    # 非回环需 --allow-non-loopback。部署后 `ss -lntp | grep 8700` 必须是
+    # 127.0.0.1:8700，看到 0.0.0.0/[::] 立即回滚。
+    # host 网络下没有 ports:，也不应该有——它会被忽略，只会误导。
     mem_limit: 700m
     memswap_limit: 700m
     healthcheck:
@@ -54,6 +49,9 @@ services:
     image: memhub/app-worker:0.1.0
     container_name: memhub-worker
     # 窗口在容器内门控；错峰表：21:00-02:00 提炼，02:00-05:00 让给 eval L2。
+    # timer 场景不用本服务，直接一次性执行：
+    #   docker run --rm ... memhub/app-worker:0.1.0 memhub worker --once
+    # （--once 只跑一轮、不受窗口限制；退出码 0 全成功 / 1 有失败 / 2 配置错）
     command: ["memhub", "worker", "--window", "21:00-02:00", "--limit", "20"]
     mem_limit: 1200m
     memswap_limit: 1200m

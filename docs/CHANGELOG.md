@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（api 入口与绑定地址防护）
+
+- `feat(cli)`：新增 `memhub api`——ingest-api 的唯一启动入口。绑定地址按 `MEMHUB_HTTP_HOST` 优先、缺省 `127.0.0.1`；非回环地址必须 `--allow-non-loopback` 显式放行，否则 exit 2。host 网络部署下没有端口映射兜底，绑错即公网裸奔，因此把防护收进代码而非 compose 文本。
+- `feat(deploy)`：Dockerfile.ingest 的 CMD 改为 `memhub api`；compose 增加 `stop_grace_period: 30s`，ingest 不再有 `ports:`，并注明 8700 必须是 `127.0.0.1:8700`。
+- 验证：本机离线构建 ingest 镜像通过；容器冒烟 `/healthz` 正常、容器内 eth0 连 8700 被拒（只监听回环）；`MEMHUB_HTTP_HOST=0.0.0.0` 启动退出码 2。71 passed + 8 skipped，ruff / mypy strict 通过。
+
 ## 2026-11-19（worker 守护进程）
 
 - `feat(worker)`：新增 `memhub worker`——raw_store → 抽取 → merge 进 markdown 真源的串行守护进程（池=1）。窗口门控 `--window 21:00-02:00`（本地时间、跨午夜），窗口外只休眠不占资源；`--once` 供 timer 单轮执行。

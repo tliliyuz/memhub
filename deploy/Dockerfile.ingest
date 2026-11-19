@@ -16,6 +16,6 @@ RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres]==0.1.0"
 USER 999:987
 EXPOSE 8700
 
-# 监听 0.0.0.0 以便 docker 端口映射；主机侧只发布到 127.0.0.1。
-CMD ["python", "-m", "uvicorn", "memhub.ingest.app:create_app", "--factory", \
-     "--host", "0.0.0.0", "--port", "8700"]
+# 绑定地址由 `memhub api` 从 MEMHUB_HTTP_HOST 读取，缺省 127.0.0.1；
+# 非回环地址需显式 --allow-non-loopback，防止 host 网络下误绑 0.0.0.0。
+CMD ["memhub", "api"]

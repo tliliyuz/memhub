@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--data-dir", default=None)
     worker.add_argument("--knowledge-dir", default=None)
 
+    api = sub.add_parser("api", help="启动 ingest-api（绑定地址由 MEMHUB_HTTP_HOST 决定）")
+    api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -82,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         return _purge_expired(args)
     if args.command == "worker":
         return _worker(args)
+    if args.command == "api":
+        return _api(args)
     parser.print_help()
     return 0
 
@@ -287,6 +292,38 @@ def _worker(args: argparse.Namespace) -> int:
         report = run_round(client, config)
         return 1 if report.failed else 0
     return run_forever(client, config)
+
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def resolve_bind_host(allow_non_loopback: bool = False) -> str:
+    """ingest-api 的绑定地址：`MEMHUB_HTTP_HOST` 优先，默认回环。
+
+    host 网络下没有 `ports:` 兜底，绑错就是公网裸奔；因此非回环地址必须显式放行，
+    生产环境默认拒绝。
+    """
+    host = os.environ.get("MEMHUB_HTTP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    if host not in LOOPBACK_HOSTS and not allow_non_loopback:
+        print(f"拒绝绑定非回环地址 {host}（需要 --allow-non-loopback 显式放行）", file=sys.stderr)
+        raise SystemExit(2)  # 2 = 配置错误（与 worker 的退出码约定一致）
+    return host
+
+
+def _api(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    host = resolve_bind_host(args.allow_non_loopback)
+    port = int(os.environ.get("MEMHUB_HTTP_PORT", "8700"))
+    print(f"memhub ingest-api: http://{host}:{port}/", flush=True)
+    uvicorn.run(
+        "memhub.ingest.app:create_app",
+        factory=True,
+        host=host,
+        port=port,
+        log_level=os.environ.get("MEMHUB_LOG_LEVEL", "INFO").lower(),
+    )
+    return 0
 
 
 if __name__ == "__main__":
