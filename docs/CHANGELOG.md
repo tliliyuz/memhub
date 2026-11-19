@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-11-19（治理：Git 钩子覆盖 PowerShell）
+
+- `fix(guard)`：`.claude/settings.json` 为 `PowerShell` 工具补注册同一守卫钩子——原先只注册 `Bash`，经 PowerShell 发起的 `git push` 会绕过；`guard-git-write.py` 补充识别 `git.exe`、`& git push` / `. git push` 调用运算符与大小写变体。
+- 验证：钩子探针确认 PowerShell 形态的 `git status; git push`、`& git push`、`git.exe push`、`GIT push`、`powershell -Command "git push"` 返回 `ask`，`& git status`、`git.exe status` 放行；`python scripts/check_document_format.py` 与 `git diff --check` 通过。
+
 ## 2026-11-19（治理：接入评测仓的文档治理门禁）
 
 - `feat(guard)`：把评测仓（`eval-platform-for-ai`）的文档治理脚本接入本仓，按本仓文档矩阵参数化，不改变既有正文语义：
