@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-19（发布：管理台上云，explorer 退役）
+
+- `feat(deploy)`：新增 `deploy/Dockerfile.kb`——复用 worker wheelhouse（需要 `engine` extra 的 semantica 投影），把 `web/dist` 烘进镜像，命令为 `memhub kb --knowledge-dir /var/lib/memhub/knowledge --graph-out /var/lib/memhub/kb/kg.json --web-dist /app/web-dist --data-dir /var/lib/memhub/data`；`compose.yml` 增加 `kb` 服务（384m，实测重建 437 节点 / 2631 边峰值 143MB）。
+- `refactor(deploy)`：管理台取代 explorer 挂到 `/`。explorer 服务改到 `profiles: ["legacy"]`（默认不启动），oauth2-proxy 的 `--upstream` 改到 `127.0.0.1:8701`；四服务内存上限 ingest 384 + worker 640 + kb 384 + oauth2-proxy 128 = 1536m，仍守住 1.5G 硬顶。
+- `fix(deploy)`：wheelhouse 补齐 ADR-0005 异步数据层新增的运行时依赖——`sqlalchemy 2.0.58` 与 `greenlet 3.5.6`（此前 `pip install --no-index "memhub[postgres]"` 会因缺包直接失败），并换成本次发布提交构建的 memhub wheel；离线解析 `memhub[postgres]` / `memhub[postgres,engine]` 均通过。
+- `fix(deploy)`：`deploy/nginx/memhub.vhost.conf` 的 `/` 与新增的 `^~ /api/v1/kb/` 都反代到 8701 并走 `auth_request /__memhub_auth`；页面未登录 302 到 GitHub，API 未登录返回 401 JSON（`1040`），fetch 不再被 302 带到 HTML 登录页。`/api/v1/`（采集）保持设备 token 自鉴权。
+- `docs(deploy)`：README 更新为本版形态；明确 `memhub mcp` 是 stdio 服务、不占 8702；schema 仍只有 `0001_state`，由 ingest 启动时幂等应用，无独立迁移命令。
+
 ## 2026-11-19（web：概览限高 + 图谱缩放性能）
 
 - `fix(web)`：图谱缩放发飘/卡顿——标签更新原本在每次 `zoom` 事件全量遍历节点与边写 `data()`；437 节点 / 2631 边时单次约 9.25ms，叠加渲染超出帧预算，滚动起来像「卡住」。现在按「缩放档位 + 命中/选中集合」做签名，未跨档直接跳过：实测命中缓存 0.9ms/次，跨档时才全量重算。20 次连续缩放事件合计 12.6ms。

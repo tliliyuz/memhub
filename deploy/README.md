@@ -1,18 +1,13 @@
 # 部署规划
 
-> 状态：draft（未上机）。机上执行由 `cloud-server-86` 会话负责，任何改变现状的操作需用户确认。
+> 状态：563fefe 发布版（2026-11-19，备案已过）。机上执行由 `cloud-server-86` 会话负责，任何改变现状的操作需用户确认。
 
-## 0. 当前运行形态（2026-11-19 用户决定）
+## 0. 本版形态（563fefe）
 
-先本地跑稳定、再上云：
-
-- 线上服务已停（nginx / 四容器 / timers 的状态以 `cloud-server-86` 回报为准），云端**只保留 PostgreSQL**。
-- 前端（`web/dist`，由 kb-api 托管）、kb-api、worker、collector、explorer 全部在本地跑：
-  `memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json --web-dist web/dist --spawn-graph --graph-port 8703`，
-  浏览器访问 `http://127.0.0.1:8701/`，图谱为同页 iframe（`127.0.0.1:8703`）。
-- 本地进程连云端库：`MEMHUB_DB_URL=postgresql://memhub_app@127.0.0.1:5432/memhub_prod`，5432 由 SSH 隧道转发到云端
-  （`ssh -N -L 5432:127.0.0.1:5432 <user>@43.142.18.23`），密码只从本地 `.env` / OS 凭据库读取。
-- 下面的端口、资源、nginx 段落是**上云形态**的规划，本地阶段不生效。
+- 云端（43.142.18.23）跑 4 个容器：ingest-api、worker、kb-api（管理台 + 静态前端）、oauth2-proxy；nginx `/` 与 `/api/v1/kb/` 走 GitHub 登录，`/api/v1/` 仍由设备 token 自鉴权。
+- **kb-api 取代 explorer**：图谱页由前端自带 cytoscape 渲染，数据来自 `kb/kg.json`；旧 explorer 容器保留为 compose `legacy` profile，不再默认启动。
+- `knowledge/`（markdown 真源）与 `data/`（raw_store）从本地同步到 `/var/lib/memhub/`，由 worker 继续提炼。
+- collector 仍在客户端（e4 负责），本版发布后联调 session 采集。
 
 ## 1. 主机
 
@@ -28,9 +23,9 @@
 |:---|:---|:---|
 | nginx | 80/443 | 全部 |
 | ingest-api | `127.0.0.1:8700` | `/api/v1/ingest/*`、`/devices/*` |
-| kb-api | `127.0.0.1:8701` | `/api/v1/kb/*` |
-| mcp | `127.0.0.1:8702` | `/mcp` |
-| explorer | `127.0.0.1:8703` | `/`（oauth2-proxy 凭据到位后；此前 nginx 不挂） |
+| kb-api | `127.0.0.1:8701` | `/` 与 `/api/v1/kb/*`（GitHub 登录后） |
+| mcp | 无 | `memhub mcp` 是 stdio 服务，由 agent 客户端拉起，不占端口 |
+| explorer（旧） | `127.0.0.1:8703` | 563fefe 起不再部署，`legacy` profile 备查 |
 | oauth2-proxy | `127.0.0.1:4180` | 不直接对外；nginx `/oauth2/*` 与 `auth_request` 判决 |
 
 段位约定：memhub 用 8700-8710，只监听 loopback。同机 AI 评测中台用 8200-8299，互不重叠。
@@ -40,7 +35,7 @@
 
 | 项 | 预算 |
 |:---|:---|
-| 内存峰值 | ≤1.4 GiB（compose 限额 ingest 384m + worker 640m + explorer 384m；实测 ingest ≈60MB、worker 抽一枚 60K 字符会话 ≈155MB、explorer 渲染 ≈151MB） |
+| 内存峰值 | ≤1.5 GiB（compose 限额 ingest 384m + worker 640m + kb 384m + oauth2-proxy 128m = 1536m；实测 ingest ≈60MB、worker 抽一枚 60K 字符会话 ≈155MB、kb 重建 437 节点投影 ≈143MB、explorer 旧版 ≈151MB） |
 | 磁盘 | ≤12 GiB（knowledge 5G / raw_store 4G 硬上限 / 日志 2G / 余量） |
 | raw_store 上限 | `MEMHUB_QUEUE_MAX_BYTES`（`.env.example` 为 1 GiB；磁盘预算硬顶 4 GiB，别超过），超出时 ingest 返回 `1008`，采集端降级 |
 | 隔离区清理 | `pending_review/` 中超过 30 天的文件由 purge timer 删除（`--pending-review-days`） |
@@ -74,43 +69,36 @@
 |:---|:---|
 | ingest-api | compose 常驻容器 `memhub/app:0.1.0`，`network_mode: host`，容器内绑 `127.0.0.1:8700`（**没有 `ports:`**，host 网络下端口映射无效） |
 | worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-02:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
-| explorer | compose 常驻容器，复用 worker 镜像（需要 engine extra），绑 `127.0.0.1:8703`，由 nginx 挂到 `/`；`HOME`/`TMPDIR` 指到 tmpfs |
+| kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/` |
+| explorer（旧） | 不再部署；需要时 `docker compose --profile legacy up -d explorer`，并把 nginx `/` 改回 8703 |
 | purge / rebuild | systemd timer 跑 `docker run --rm` 一次性子命令 |
 
-镜像从 `wheelhouse` 离线构建（`docker build --network=none`），不在机上编译、不连 PyPI。
-数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
-`MEMHUB_DB_URL` 等密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
+镜像从 `wheelhouse` 离线构建（`docker build --network=none`），不在机上编译、不连 PyPI：
 
-**顺序约束**：explorer 读的是 rebuild 产出的 `kg.json`，**先跑一次 rebuild、再起 explorer**。图谱不存在时 `memhub serve` 直接 exit 2，`on-failure:5` 会让它连续重启 5 次后停住——这是有意的，别改 `unless-stopped` 把错误藏进重启循环。
-
-nginx 需要再加一段（explorer，只读可视化；2026-11-19 已按此上线）：
-
-```nginx
-location / {
-    auth_request /__explorer_auth;
-    error_page 401 = @explorer_login;
-    proxy_pass http://memhub_explorer;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_read_timeout 60s;
-}
+```bash
+docker build --network=none -f deploy/Dockerfile.ingest -t memhub/app:0.1.0 .
+docker build --network=none -f deploy/Dockerfile.worker -t memhub/app-worker:0.1.0 .
+docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 ```
 
-完整 vhost（含 `/oauth2/*`、`/__explorer_auth` 判决段、ACME webroot、
-`/api/v1/` 的尾斜杠与限流、`error_page 429` 信封、`/portal/`）在
-`deploy/nginx/memhub.vhost.conf`，该文件与线上一致。
+数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
+`MEMHUB_DB_URL` 等密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
+schema 由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
+563fefe 未新增迁移（仍只有 `0001_state`），旧库启动即打印 `schema: already up to date`。
+
+**顺序约束**：kb-api 启动时会读 `kb/kg.json`（不存在也能起，只是图谱空）；首次部署先同步
+`knowledge/`，再起 kb，它在真源变化后自行重建投影。旧 explorer 才要求「先跑一次 rebuild 再起」。替换 nginx 配置时保持 `/api/v1/` 的尾斜杠与 `/api/v1/kb/` 的优先级（`^~`）。
+
+nginx 段（explorer 旧版）保留在上线记录里；563fefe 的完整 vhost 见
+`deploy/nginx/memhub.vhost.conf`（`/` 与 `/api/v1/kb/` → 8701，走 `auth_request /__memhub_auth`）。
 认证网关为 **oauth2-proxy v7.6.0**（GitHub OAuth，`--github-user` 白名单）：
 凭据只写 `/etc/memhub/env`（0600），cookie secret 32 字节随机
 （`openssl rand -base64 32`）。**注意两处部署坑**：镜像 distroless 不能配
 exec 型 healthcheck；compose 的 `environment: ${VAR}` 会把 env_file 值覆盖成空串，
 只能靠 `env_file` 注入。
 
-注意 explorer 的 API 只允许回环访问（`SEMANTICA_ALLOW_ANONYMOUS=true` 下无鉴权），
-nginx 把它挂到公网前请确认只暴露只读页面；需要登录墙时在 nginx 层加 basic auth。
+kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查走 `127.0.0.1:8701/healthz`，
+不经公网（与 `location = /api/v1/healthz → 404` 同义）。
 
 一次性子命令（timer 用）：
 
@@ -164,8 +152,9 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 ## 7. 部署顺序
 
 1. 改 daemon.json → reload docker
-2. 写 nginx location（保留 acme webroot）→ `nginx -t` → reload
-3. 起容器（compose up -d）：先 ingest / worker；**先跑一次 rebuild 再起 explorer**
-4. 装 systemd timer（purge / rebuild）
-5. 冒烟：`/healthz`、`/api/v1/ingest/cursor`、`/`（explorer 页面）、`/mcp` 握手
-6. 观察 24h 磁盘/内存曲线再开全量采集
+2. 同步 `knowledge/` 与 `data/` 到 `/var/lib/memhub/`（先 knowledge 后 data）
+3. 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
+4. 写 nginx vhost（保留 acme webroot）→ `nginx -t` → reload
+5. 装 systemd timer（purge / rebuild）
+6. 冒烟：`ss -lntp` 只见 127.0.0.1 的 8700/8701/4180；容器内 `/healthz` 200；未登录 `curl -i /api/v1/kb/stats` 得 401 JSON；浏览器 `/` 跳 GitHub 登录后能看到全部知识库概览
+7. 观察 24h 磁盘/内存曲线再开全量采集

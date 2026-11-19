@@ -1,0 +1,29 @@
+# memhub kb 镜像（离线可构建；管理台后端 + 静态前端）
+# 构建：docker build --network=none -f deploy/Dockerfile.kb -t memhub/app-kb:0.1.0 .
+# 前置：deploy/dist/wheelhouse-worker/ 里有 memhub wheel 与全部 engine 依赖；
+#       deploy/dist/web-dist/ 是 `pnpm build` 的产物（含 index.html）。
+# 复用 worker 的 wheelhouse：kb 的投影重建会 import semantica.context。
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HOME=/var/lib/memhub/home
+
+WORKDIR /app
+COPY deploy/dist/wheelhouse-worker /wheelhouse
+RUN pip install --no-index --find-links=/wheelhouse "memhub[engine]==0.1.0"
+
+# 静态前端烘进镜像：容器根文件系统只读，不能指望宿主机路径。
+COPY deploy/dist/web-dist /app/web-dist
+
+# 与主机 memhub 用户一致（999:987）；数据只能写 /var/lib/memhub 挂载卷。
+USER 999:987
+EXPOSE 8701
+
+# kb-api 代码里固定绑 127.0.0.1（host 网络下由 nginx 反代），不做可配置。
+CMD ["memhub", "kb", \
+     "--knowledge-dir", "/var/lib/memhub/knowledge", \
+     "--graph-out", "/var/lib/memhub/kb/kg.json", \
+     "--web-dist", "/app/web-dist", \
+     "--data-dir", "/var/lib/memhub/data"]

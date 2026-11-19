@@ -14,8 +14,11 @@
 # - 监听 127.0.0.1:4180，不发布端口；公网只经 nginx 443。
 # - 凭据（CLIENT_ID / CLIENT_SECRET / COOKIE_SECRET）走 env_file 注入，
 #   /etc/memhub/env 0600；COOKIE_SECRET = `openssl rand -base64 32`，泄露即全员会话失效。
-# - 凭据未填时本服务启动会失败——这是有意的：凭据到位前 nginx 不挂 explorer，
-#   不需要它先跑起来。`docker compose up -d ingest worker explorer` 不含本服务。
+# - 凭据未填时本服务启动会失败——这是有意的：凭据到位前 nginx 不挂管理台，
+#   不需要它先跑起来。`docker compose up -d ingest worker kb` 不含本服务。
+#
+# 563fefe 起管理台（kb-api）取代 explorer 挂到 `/`：图谱页由前端自带 cytoscape
+# 渲染（/api/v1/kb/graph），explorer 容器不再需要，已从本文件移除。
 
 x-defaults: &defaults
   user: "999:987"
@@ -68,13 +71,32 @@ services:
     restart: "on-failure:5"
     # 实测：抽一枚 60K 字符会话（5 段、54 节点 / 36 边）峰值 ~155MB（本机 venv），
     # 单并发 + 60K 输入上限让峰值有界。640m 是 4 倍余量。
-    # 三个服务合计 384+640+384=1.4G，守住与 eval 中台约定的 1.5G 硬顶。
     mem_limit: 640m
     memswap_limit: 640m
 
+  kb:
+    <<: *defaults
+    # 管理台：静态前端 + /api/v1/kb/*。图谱页由前端 cytoscape 渲染，
+    # 数据来自 /var/lib/memhub/kb/kg.json（由本服务在真源变更后重建）。
+    image: memhub/app-kb:0.1.0
+    container_name: memhub-kb
+    # 上传接口把文件写进 /var/lib/memhub/data（raw_store），worker 轮询同一个卷。
+    # 不连数据库：kb 只读 markdown 真源 + 文件队列，鉴权靠 nginx 的 oauth2-proxy。
+    # kb-api 代码固定绑 127.0.0.1:8701（无 --allow-non-loopback 之类的开关）。
+    # 实测：投影重建（437 节点 / 2631 边）峰值 ~143MB，384m 是 2.5 倍余量。
+    mem_limit: 384m
+    memswap_limit: 384m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8701/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   explorer:
     <<: *defaults
-    # 复用 worker 镜像：serve 需要 engine extra（semantica）与 python-multipart。
+    # 563fefe 起不再部署：管理台自带图谱页，图谱投影由 kb-api 重建。
+    # 保留本段仅作为回退参考——需要旧 explorer 时取消注释、把 nginx `/` 改回 8703。
+    profiles: ["legacy"]
     image: memhub/app-worker:0.1.0
     container_name: memhub-explorer
     # 只读可视化：读 rebuild timer 产出的 kg.json，绑回环 8703，由 nginx 挂到 /。
@@ -103,13 +125,14 @@ services:
       timeout: 5s
       retries: 3
 
-  # 认证网关（用户已拍板：oauth2-proxy，explorer 不做 basic auth 过渡）。
+  # 认证网关（用户已拍板：oauth2-proxy，管理台不做 basic auth 过渡）。
   # 凭据只存在于 /etc/memhub/env（0600），由 env_file 注入，不进 git/compose。
   # **不要写 `environment: {OAUTH2_PROXY_CLIENT_ID: ${...}}`**：compose 的 `${}`
   # 只查宿主 shell/.env，不读 env_file，会把值覆盖成空串（部署时踩过）。
   # COOKIE_SECRET 必须是 32 字节随机数的 base64：
   #   openssl rand -base64 32
   # 公网 443 → nginx /oauth2/* 与受保护的 / → 127.0.0.1:4180；本服务不发布端口。
+  # upstream 指向 kb-api（8701）：563fefe 起管理台取代 explorer 挂到 `/`。
   oauth2-proxy:
     <<: *defaults
     image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
@@ -117,7 +140,7 @@ services:
     command:
       - --http-address=127.0.0.1:4180
       - --provider=github
-      - --upstream=http://127.0.0.1:8703
+      - --upstream=http://127.0.0.1:8701
       - --redirect-url=https://memhub.work/oauth2/callback
       # v7.6.0 要求 email-domain 必须设置，否则启动即 invalid configuration；
       # 实际访问限制由 --github-user 白名单生效（用户选择「仅我的账号」）。
