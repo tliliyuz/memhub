@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（上线当日回改）
+
+- `fix(deploy)`：部署时由 peer 发现并修正的 5 处，已同步回仓库：① vhost `/api/v1/` 的 `proxy_pass` 必须带尾斜杠，否则前缀原样透传、采集路由全 404；② 补 `error_page 429 = @memhub_limited;`，否则限流信封是死 location；③ compose oauth2-proxy 的 `environment: ${VAR}` 会把 env_file 值覆盖成空串（`${}` 只查宿主 shell/.env），已删除映射、只留 env_file；④ v7.6.0 镜像 distroless，无 shell/wget，healthcheck 删除；⑤ `/portal` 实际目录为 `/var/www/portal/` 并补 `/portal` → `/portal/` 301。
+- `feat(deploy)`：网关白名单按用户选择配置 `--github-user=tliliyuz`；v7.6.0 必须同时设 `--email-domain`（否则 invalid configuration），实际限制由 `github-user` 生效。
+- 上线结果：四容器只监听 127.0.0.1（8700/8703/4180），ingest/explorer healthy；oauth2 4.6M / explorer 158M / ingest 62M / worker 34M；`/` 302 → GitHub authorize，`/oauth2/auth` 匿名 401，`/api/v1/healthz` 公网 404 / 本地 200，`/portal/` 200，purge 三行退出 0。
+
 ## 2026-11-19（oauth2-proxy 网关交付物）
 
 - `feat(deploy)`：用户拍板 explorer 暴露用 **oauth2-proxy**（不做 basic auth 过渡）。compose 新增网关服务（v7.6.0 固定 tag，host 网络监听 127.0.0.1:4180 不发端口，128m，read_only+tmpfs+日志限流照容器标准）；凭据槽位只走 env_file，**凭据缺失启动失败是有意的**，日常 `up -d` 不含此服务。

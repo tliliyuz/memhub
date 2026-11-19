@@ -71,13 +71,13 @@
 
 **顺序约束**：explorer 读的是 rebuild 产出的 `kg.json`，**先跑一次 rebuild、再起 explorer**。图谱不存在时 `memhub serve` 直接 exit 2，`on-failure:5` 会让它连续重启 5 次后停住——这是有意的，别改 `unless-stopped` 把错误藏进重启循环。
 
-nginx 需要再加一段（explorer，只读可视化）：
+nginx 需要再加一段（explorer，只读可视化；2026-11-19 已按此上线）：
 
 ```nginx
 location / {
-    auth_request /__explorer_auth;          # oauth2-proxy 凭据到位前不启用
+    auth_request /__explorer_auth;
     error_page 401 = @explorer_login;
-    proxy_pass http://127.0.0.1:8703;
+    proxy_pass http://memhub_explorer;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;
@@ -88,12 +88,14 @@ location / {
 }
 ```
 
-完整 vhost 草案（含 `/oauth2/*`、`/__explorer_auth` 判决段、ACME webroot 与
-`/api/v1/` 的优先级说明）在 `deploy/nginx/memhub.vhost.conf`。
-认证网关已定为 **oauth2-proxy**（用户拍板，不做 basic auth 过渡）：
-凭据（GitHub OAuth App 的 client_id / client_secret / cookie secret）到位前
-`location /` 保持现状，explorer 容器先跑但不挂 nginx。cookie secret 32 字节
-随机（`openssl rand -base64 32`），只写 `/etc/memhub/env`（0600）。
+完整 vhost（含 `/oauth2/*`、`/__explorer_auth` 判决段、ACME webroot、
+`/api/v1/` 的尾斜杠与限流、`error_page 429` 信封、`/portal/`）在
+`deploy/nginx/memhub.vhost.conf`，该文件与线上一致。
+认证网关为 **oauth2-proxy v7.6.0**（GitHub OAuth，`--github-user` 白名单）：
+凭据只写 `/etc/memhub/env`（0600），cookie secret 32 字节随机
+（`openssl rand -base64 32`）。**注意两处部署坑**：镜像 distroless 不能配
+exec 型 healthcheck；compose 的 `environment: ${VAR}` 会把 env_file 值覆盖成空串，
+只能靠 `env_file` 注入。
 
 注意 explorer 的 API 只允许回环访问（`SEMANTICA_ALLOW_ANONYMOUS=true` 下无鉴权），
 nginx 把它挂到公网前请确认只暴露只读页面；需要登录墙时在 nginx 层加 basic auth。

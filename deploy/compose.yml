@@ -104,8 +104,9 @@ services:
       retries: 3
 
   # 认证网关（用户已拍板：oauth2-proxy，explorer 不做 basic auth 过渡）。
-  # 凭据槽位留空：OAUTH2_PROXY_CLIENT_ID / OAUTH2_PROXY_CLIENT_SECRET /
-  # OAUTH2_PROXY_COOKIE_SECRET 只存在于 /etc/memhub/env（0600），不进 git/compose。
+  # 凭据只存在于 /etc/memhub/env（0600），由 env_file 注入，不进 git/compose。
+  # **不要写 `environment: {OAUTH2_PROXY_CLIENT_ID: ${...}}`**：compose 的 `${}`
+  # 只查宿主 shell/.env，不读 env_file，会把值覆盖成空串（部署时踩过）。
   # COOKIE_SECRET 必须是 32 字节随机数的 base64：
   #   openssl rand -base64 32
   # 公网 443 → nginx /oauth2/* 与受保护的 / → 127.0.0.1:4180；本服务不发布端口。
@@ -118,22 +119,17 @@ services:
       - --provider=github
       - --upstream=http://127.0.0.1:8703
       - --redirect-url=https://memhub.work/oauth2/callback
+      # v7.6.0 要求 email-domain 必须设置，否则启动即 invalid configuration；
+      # 实际访问限制由 --github-user 白名单生效（用户选择「仅我的账号」）。
       - --email-domain=*
+      - --github-user=tliliyuz
       - --cookie-name=memhub_oauth2
       - --cookie-secure=true
       - --cookie-httponly=true
       - --pass-access-token=false
       - --scope=user:email
-    environment:
-      OAUTH2_PROXY_CLIENT_ID: ${OAUTH2_PROXY_CLIENT_ID}
-      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_PROXY_CLIENT_SECRET}
-      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
     restart: unless-stopped
     mem_limit: 128m
     memswap_limit: 128m
-    healthcheck:
-      # 探的是本进程监听，不带上游：上游挂了由 nginx 与 explorer 自己的健康检查暴露。
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:4180/ping || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+    # 无 healthcheck：v7.6.0 镜像是 distroless（没有 shell / wget / curl），
+    # 容器内起不了探针；存活状态看 `docker ps` 与 nginx 侧 502。
