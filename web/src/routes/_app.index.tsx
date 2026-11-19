@@ -37,6 +37,7 @@ import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
+import { UploadDialog } from '@/components/upload/upload-dialog'
 
 export const Route = createFileRoute('/_app/')({
   component: KnowledgeBaseIndex,
@@ -86,6 +87,7 @@ function KnowledgeBaseIndex() {
                 <Network /> 全局图谱
               </Link>
             </Button>
+            <UploadDialog />
             <CreateKbDialog />
           </div>
         </div>

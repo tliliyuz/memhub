@@ -176,6 +176,51 @@ export type WriteResult = {
   node?: NodeDetail
 }
 
+export type UploadRejectionReason =
+  | 'unsupported_type'
+  | 'not_utf8'
+  | 'empty'
+  | 'too_large'
+  | 'invalid_name'
+
+export type UploadAccepted = {
+  name: string
+  sha256: string
+  chars: number
+}
+
+export type UploadRejected = {
+  name: string
+  reason: UploadRejectionReason | string
+}
+
+export type UploadResult = {
+  batch_id: string
+  project: string
+  accepted: UploadAccepted[]
+  rejected: UploadRejected[]
+  queued: boolean
+}
+
+export type UploadFileStatus = 'queued' | 'processed' | 'failed' | 'missing'
+
+export type UploadBatchFile = {
+  name: string
+  sha256: string
+  status: UploadFileStatus
+  /** 仅在重试失败时出现。 */
+  attempts?: number
+}
+
+export type UploadBatch = {
+  batch_id: string
+  project: string
+  created_at: string
+  total: number
+  counts: Record<UploadFileStatus, number>
+  files: UploadBatchFile[]
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly code: number
@@ -195,7 +240,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: {
       Accept: 'application/json',
-      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(init.body && !(init.body instanceof FormData)
+        ? { 'Content-Type': 'application/json' }
+        : {}),
       ...init.headers,
     },
   })
@@ -325,6 +372,15 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+  /** 上传文档进提炼队列；返回 201 只代表「已入队」，抽取由 worker 异步完成。 */
+  uploadDocuments: (project: string, files: File[]) => {
+    const body = new FormData()
+    body.set('project', project)
+    for (const file of files) body.append('files', file, file.name)
+    return request<UploadResult>('/api/v1/kb/uploads', { method: 'POST', body })
+  },
+  uploadStatus: (batchId: string) =>
+    request<UploadBatch>(`/api/v1/kb/uploads/${encodeURIComponent(batchId)}`),
   graph: (project: string) =>
     request<KnowledgeGraph>(`/api/v1/kb/graph${queryString({ project })}`),
 }
