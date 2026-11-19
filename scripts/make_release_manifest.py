@@ -7,8 +7,20 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import sys
 from pathlib import Path
+
+
+def release_commit() -> str:
+    """清单必须自带 release commit：否则部署方无从确认 wheel 到底由哪一版构建。"""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return result.stdout.strip()
 
 
 def sha256(path: Path) -> str:
@@ -26,6 +38,7 @@ def main(argv: list[str]) -> int:
         return 2
     total = 0
     print(f"# 交付清单 {root}")
+    print(f"\n- release commit: `{release_commit()}`")
     for wheelhouse in sorted(path for path in root.iterdir() if path.is_dir()):
         files = sorted(path for path in wheelhouse.rglob("*") if path.is_file())
         size = sum(path.stat().st_size for path in files)
