@@ -49,6 +49,13 @@ def main(argv: list[str] | None = None) -> int:
     mcp = sub.add_parser("mcp", help="以 MCP stdio 服务暴露检索组给 agent")
     mcp.add_argument("--knowledge-dir", default=None)
 
+    purge = sub.add_parser(
+        "purge-expired", help="删掉重放窗口（24h）外的批次记录，供 systemd timer 调用"
+    )
+    purge.add_argument(
+        "--keep-hours", type=int, default=25, help="保留最近 N 小时的批次（默认 25）"
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -61,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         return _serve(args)
     if args.command == "mcp":
         return _mcp(args)
+    if args.command == "purge-expired":
+        return _purge_expired(args)
     parser.print_help()
     return 0
 
@@ -210,6 +219,26 @@ def _mcp(args: argparse.Namespace) -> int:
         print(f"知识库目录不存在: {store.root}", file=sys.stderr)
         return 2
     return serve_mcp(store)
+
+
+def _purge_expired(args: argparse.Namespace) -> int:
+    """批次 TTL 清理：给 systemd timer 单独调用，不拉起 API 进程。"""
+    dsn = os.environ.get("MEMHUB_DB_URL", "")
+    if not dsn:
+        print("MEMHUB_DB_URL 未设置；内存实现无需清理", file=sys.stderr)
+        return 0
+    from datetime import timedelta
+
+    from memhub.ingest.postgres import PostgresStore
+
+    store = PostgresStore(dsn, min_size=1, max_size=1)
+    try:
+        store.migrate()  # 幂等：库是空的也能自建表，timer 不依赖部署顺序
+        deleted = store.purge_expired(keep=timedelta(hours=args.keep_hours))
+    finally:
+        store.close()
+    print(f"已清理 {deleted} 条过期批次记录")
+    return 0
 
 
 if __name__ == "__main__":
