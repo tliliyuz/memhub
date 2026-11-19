@@ -74,12 +74,19 @@ class AnthropicClient:
                         if block.get("type") == "text"
                     ]
                     text = "".join(parts).strip()
-                    if not text:
-                        raise LLMError("模型返回空内容")
-                    return text
-                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                if response.status_code < 500 and response.status_code != 429:
-                    raise LLMError(last_error)
+                    if text:
+                        return text
+                    # 200 但没有 text 块：可能是上游偶发空响应，也可能是
+                    # max_tokens 全被 thinking 吃掉。带上 stop_reason 重试，
+                    # 两种情况在日志里才能区分开。
+                    kinds = ",".join(str(block.get("type")) for block in body.get("content", []))
+                    last_error = (
+                        f"模型返回空内容（stop_reason={body.get('stop_reason')}, blocks=[{kinds}]）"
+                    )
+                else:
+                    last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+                    if response.status_code < 500 and response.status_code != 429:
+                        raise LLMError(last_error)
             if attempt + 1 < self._attempts:
                 await asyncio.sleep(min(30.0, 2.0**attempt + random.random()))
         raise LLMError(f"调用失败（{self._attempts} 次）: {last_error}")

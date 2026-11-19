@@ -1,10 +1,13 @@
-"""Anthropic 协议客户端的 URL 拼接（base_url 带不带 `/v1` 都要正确）。"""
+"""Anthropic 协议客户端：URL 拼接与空响应重试。"""
 
 from __future__ import annotations
 
+import asyncio
+
+import httpx
 import pytest
 
-from memhub.worker.llm import _messages_url
+from memhub.worker.llm import AnthropicClient, LLMError, _messages_url
 
 
 @pytest.mark.parametrize(
@@ -18,3 +21,60 @@ from memhub.worker.llm import _messages_url
 )
 def test_messages_url(base_url: str, expected: str) -> None:
     assert _messages_url(base_url) == expected
+
+
+def _client(handler: httpx.AsyncBaseTransport, *, attempts: int = 2) -> AnthropicClient:
+    client = AnthropicClient("https://api.example.com", "test-key", attempts=attempts)
+    client._http = httpx.AsyncClient(transport=handler)
+    return client
+
+
+async def test_empty_text_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "thinking"}, {"type": "text", "text": "  "}],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]},
+        )
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    client = _client(httpx.MockTransport(handler))
+    try:
+        assert await client.complete("hi", model="m") == "ok"
+    finally:
+        await client.aclose()
+    assert len(calls) == 2
+
+
+async def test_empty_text_error_includes_stop_reason() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "stop_reason": "max_tokens",
+                "content": [{"type": "thinking"}, {"type": "text", "text": ""}],
+            },
+        )
+
+    client = _client(httpx.MockTransport(handler), attempts=1)
+    try:
+        with pytest.raises(LLMError) as excinfo:
+            await client.complete("hi", model="m")
+    finally:
+        await client.aclose()
+    message = str(excinfo.value)
+    assert "max_tokens" in message
+    assert "thinking" in message

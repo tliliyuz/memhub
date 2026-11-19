@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（worker：空响应重试并记录 stop_reason）
+
+- `fix(worker)`：模型返回 200 但无 `text` 块时，此前直接按“非 5xx 不重试”抛错——真实跑上传验收时同一输入连续两次命中空响应，文件被记 2 次失败、逼近 3 次隔离线，而单独重放同一 prompt 又能正常返回。现在空内容按可重试处理，且错误信息带上 `stop_reason` 与 content 块类型，便于区分上游偶发空响应与 `max_tokens` 被 thinking 吃满。
+- `test`：`tests/unit/test_llm.py` 新增空响应重试与错误信息用例（`httpx.MockTransport`，不 sleep）。
+- 验证：上传批次 `10d8af13…`（cloudworld，`kb-upload-smoke.md`）`worker --once` 通过——`+13 new, 0 updated, 11 edges`，状态 `queued → processed`。
+
 ## 2026-11-19（上传：只接受已存在的知识库）
 
 - `fix(kb)`：`POST /api/v1/kb/uploads` 校验 `project` 对应的 `<knowledge>/<project>/` 目录存在，不存在返回 404/`1011`。此前只校验 id 格式——拼错的 project 会被 worker 提炼时凭空建出一个空库目录，而管理台按真源一级目录枚举知识库，就会多出一个 0 节点的「幽灵库」。新增 `catalog.exists()` 轻量判断（不逐库扫节点）。
