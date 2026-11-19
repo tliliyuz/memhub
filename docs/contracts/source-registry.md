@@ -2,6 +2,8 @@
 
 > 版本: 0.2
 > 由桌面端（agent-console）写入，采集器只读。位置：Windows `%APPDATA%\memhub\sources.json`，macOS `~/Library/Application Support/memhub/sources.json`，Linux `~/.config/memhub/sources.json`。
+> 适用范围：`sources.json` 的结构、字段、写入约定与采集器行为。
+> 不负责：采集传输协议（见 [ingest-api.md](ingest-api.md)）、知识节点枚举（见 [node-schema.md](node-schema.md)）。
 
 ## 1. 结构
 

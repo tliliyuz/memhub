@@ -4,6 +4,8 @@
 > 端点：`https://memhub.work/mcp`（Streamable HTTP）
 > 鉴权：`Authorization: Bearer <device_token>`（与采集器同一鉴权体系）
 > 设计原则：**读者只读、写者有界、永不硬删**。
+> 适用范围：MCP 工具、参数、错误码与不变式。
+> 不负责：节点字段枚举（见 [node-schema.md](node-schema.md)）、采集协议（见 [ingest-api.md](ingest-api.md)）。
 
 ## 1. 角色
 

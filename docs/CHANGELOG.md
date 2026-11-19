@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-19（治理：接入评测仓的文档治理门禁）
+
+- `feat(guard)`：把评测仓（`eval-platform-for-ai`）的文档治理脚本接入本仓，按本仓文档矩阵参数化，不改变既有正文语义：
+  - `check_document_format.py` 换成同源实现（支持 `--staged`、H2 连续编号、ADR 手工编号与历史章节名检查），保留本仓对 `knowledge/`、`prompts/` 的排除；`ingest-api.md` 因有意从 §0 起编，不列入编号检查。
+  - 新增 `check_document_ownership.py`（权威文档归属、实施历史不得进稳定文档、疑似密钥值）、`check_adr_governance.py`（索引、状态词、链接）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁止 `Co-Authored-By` 等工具署名行）。
+- `docs`：按新门禁补齐权威文档元数据——`architecture.md`、`contracts/README.md` 与 5 份契约、`decisions/README.md`、`DEVELOPMENT.md` 增加「适用范围 / 不负责」；ADR-0005 状态行改为裸词 `accepted`，实现验证记录移入属性表的「验证」行。
+- `chore(pre-commit)`：钩子扩为 ruff、基础检查（含 `check-yaml`、`mixed-line-ending`）、文档格式/归属（`--staged`）、ADR 治理、入口镜像、env 键集、mypy、禁手写 SQL、禁同步 I/O、提交信息检查（`commit-msg`）。
+- 验证：`check_document_format.py`、`check_document_ownership.py --all`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 全部通过；`git diff --check` 通过。
+
 ## 2026-11-19（治理：Git 授权放开为仅限制远端操作）
 
 - `docs`：根入口 `CLAUDE.md` / `AGENTS.md` §2 与 [DEVELOPMENT](guides/DEVELOPMENT.md) §6 的 Git 授权边界改为：本地写操作（提交、合并、变基、切换、worktree、分支与标签管理、清理等）默认授权，无需逐次确认；仅远端操作（`push`、`fetch`、`pull`、`clone`、修改 `remote`、推送标签、创建或更新 PR/release 等）需要负责人针对当前操作单独授权。本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。

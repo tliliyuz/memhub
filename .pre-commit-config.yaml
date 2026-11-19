@@ -12,6 +12,9 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: check-merge-conflict
+      - id: check-yaml
+      - id: mixed-line-ending
+        args: [--fix=lf]
       - id: check-added-large-files
         args: [--maxkb=512]
 
@@ -34,10 +37,31 @@ repos:
 
       - id: doc-format
         name: Markdown 文档格式与结构检查
-        entry: python scripts/check_document_format.py
+        entry: python scripts/check_document_format.py --staged
         language: system
         pass_filenames: false
-        files: ^(docs/|CLAUDE\.md$|AGENTS\.md$|README\.md$)
+        files: '\.md$'
+
+      - id: doc-ownership
+        name: 文档权威归属检查
+        entry: python scripts/check_document_ownership.py --staged
+        language: system
+        pass_filenames: false
+        files: '\.md$'
+
+      - id: adr-governance
+        name: ADR 索引、状态与链接检查
+        entry: python scripts/check_adr_governance.py
+        language: system
+        pass_filenames: false
+        files: '^(docs/decisions/.*\.md|AGENTS\.md|CLAUDE\.md)$'
+
+      - id: agent-entrypoints-sync
+        name: 根级入口镜像检查
+        entry: python scripts/check_agent_entrypoints_sync.py
+        language: system
+        pass_filenames: false
+        files: '^(AGENTS|CLAUDE)\.md$'
 
       - id: no-raw-sql
         name: 禁止手写 SQL（数据访问走 ORM/Core）
@@ -52,3 +76,9 @@ repos:
         language: system
         pass_filenames: false
         files: ^src/
+
+      - id: commit-message
+        name: 提交信息检查（禁用工具署名行）
+        entry: python scripts/check_commit_message.py
+        language: system
+        stages: [commit-msg]

@@ -2,6 +2,7 @@
 
 > 版本: 0.1（草案，待与客户端/服务器侧评审）
 > 适用范围：知识库真源（markdown frontmatter）、API 返回、MCP 输出、图谱投影共用同一套枚举。
+> 不负责：检索与工具接口（见 [mcp-tools.md](mcp-tools.md)）、采集协议（见 [ingest-api.md](ingest-api.md)）。
 
 ## 1. 真源形态
 

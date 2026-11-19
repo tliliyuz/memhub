@@ -5,6 +5,7 @@
 | 文档状态 | specified |
 | 最后更新 | 2026-11-19 |
 | 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
+| 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../architecture.md) 与 [contracts](../contracts/README.md)） |
 
 ## 1. 环境准备
 
@@ -53,6 +54,8 @@ prompts/      各 source_type 的抽取 profile
 | 运维命令 | `cli/` | 在命令里实现业务规则 |
 
 新增顶层目录或改分层：先改 [architecture](../architecture.md)，再改本表。
+
+治理门禁与评测仓同源（`scripts/` 下脚本 + pre-commit）：`check_document_format.py --staged`（结构、H2 编号、链接、入口镜像）、`check_document_ownership.py --staged`（权威文档归属、实施历史与密钥形态）、`check_adr_governance.py`（ADR 索引与状态词）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁工具署名行）、`check_no_raw_sql.py`、`check_async_io.py`、`check_env_example_keys.py`。`knowledge/` 与 `prompts/` 不是治理文档，文档类检查自动排除。
 
 ## 3. 常用命令
 

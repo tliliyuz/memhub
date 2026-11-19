@@ -2,6 +2,9 @@
 
 命名：`ADR-NNNN-<topic>.md`，一旦接受不修改正文；结论变化时新增一条并互相引用。
 
+> 适用范围：架构决策的编号、状态与索引。
+> 不负责：决策正文（见各 ADR 文件）、实施记录（见 [CHANGELOG.md](../CHANGELOG.md)）。
+
 | 编号 | 标题 | 状态 |
 |:---|:---|:---|
 | [ADR-0001](ADR-0001-no-proxy-in-request-path.md) | 记忆能力不进入模型请求路径 | accepted |

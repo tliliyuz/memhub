@@ -1,6 +1,9 @@
 # 架构
 
 > 一句话：**采集端是无状态哑管道，云端是唯一有状态的提炼者。** 任何记忆能力都不在请求路径上。
+>
+> 适用范围：系统拓扑、组件职责、故障隔离约束与部署形态。
+> 不负责：环境变量键值（见 [tech/ENVIRONMENT.md](tech/ENVIRONMENT.md)）、跨端字段契约（见 [contracts/](contracts/README.md)）、实施历史（见 [CHANGELOG.md](CHANGELOG.md)）。
 
 ## 1. 拓扑
 

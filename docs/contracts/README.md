@@ -2,6 +2,9 @@
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
+> 适用范围：跨端契约索引与变更流程。
+> 不负责：各契约的具体字段（见下表各文档）。
+
 | 文档 | 内容 | 主要读者 |
 |---|---|---|
 | [node-schema.md](node-schema.md) | 知识节点 kind/entity_kind/边枚举、frontmatter、tier 治理、投影 | 服务端、治理 agent、MCP |
