@@ -62,11 +62,13 @@ prompts/      各 source_type 的抽取 profile
 | 契约测试 | `pytest tests/contract` |
 | 检查 | `ruff check .` |
 | 格式 | `ruff format --check .` |
-| 类型 | `mypy src` |
+| 类型 | `python -m mypy src` |
 | 环境键集 | `python scripts/check_env_example_keys.py` |
 | 文档链接与结构 | `python scripts/check_document_format.py` |
 | 启动依赖 | `docker compose -f deploy/compose.yaml up -d` |
 | 本机运行 | `memhub --version` |
+
+本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
 ## 4. 验证矩阵
 
