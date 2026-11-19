@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-11-19（治理：ego-lite 验收后关闭标签页）
+
+- `docs`：根入口 `CLAUDE.md` / `AGENTS.md` §2 新增硬约束——使用 ego-lite（ego-browser）做页面验收后，关闭本次打开的所有标签页，避免占用浏览器资源、干扰后续会话或误认页面状态。
+- 验证：`python scripts/check_document_format.py`、`python scripts/check_env_example_keys.py`、`git diff --check` 通过。
+
 ## 2026-11-19（知识库隔离导航 + 自绘图谱 + 旧 wiki 导入）
 
 - `feat(kb)`：新增 `memhub.kb.catalog`——知识库（= 真源一级目录）成为一等公民：`GET/POST /api/v1/kb/projects`、`PATCH /api/v1/kb/projects/{project}`；显示名/描述存在 `<knowledge>/.kbs.json`，目录存在但未登记的库按目录名兜底。`GET /api/v1/kb/graph?project=` 直接读 markdown 真源返回**单库子图**（节点 + 解析后的边 + 度数 + 未解析边数），不依赖 `kg.json`。
