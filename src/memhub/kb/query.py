@@ -2,7 +2,7 @@
 
 真源是 markdown，这里只读不写、不加缓存。先用标题/标签/正文的关键词打分顶上
 真实索引；后续接 FTS 或向量时只替换本模块的实现，MCP 层与工具形状不变
-（见 `docs/contracts/mcp-tools.md`）。
+（见 `docs/contracts/mcp-tools.md`）。文件 IO 全程 await，不阻塞事件循环。
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from anyio import Path as AsyncPath
 
 from memhub.contract import Kind, NodeFrontmatter, Predicate, Tier
 from memhub.kb.store import KnowledgeStore
@@ -37,9 +39,9 @@ class NotFound(QueryError):
     code = 3001
 
 
-def records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
+async def records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
     """读全部节点；管理端列表复用同一套解析（坏 frontmatter 跳过）。"""
-    return _records(store, project)
+    return await _records(store, project)
 
 
 def terms(query: str) -> list[str]:
@@ -66,11 +68,11 @@ class EdgeIndex:
     incident: dict[str, int]
 
 
-def _records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
+async def _records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
     records: list[NodeRecord] = []
-    for node_id in store.list_ids(project):
+    for node_id in await store.list_ids(project):
         try:
-            node, body = store.read(node_id)
+            node, body = await store.read(node_id)
         except (OSError, ValueError):
             # 手写坏的 frontmatter 不应该让整次检索失败；读单个节点时仍会报错。
             continue
@@ -132,7 +134,7 @@ def _validate_kinds(kinds: list[str] | None) -> set[str] | None:
     return set(kinds)
 
 
-def search(
+async def search(
     store: KnowledgeStore,
     query: str,
     *,
@@ -151,7 +153,7 @@ def search(
         return {"results": [], "hint": "query 为空；请给出要查的概念、报错或项目"}
 
     scored: list[tuple[float, NodeRecord]] = []
-    for record in _records(store, project):
+    for record in await _records(store, project):
         if wanted_kinds is not None and record.node.kind.value not in wanted_kinds:
             continue
         if tier != "all" and record.node.tier.value != tier:
@@ -161,7 +163,10 @@ def search(
             scored.append((score, record))
 
     if not scored:
-        return {"results": [], "hint": _empty_hint(store, project, wanted_kinds, tier, terms)}
+        return {
+            "results": [],
+            "hint": await _empty_hint(store, project, wanted_kinds, tier, terms),
+        }
 
     scored.sort(key=lambda item: (-item[0], item[1].id))
     results = []
@@ -181,7 +186,7 @@ def search(
     return {"results": results}
 
 
-def _empty_hint(
+async def _empty_hint(
     store: KnowledgeStore,
     project: str | None,
     kinds: set[str] | None,
@@ -191,7 +196,7 @@ def _empty_hint(
     if tier == "all":
         return "没有匹配节点；换个关键词，或确认 project/kinds 过滤是否过窄"
     candidates = 0
-    for record in _records(store, project):
+    for record in await _records(store, project):
         if record.node.tier is not Tier.CANDIDATE:
             continue
         if kinds is not None and record.node.kind.value not in kinds:
@@ -210,9 +215,9 @@ def _check_id(node_id: str) -> None:
         raise NotFound(f"节点 id 不合法: {node_id!r}")
 
 
-def edge_index(store: KnowledgeStore) -> EdgeIndex:
+async def edge_index(store: KnowledgeStore) -> EdgeIndex:
     """解析 `_edges.jsonl`。规则与投影一致：完整 id 优先，其次唯一 slug。"""
-    ids = set(store.list_ids())
+    ids = set(await store.list_ids())
     slug_index: dict[str, list[str]] = {}
     for node_id in ids:
         slug_index.setdefault(node_id.rsplit("/", 1)[-1], []).append(node_id)
@@ -226,8 +231,10 @@ def edge_index(store: KnowledgeStore) -> EdgeIndex:
     edges: list[dict[str, str]] = []
     unresolved: list[dict[str, str]] = []
     incident: dict[str, int] = {}
-    for path in sorted(store.root.rglob("_edges.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
+    paths = [path async for path in AsyncPath(store.root).rglob("_edges.jsonl")]
+    for path in sorted(paths, key=str):
+        text = await path.read_text(encoding="utf-8")
+        for line in text.splitlines():
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -250,13 +257,13 @@ def edge_index(store: KnowledgeStore) -> EdgeIndex:
     return EdgeIndex(edges=edges, unresolved=unresolved, incident=incident)
 
 
-def read_node(store: KnowledgeStore, node_id: str) -> dict[str, Any]:
+async def read_node(store: KnowledgeStore, node_id: str) -> dict[str, Any]:
     """真源全文 + frontmatter + 出/入边（各限 20 条）。"""
     _check_id(node_id)
-    if not store.exists(node_id):
+    if not await store.exists(node_id):
         raise NotFound(f"节点不存在: {node_id}")
-    node, body = store.read(node_id)
-    index = edge_index(store)
+    node, body = await store.read(node_id)
+    index = await edge_index(store)
     out = [
         {"predicate": edge["predicate"], "target": edge["target"]}
         for edge in index.edges
@@ -288,7 +295,7 @@ def _validate_predicates(predicates: list[str] | None) -> set[str] | None:
     return set(predicates)
 
 
-def related(
+async def related(
     store: KnowledgeStore,
     node_id: str,
     *,
@@ -298,12 +305,12 @@ def related(
 ) -> dict[str, Any]:
     """邻接子图；`depth` 上限 2，边两端都在结果里时才返回。"""
     _check_id(node_id)
-    if not store.exists(node_id):
+    if not await store.exists(node_id):
         raise NotFound(f"节点不存在: {node_id}")
     depth = max(1, min(depth, 2))
     limit = max(1, min(limit, MAX_RESULTS))
     wanted = _validate_predicates(predicates)
-    index = edge_index(store)
+    index = await edge_index(store)
 
     adjacency: dict[str, list[tuple[str, str]]] = {}
     for edge in index.edges:
@@ -327,7 +334,7 @@ def related(
 
     selected = sorted(distance, key=lambda item: (distance[item], item))[:limit]
     chosen = set(selected)
-    records = {record.id: record for record in _records(store)}
+    records = {record.id: record for record in await _records(store)}
     nodes = []
     for item in selected:
         record = records.get(item)
@@ -352,7 +359,7 @@ def related(
     return {"id": node_id, "depth": depth, "nodes": nodes, "edges": edges}
 
 
-def audit_list(
+async def audit_list(
     store: KnowledgeStore,
     *,
     limit: int = 50,
@@ -364,8 +371,8 @@ def audit_list(
     """
     limit = max(1, min(limit, MAX_RESULTS))
     offset = max(0, offset)
-    records = _records(store)
-    index = edge_index(store)
+    records = await _records(store)
+    index = await edge_index(store)
     now = datetime.now(UTC)
     issues: list[dict[str, Any]] = [
         {

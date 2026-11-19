@@ -13,6 +13,8 @@ import json
 import sys
 from typing import Any, TextIO
 
+import anyio
+
 from memhub import __version__
 from memhub.contract import Kind, Predicate
 from memhub.kb import query
@@ -108,12 +110,12 @@ def _content(payload: dict[str, Any], *, is_error: bool = False) -> dict[str, An
     }
 
 
-def call_tool(name: str, arguments: dict[str, Any], store: KnowledgeStore) -> dict[str, Any]:
+async def call_tool(name: str, arguments: dict[str, Any], store: KnowledgeStore) -> dict[str, Any]:
     try:
         match name:
             case "kb_search":
                 return _content(
-                    query.search(
+                    await query.search(
                         store,
                         str(arguments.get("query", "")),
                         project=arguments.get("project"),
@@ -123,10 +125,10 @@ def call_tool(name: str, arguments: dict[str, Any], store: KnowledgeStore) -> di
                     )
                 )
             case "kb_read":
-                return _content(query.read_node(store, str(arguments.get("id", ""))))
+                return _content(await query.read_node(store, str(arguments.get("id", ""))))
             case "kb_related":
                 return _content(
-                    query.related(
+                    await query.related(
                         store,
                         str(arguments.get("id", "")),
                         depth=int(arguments.get("depth", 1)),
@@ -136,7 +138,7 @@ def call_tool(name: str, arguments: dict[str, Any], store: KnowledgeStore) -> di
                 )
             case "kb_audit_list":
                 return _content(
-                    query.audit_list(
+                    await query.audit_list(
                         store,
                         limit=int(arguments.get("limit", 50)),
                         offset=int(arguments.get("offset", 0)),
@@ -161,7 +163,7 @@ def _error(message_id: object, code: int, text: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": text}}
 
 
-def handle_message(message: dict[str, Any], store: KnowledgeStore) -> dict[str, Any] | None:
+async def handle_message(message: dict[str, Any], store: KnowledgeStore) -> dict[str, Any] | None:
     """一条 JSON-RPC 消息 → 响应；通知返回 None。"""
     message_id = message.get("id")
     method = message.get("method")
@@ -202,13 +204,14 @@ def handle_message(message: dict[str, Any], store: KnowledgeStore) -> dict[str, 
         arguments = params.get("arguments") or {}
         if not isinstance(arguments, dict):
             return _error(message_id, JSONRPC_INVALID_PARAMS, "arguments must be an object")
-        return _ok(message_id, call_tool(name, arguments, store))
+        return _ok(message_id, await call_tool(name, arguments, store))
     return _error(message_id, JSONRPC_METHOD_NOT_FOUND, f"unknown method: {method}")
 
 
-def _write(stdout: TextIO, payload: dict[str, Any]) -> None:
-    stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    stdout.flush()
+async def _write(stdout: TextIO, payload: dict[str, Any]) -> None:
+    text = json.dumps(payload, ensure_ascii=False) + "\n"
+    await anyio.to_thread.run_sync(stdout.write, text)
+    await anyio.to_thread.run_sync(stdout.flush)
 
 
 def _use_utf8(stream: TextIO) -> None:
@@ -222,31 +225,37 @@ def _use_utf8(stream: TextIO) -> None:
         pass
 
 
-def serve(
+async def serve(
     store: KnowledgeStore,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
 ) -> int:
-    """跑 stdio 传输，直到 stdin 关闭。普通日志一律走 stderr，stdout 只放协议。"""
+    """跑 stdio 传输，直到 stdin 关闭。普通日志一律走 stderr，stdout 只放协议。
+
+    stdin 是阻塞读，放到线程里执行；协议处理本身是 async。
+    """
     source = stdin or sys.stdin
     sink = stdout or sys.stdout
     _use_utf8(source)
     _use_utf8(sink)
-    for raw in source:
+    while True:
+        raw = await anyio.to_thread.run_sync(source.readline)
+        if not raw:
+            break
         line = raw.strip()
         if not line:
             continue
         try:
             message = json.loads(line)
         except json.JSONDecodeError as exc:
-            _write(sink, _error(None, JSONRPC_PARSE_ERROR, f"invalid JSON: {exc.msg}"))
+            await _write(sink, _error(None, JSONRPC_PARSE_ERROR, f"invalid JSON: {exc.msg}"))
             continue
         if not isinstance(message, dict):
-            _write(sink, _error(None, JSONRPC_INVALID_REQUEST, "expected a JSON object"))
+            await _write(sink, _error(None, JSONRPC_INVALID_REQUEST, "expected a JSON object"))
             continue
-        response = handle_message(message, store)
+        response = await handle_message(message, store)
         if response is not None:
-            _write(sink, response)
+            await _write(sink, response)
     return 0
 
 

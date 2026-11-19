@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import hmac
@@ -20,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
+from anyio import Path as AsyncPath
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -223,7 +223,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         )
 
     @app.get("/healthz")
-    def healthz() -> dict[str, object]:
+    async def healthz() -> dict[str, object]:
         return {"ok": True}
 
     @app.post("/devices/register")
@@ -285,9 +285,9 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         if raw_root is not None and quota is not None:
             # 配额在落盘前判断：满了就 1008 让采集端降级，绝不把磁盘写满。
             # 估算只算新 sha——重放已收下的批次不受影响，否则客户端会永久卡死。
-            incoming = await asyncio.to_thread(estimate_new_bytes, raw_root, body)
+            incoming = await estimate_new_bytes(raw_root, body)
             try:
-                quota.check(incoming)
+                await quota.check(incoming)
             except QuotaExceeded as exc:
                 raise ApiError(
                     ErrorCode.QUEUE_BACKPRESSURE,
@@ -301,12 +301,12 @@ def create_app(store: StateStore | None = None) -> FastAPI:
             # 先落盘再 apply：apply 的后续校验失败只会留下无害的内容寻址孤儿文件，
             # 而反过来（先 apply 后落盘）一旦落盘失败，重放就再也补不回落盘的字节。
             try:
-                await asyncio.to_thread(save_batch, raw_root, body)
+                await save_batch(raw_root, body)
             except OSError:
                 # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
-                quota.invalidate()
+                await quota.invalidate()
                 raise
-            quota.record(incoming)
+            await quota.record(incoming)
         result: IngestResult = await state.apply(body)
         return _ok(result.model_dump(mode="json"))
 
@@ -319,13 +319,14 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         return _ok({"commands": []})
 
     @app.get("/debug/sources")
-    def debug_sources() -> dict[str, object]:
+    async def debug_sources() -> dict[str, object]:
         """仅 dev：确认 sources.json 能被契约模型接受。"""
         path = os.environ.get("MEMHUB_SOURCES_PATH", "")
-        if not path or not os.path.exists(path):
+        if not path or not await AsyncPath(path).is_file():
             raise ApiError(ErrorCode.BAD_REQUEST, "MEMHUB_SOURCES_PATH is not set")
-        with open(path, encoding="utf-8") as handle:
-            config = SourcesConfig.model_validate_json(handle.read())
+        config = SourcesConfig.model_validate_json(
+            await AsyncPath(path).read_text(encoding="utf-8")
+        )
         return _ok(config.model_dump(mode="json"))
 
     return app

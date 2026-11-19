@@ -1,4 +1,4 @@
-"""知识库管理写操作：增删改查 + 文件锁 + 修订号 + git 提交。
+"""知识库管理写操作：增删改查 + 文件锁 + 修订号 + git 提交（全异步 IO）。
 
 真源仍是 markdown：这里只做「读 → 合并 → 原子写」。与 worker 的 merge 走同一把
 进程间文件锁，避免后台提炼与人工编辑互相覆盖；写成功后在真源所在 git 仓库
@@ -14,16 +14,16 @@ import json
 import logging
 import os
 import re
-import shutil
-import subprocess
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import anyio
+from anyio import Path as AsyncPath
 from pydantic import ValidationError
 
 from memhub.contract import (
@@ -38,7 +38,7 @@ from memhub.contract import (
     SourceRef,
     Tier,
 )
-from memhub.kb import query
+from memhub.kb import proc, query
 from memhub.kb.store import KnowledgeStore
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -79,59 +79,66 @@ class InvalidError(ManageError):
 # ---------------------------------------------------------------- 锁与修订号
 
 
-@contextmanager
-def write_lock(root: Path, *, timeout: float = 10.0) -> Iterator[None]:
+@asynccontextmanager
+async def write_lock(root: Path, *, timeout: float = 10.0) -> AsyncIterator[None]:
     """跨进程写锁（单主机）。
 
     用 O_EXCL 建锁文件；超过 `LOCK_STALE_SECONDS` 的锁视为崩溃残留并接管。
     这足够保护「worker 与 kb-api 同机」的当前形态；未来多机写同一真源时
-    应换成基于 git 的乐观并发。
+    应换成基于 git 的乐观并发。等待用 async sleep，不占线程。
     """
     path = root / LOCK_NAME
     deadline = time.monotonic() + timeout
-    fd = -1
+    handle = None
     while True:
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"{os.getpid()} {time.time():.0f}".encode())
+            handle = await AsyncPath(path).open("x", encoding="utf-8", newline="\n")
+            await handle.write(f"{os.getpid()} {time.time():.0f}")
             break
         except FileExistsError:
             try:
-                age = time.time() - path.stat().st_mtime
+                age = time.time() - (await AsyncPath(path).stat()).st_mtime
             except OSError:
                 age = 0.0
             if age > LOCK_STALE_SECONDS:
-                path.unlink(missing_ok=True)
+                try:
+                    await AsyncPath(path).unlink()
+                except OSError:
+                    pass
                 continue
             if time.monotonic() >= deadline:
                 raise ConflictError(
                     "真源正被其他进程写入（worker 或另一个管理端请求），稍后重试",
                     {"lock": str(path), "age_seconds": round(age, 1)},
                 ) from None
-            time.sleep(0.05)
+            await anyio.sleep(0.05)
     try:
         yield
     finally:
-        os.close(fd)
-        path.unlink(missing_ok=True)
+        if handle is not None:
+            await handle.aclose()
+        try:
+            await AsyncPath(path).unlink()
+        except OSError:
+            pass
 
 
-def revision_of(path: Path) -> str:
+async def revision_of(path: Path) -> str:
     """修订号 = 文件内容 sha256 前 16 位；用于乐观并发（ETag）。"""
     import hashlib
 
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    return hashlib.sha256(await AsyncPath(path).read_bytes()).hexdigest()[:16]
 
 
-def node_revision(store: KnowledgeStore, node_id: str) -> str | None:
+async def node_revision(store: KnowledgeStore, node_id: str) -> str | None:
     path = store.path_for(node_id)
-    return revision_of(path) if path.is_file() else None
+    return await revision_of(path) if await AsyncPath(path).is_file() else None
 
 
 # ---------------------------------------------------------------- 列表与详情
 
 
-def _summary(store: KnowledgeStore, record: query.NodeRecord) -> dict[str, Any]:
+async def _summary(store: KnowledgeStore, record: query.NodeRecord) -> dict[str, Any]:
     node = record.node
     return {
         "id": record.id,
@@ -145,12 +152,12 @@ def _summary(store: KnowledgeStore, record: query.NodeRecord) -> dict[str, Any]:
         "status": node.status.value if node.status else None,
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat(),
-        "revision": node_revision(store, record.id),
+        "revision": await node_revision(store, record.id),
         "body_chars": len(record.body),
     }
 
 
-def list_nodes(
+async def list_nodes(
     store: KnowledgeStore,
     *,
     project: str | None = None,
@@ -165,7 +172,7 @@ def list_nodes(
     offset = max(0, offset)
     terms = query.terms(q) if q and q.strip() else []
     items: list[dict[str, Any]] = []
-    for record in query.records(store, project):
+    for record in await query.records(store, project):
         if kind and record.node.kind.value != kind:
             continue
         if tier and tier != "all" and record.node.tier.value != tier:
@@ -174,7 +181,7 @@ def list_nodes(
             continue
         if terms and query.score(record, terms) <= 0:
             continue
-        items.append(_summary(store, record))
+        items.append(await _summary(store, record))
     items.sort(key=lambda item: str(item["updated_at"]), reverse=True)
     return {
         "items": items[offset : offset + limit],
@@ -184,36 +191,35 @@ def list_nodes(
     }
 
 
-def stats(store: KnowledgeStore) -> dict[str, Any]:
+async def stats(store: KnowledgeStore) -> dict[str, Any]:
     by_kind: dict[str, int] = {}
     by_tier: dict[str, int] = {}
     by_project: dict[str, int] = {}
-    for record in query.records(store):
+    records = await query.records(store)
+    for record in records:
         kind = record.node.kind.value
         tier = record.node.tier.value
         by_kind[kind] = by_kind.get(kind, 0) + 1
         by_tier[tier] = by_tier.get(tier, 0) + 1
         by_project[record.node.project] = by_project.get(record.node.project, 0) + 1
-    index = query.edge_index(store)
+    index = await query.edge_index(store)
     return {
         "nodes": sum(by_kind.values()),
         "edges": len(index.edges),
         "unresolved_edges": len(index.unresolved),
-        "orphans": sum(
-            1 for record in query.records(store) if index.incident.get(record.id, 0) == 0
-        ),
+        "orphans": sum(1 for record in records if index.incident.get(record.id, 0) == 0),
         "by_kind": dict(sorted(by_kind.items())),
         "by_tier": dict(sorted(by_tier.items())),
         "by_project": dict(sorted(by_project.items())),
     }
 
 
-def get_node(store: KnowledgeStore, node_id: str) -> dict[str, Any]:
+async def get_node(store: KnowledgeStore, node_id: str) -> dict[str, Any]:
     try:
-        detail = query.read_node(store, node_id)
+        detail = await query.read_node(store, node_id)
     except query.NotFound as exc:
         raise NotFoundError(exc.args[0] if exc.args else f"节点不存在: {node_id}") from exc
-    detail["revision"] = node_revision(store, node_id)
+    detail["revision"] = await node_revision(store, node_id)
     return detail
 
 
@@ -271,26 +277,26 @@ def _validate_path_parts(project: str, kind: str, slug: str) -> None:
         raise InvalidError(f"kind 不合法: {kind!r}")
 
 
-def create_node(store: KnowledgeStore, draft: NodeDraft) -> dict[str, Any]:
+async def create_node(store: KnowledgeStore, draft: NodeDraft) -> dict[str, Any]:
     slug = draft.slug or slugify(draft.title) or f"n-{os.urandom(4).hex()}"
     _validate_path_parts(draft.project, draft.kind.value, slug)
     node_id = f"{draft.project}/{draft.kind.value}/{slug}"
     now = datetime.now(UTC)
-    with write_lock(store.root):
-        if store.exists(node_id):
+    async with write_lock(store.root):
+        if await store.exists(node_id):
             raise ConflictError(f"节点已存在: {node_id}", {"id": node_id})
         node = _build_node(
             node_id,
             draft,
             created_at=now,
         )
-        store.write(node_id, node, draft.body)
-        commit = _git_commit(store.root, f"kb: create {node_id}")
+        await store.write(node_id, node, draft.body)
+        commit = await _git_commit(store.root, f"kb: create {node_id}")
     return {
         "id": node_id,
-        "revision": node_revision(store, node_id),
+        "revision": await node_revision(store, node_id),
         "commit": commit,
-        "node": get_node(store, node_id),
+        "node": await get_node(store, node_id),
     }
 
 
@@ -341,23 +347,23 @@ class NodePatch:
     actor: str = "ui"
 
 
-def update_node(
+async def update_node(
     store: KnowledgeStore,
     node_id: str,
     *,
     expected_revision: str,
     patch: NodePatch,
 ) -> dict[str, Any]:
-    with write_lock(store.root):
-        if not store.exists(node_id):
+    async with write_lock(store.root):
+        if not await store.exists(node_id):
             raise NotFoundError(f"节点不存在: {node_id}")
-        current = node_revision(store, node_id)
+        current = await node_revision(store, node_id)
         if current != expected_revision:
             raise ConflictError(
                 "节点已被其他人/进程修改，请刷新后重试",
                 {"expected": expected_revision, "current": current},
             )
-        node, body = store.read(node_id)
+        node, body = await store.read(node_id)
         data = node.model_dump(mode="json")
         data["updated_at"] = datetime.now(UTC)
         if patch.title is not None:
@@ -382,20 +388,20 @@ def update_node(
         except ValidationError as exc:
             raise InvalidError("frontmatter 校验失败", {"errors": _brief_errors(exc)}) from exc
         new_body = body if patch.body is None else patch.body
-        store.write(node_id, updated, new_body)
-        commit = _git_commit(store.root, f"kb: update {node_id}")
+        await store.write(node_id, updated, new_body)
+        commit = await _git_commit(store.root, f"kb: update {node_id}")
     return {
         "id": node_id,
-        "revision": node_revision(store, node_id),
+        "revision": await node_revision(store, node_id),
         "commit": commit,
-        "node": get_node(store, node_id),
+        "node": await get_node(store, node_id),
     }
 
 
 # ---------------------------------------------------------------- 废弃与删除
 
 
-def deprecate_node(
+async def deprecate_node(
     store: KnowledgeStore,
     node_id: str,
     *,
@@ -405,12 +411,12 @@ def deprecate_node(
 ) -> dict[str, Any]:
     if not superseded_by:
         raise InvalidError("superseded_by 必须给出替代节点的 id")
-    with write_lock(store.root):
-        if not store.exists(node_id):
+    async with write_lock(store.root):
+        if not await store.exists(node_id):
             raise NotFoundError(f"节点不存在: {node_id}")
-        if superseded_by != node_id and not store.exists(superseded_by):
+        if superseded_by != node_id and not await store.exists(superseded_by):
             raise InvalidError(f"替代节点不存在: {superseded_by}")
-        node, body = store.read(node_id)
+        node, body = await store.read(node_id)
         data = node.model_dump(mode="json")
         data["tier"] = Tier.DEPRECATED
         data["superseded_by"] = superseded_by
@@ -422,17 +428,17 @@ def deprecate_node(
             raise InvalidError("frontmatter 校验失败", {"errors": _brief_errors(exc)}) from exc
         if reason.strip():
             body = body.rstrip() + f"\n\n## 废弃说明\n\n{reason.strip()}（{actor}）\n"
-        store.write(node_id, updated, body)
-        commit = _git_commit(store.root, f"kb: deprecate {node_id}")
+        await store.write(node_id, updated, body)
+        commit = await _git_commit(store.root, f"kb: deprecate {node_id}")
     return {
         "id": node_id,
-        "revision": node_revision(store, node_id),
+        "revision": await node_revision(store, node_id),
         "commit": commit,
-        "node": get_node(store, node_id),
+        "node": await get_node(store, node_id),
     }
 
 
-def delete_node(
+async def delete_node(
     store: KnowledgeStore,
     node_id: str,
     *,
@@ -441,22 +447,22 @@ def delete_node(
     actor: str = "ui",
 ) -> dict[str, Any]:
     """归档到 `_trash/<时间戳>/` 并清掉相连的边；可从回收站恢复。"""
-    with write_lock(store.root):
-        if not store.exists(node_id):
+    async with write_lock(store.root):
+        if not await store.exists(node_id):
             raise NotFoundError(f"节点不存在: {node_id}")
-        current = node_revision(store, node_id)
+        current = await node_revision(store, node_id)
         if current != expected_revision:
             raise ConflictError(
                 "节点已被其他人/进程修改，请刷新后重试",
                 {"expected": expected_revision, "current": current},
             )
-        node, _ = store.read(node_id)
+        node, _ = await store.read(node_id)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
         folder = store.root / TRASH_DIR / stamp
-        folder.mkdir(parents=True, exist_ok=True)
+        await AsyncPath(folder).mkdir(parents=True, exist_ok=True)
         target = folder / f"{node_id}.md"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(store.path_for(node_id)), str(target))
+        await AsyncPath(target.parent).mkdir(parents=True, exist_ok=True)
+        await AsyncPath(store.path_for(node_id)).replace(target)
         meta = {
             "id": node_id,
             "title": node.title,
@@ -466,12 +472,13 @@ def delete_node(
             "reason": reason,
             "actor": actor,
         }
-        (folder / f"{node_id}.meta.json").parent.mkdir(parents=True, exist_ok=True)
-        (folder / f"{node_id}.meta.json").write_text(
+        meta_path = folder / f"{node_id}.meta.json"
+        await AsyncPath(meta_path.parent).mkdir(parents=True, exist_ok=True)
+        await AsyncPath(meta_path).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
-        removed_edges = _remove_incident_edges(store, node_id)
-        commit = _git_commit(store.root, f"kb: delete {node_id} (archived to _trash/{stamp})")
+        removed_edges = await _remove_incident_edges(store, node_id)
+        commit = await _git_commit(store.root, f"kb: delete {node_id} (archived to _trash/{stamp})")
     return {
         "id": node_id,
         "trash": f"{stamp}/{node_id}",
@@ -480,48 +487,56 @@ def delete_node(
     }
 
 
-def list_trash(store: KnowledgeStore, *, limit: int = 100) -> dict[str, Any]:
+async def list_trash(store: KnowledgeStore, *, limit: int = 100) -> dict[str, Any]:
     base = store.root / TRASH_DIR
     items: list[dict[str, Any]] = []
-    if base.is_dir():
-        for meta_path in sorted(base.rglob("*.meta.json"), reverse=True):
+    if await AsyncPath(base).is_dir():
+        paths = [path async for path in AsyncPath(base).rglob("*.meta.json")]
+        for meta_path in sorted(paths, key=str, reverse=True):
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta = json.loads(await meta_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            meta["trash"] = meta_path.relative_to(base).with_suffix("").with_suffix("").as_posix()
+            relative = Path(meta_path).relative_to(base)
+            meta["trash"] = relative.with_suffix("").with_suffix("").as_posix()
             items.append(meta)
     return {"items": items[: max(1, min(limit, 500))], "total": len(items)}
 
 
-def restore_node(store: KnowledgeStore, trash: str) -> dict[str, Any]:
-    base = (store.root / TRASH_DIR).resolve()
+async def restore_node(store: KnowledgeStore, trash: str) -> dict[str, Any]:
+    base = Path(await AsyncPath(store.root / TRASH_DIR).resolve())
     parts = trash.split("/")
     if len(parts) < 2 or any(part in {"", ".", ".."} or "\\" in part for part in parts):
         raise InvalidError(f"trash 路径不合法: {trash!r}")
     stamp = parts[0]
     node_id = "/".join(parts[1:])
-    source = (base / stamp / f"{node_id}.md").resolve()
-    if not source.is_file() or base not in source.parents:
+    source = Path(await AsyncPath(base / stamp / f"{node_id}.md").resolve())
+    if not await AsyncPath(source).is_file() or base not in source.parents:
         raise NotFoundError(f"回收站里没有: {trash}")
-    with write_lock(store.root):
-        if store.exists(node_id):
+    async with write_lock(store.root):
+        if await store.exists(node_id):
             raise ConflictError(f"节点已重新存在，无法恢复: {node_id}", {"id": node_id})
         target = store.path_for(node_id)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(target))
+        await AsyncPath(target.parent).mkdir(parents=True, exist_ok=True)
+        await AsyncPath(source).replace(target)
         meta = source.with_suffix(".meta.json")
-        if meta.is_file():
-            meta.unlink()
-        commit = _git_commit(store.root, f"kb: restore {node_id}")
-    return {"id": node_id, "revision": node_revision(store, node_id), "commit": commit}
+        if await AsyncPath(meta).is_file():
+            await AsyncPath(meta).unlink()
+        commit = await _git_commit(store.root, f"kb: restore {node_id}")
+    return {
+        "id": node_id,
+        "revision": await node_revision(store, node_id),
+        "commit": commit,
+    }
 
 
 # ---------------------------------------------------------------- 边编辑
 
 
-def _resolver(store: KnowledgeStore, *, include: str | None = None) -> Callable[[str], str | None]:
-    ids = set(store.list_ids())
+async def _resolver(
+    store: KnowledgeStore, *, include: str | None = None
+) -> Callable[[str], str | None]:
+    ids = set(await store.list_ids())
     if include is not None:
         # 删除时文件已移入 _trash，解析器要把它当成「仍存在」才能找到相连的边。
         ids.add(include)
@@ -538,17 +553,19 @@ def _resolver(store: KnowledgeStore, *, include: str | None = None) -> Callable[
     return resolve
 
 
-def _edge_files(store: KnowledgeStore) -> list[Path]:
-    return sorted(store.root.rglob("_edges.jsonl"))
+async def _edge_files(store: KnowledgeStore) -> list[Path]:
+    paths = [Path(path) async for path in AsyncPath(store.root).rglob("_edges.jsonl")]
+    return sorted(paths, key=str)
 
 
-def _remove_incident_edges(store: KnowledgeStore, node_id: str) -> int:
+async def _remove_incident_edges(store: KnowledgeStore, node_id: str) -> int:
     """删掉与 node_id 相连的边（源或目标解析到它）。返回删除条数。"""
-    resolve = _resolver(store, include=node_id)
+    resolve = await _resolver(store, include=node_id)
     removed = 0
-    for path in _edge_files(store):
+    for path in await _edge_files(store):
         kept: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        text = await AsyncPath(path).read_text(encoding="utf-8")
+        for line in text.splitlines():
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -558,39 +575,40 @@ def _remove_incident_edges(store: KnowledgeStore, node_id: str) -> int:
                 removed += 1
                 continue
             kept.append(record)
-        text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in kept)
-        path.write_text(text, encoding="utf-8", newline="\n")
+        body = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in kept)
+        await AsyncPath(path).write_text(body, encoding="utf-8", newline="\n")
     return removed
 
 
-def replace_out_edges(
+async def replace_out_edges(
     store: KnowledgeStore,
     node_id: str,
     edges: list[Edge],
 ) -> dict[str, Any]:
     """用给定列表替换 node_id 的出边；入边不动。"""
-    if not store.exists(node_id):
+    if not await store.exists(node_id):
         raise NotFoundError(f"节点不存在: {node_id}")
-    node, _ = store.read(node_id)
+    node, _ = await store.read(node_id)
     valid_predicates = {item.value for item in Predicate}
     for edge in edges:
         if edge.source != node_id:
             raise InvalidError(f"边的 source 必须是 {node_id}，收到 {edge.source}")
         if edge.predicate.value not in valid_predicates:
             raise InvalidError(f"predicate 不合法: {edge.predicate}")
-    with write_lock(store.root):
-        _drop_out_edges(store, node_id)
-        added = store.append_edges(node.project, edges, node_id) if edges else 0
-        commit = _git_commit(store.root, f"kb: edit edges of {node_id}")
+    async with write_lock(store.root):
+        await _drop_out_edges(store, node_id)
+        added = await store.append_edges(node.project, edges, node_id) if edges else 0
+        commit = await _git_commit(store.root, f"kb: edit edges of {node_id}")
     return {"id": node_id, "added": added, "commit": commit}
 
 
-def _drop_out_edges(store: KnowledgeStore, node_id: str) -> int:
-    resolve = _resolver(store)
+async def _drop_out_edges(store: KnowledgeStore, node_id: str) -> int:
+    resolve = await _resolver(store)
     removed = 0
-    for path in _edge_files(store):
+    for path in await _edge_files(store):
         kept: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        text = await AsyncPath(path).read_text(encoding="utf-8")
+        for line in text.splitlines():
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -598,7 +616,7 @@ def _drop_out_edges(store: KnowledgeStore, node_id: str) -> int:
                 removed += 1
                 continue
             kept.append(record)
-        path.write_text(
+        await AsyncPath(path).write_text(
             "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in kept),
             encoding="utf-8",
             newline="\n",
@@ -609,62 +627,53 @@ def _drop_out_edges(store: KnowledgeStore, node_id: str) -> int:
 # ---------------------------------------------------------------- git 提交
 
 
-def _find_git_root(path: Path) -> Path | None:
+async def _find_git_root(path: Path) -> Path | None:
     for candidate in [path, *path.parents]:
-        if (candidate / ".git").exists():
+        if await AsyncPath(candidate / ".git").exists():
             return candidate
     return None
 
 
-def _git_commit(root: Path, message: str) -> str | None:
+async def _git(repo: Path, args: list[str], *, timeout: float) -> tuple[int, bytes, bytes]:
+    completed = await proc.run_command(["git", "-C", str(repo), *args], timeout=timeout)
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+async def _git_commit(root: Path, message: str) -> str | None:
     """真源所在的 git 仓库存在时提交一次；任何失败都不影响写操作本身。"""
-    repo = _find_git_root(root.resolve())
+    resolved = Path(await AsyncPath(root).resolve())
+    repo = await _find_git_root(resolved)
     if repo is None:
         return None
     try:
-        relative = root.resolve().relative_to(repo).as_posix()
+        relative = resolved.relative_to(repo).as_posix()
         # 锁文件是运行时状态，不能进真源的历史。
-        subprocess.run(
+        code, _, stderr = await _git(
+            repo,
             [
-                "git",
-                "-C",
-                str(repo),
                 "add",
                 "-A",
                 "--",
                 relative,
                 f":(exclude){relative}/{LOCK_NAME}",
             ],
-            check=True,
-            capture_output=True,
             timeout=30,
         )
-        staged = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--cached", "--quiet", "--", relative],
-            check=False,
-            capture_output=True,
-            timeout=30,
-        )
-        if staged.returncode == 0:
+        if code != 0:
+            raise OSError(stderr.decode("utf-8", "replace").strip() or f"git add exit {code}")
+        code, _, _ = await _git(repo, ["diff", "--cached", "--quiet", "--", relative], timeout=30)
+        if code == 0:
             return None
-        subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", message, "--", relative],
-            check=True,
-            capture_output=True,
-            timeout=60,
-        )
-        head = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return head.stdout.strip() or None
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or b"").decode("utf-8", "replace").strip()
-        _log.warning("git 提交失败（%s）：%s", exc.cmd[-1], detail[-800:] or exc.returncode)
+        code, _, stderr = await _git(repo, ["commit", "-m", message, "--", relative], timeout=60)
+        if code != 0:
+            raise OSError(stderr.decode("utf-8", "replace").strip() or f"git commit exit {code}")
+        code, stdout, stderr = await _git(repo, ["rev-parse", "--short", "HEAD"], timeout=30)
+        if code != 0:
+            raise OSError(stderr.decode("utf-8", "replace").strip() or f"git rev-parse exit {code}")
+        return stdout.decode("utf-8", "replace").strip() or None
+    except TimeoutError:
+        _log.warning("git 提交超时：%s", message)
         return None
-    except (OSError, subprocess.SubprocessError) as exc:
-        _log.warning("git 提交失败：%s", exc)
+    except (OSError, RuntimeError) as exc:
+        _log.warning("git 提交失败（%s）：%s", message, str(exc)[-800:])
         return None

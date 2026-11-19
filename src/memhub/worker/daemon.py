@@ -1,4 +1,4 @@
-"""worker 守护进程：raw_store → 抽取 → merge 进知识真源。
+"""worker 守护进程：raw_store → 抽取 → merge 进知识真源（全异步 IO）。
 
 单并发串行（池=1）：LLM 调用是瓶颈也是成本，串行让错峰窗口、内存预算、
 失败退避都可预测。多个容器实例不会互相踩——raw 文件处理成功即移动到
@@ -15,18 +15,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import os
-import shutil
-import socket
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from urllib.parse import urlparse
+
+import anyio
+from anyio import Path as AsyncPath
 
 from memhub.contract import SourceKind, SourceRef
 from memhub.kb.store import KnowledgeStore
@@ -96,21 +97,26 @@ def in_window(now: dt_time, window: tuple[dt_time, dt_time]) -> bool:
     return now >= start or now < end  # 跨午夜
 
 
-def iter_pending(raw_root: Path, processed_root: Path) -> list[Path]:
+async def iter_pending(raw_root: Path, processed_root: Path) -> list[Path]:
     """未处理的 raw 文件，按修改时间升序（先来先提炼）。"""
-    if not raw_root.is_dir():
+    if not await AsyncPath(raw_root).is_dir():
         return []
-    pending: list[Path] = []
-    for path in raw_root.rglob("*.json"):
+    pending: list[tuple[float, Path]] = []
+    async for item in AsyncPath(raw_root).rglob("*.json"):
+        path = Path(item)
         relative = path.relative_to(raw_root)
-        if (processed_root / relative).exists():
+        if await AsyncPath(processed_root / relative).exists():
             continue
-        pending.append(path)
-    pending.sort(key=lambda item: item.stat().st_mtime)
-    return pending
+        try:
+            mtime = (await item.stat()).st_mtime
+        except OSError:
+            continue
+        pending.append((mtime, path))
+    pending.sort(key=lambda entry: entry[0])
+    return [path for _mtime, path in pending]
 
 
-def probe_endpoint(base_url: str, *, timeout: float = 5.0) -> None:
+async def probe_endpoint(base_url: str, *, timeout: float = 5.0) -> None:
     """启动自检：只做 DNS/TCP 可达性，不发模型请求（不发钱）。"""
     parsed = urlparse(base_url)
     host = parsed.hostname
@@ -118,29 +124,34 @@ def probe_endpoint(base_url: str, *, timeout: float = 5.0) -> None:
         raise LLMError(f"LLM base URL 无法解析主机: {base_url!r}")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return
-    except OSError as exc:
+        with anyio.fail_after(timeout):
+            _reader, writer = await asyncio.open_connection(host, port)
+            writer.close()
+            await writer.wait_closed()
+        return
+    except (OSError, TimeoutError) as exc:
         raise LLMError(f"LLM 端点不可达 {host}:{port}: {exc}") from exc
 
 
-def _mark_processed(config: WorkerConfig, path: Path) -> None:
-    relative = path.relative_to(config.raw_root)
-    target = config.processed_root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(path), str(target))
-
-
-def _move_to(config: WorkerConfig, path: Path, root: Path) -> None:
+async def _move(config: WorkerConfig, path: Path, root: Path) -> None:
     relative = path.relative_to(config.raw_root)
     target = root / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(path), str(target))
+    await AsyncPath(target.parent).mkdir(parents=True, exist_ok=True)
+    await AsyncPath(path).replace(target)
 
 
-def _load_failures(config: WorkerConfig) -> dict[str, int]:
+async def _mark_processed(config: WorkerConfig, path: Path) -> None:
+    await _move(config, path, config.processed_root)
+
+
+async def _move_to(config: WorkerConfig, path: Path, root: Path) -> None:
+    await _move(config, path, root)
+
+
+async def _load_failures(config: WorkerConfig) -> dict[str, int]:
     try:
-        data = json.loads(config.failures_path.read_text(encoding="utf-8"))
+        text = await AsyncPath(config.failures_path).read_text(encoding="utf-8")
+        data = json.loads(text)
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):
@@ -148,28 +159,35 @@ def _load_failures(config: WorkerConfig) -> dict[str, int]:
     return {str(key): int(value) for key, value in data.items() if isinstance(value, int)}
 
 
-def _save_failures(config: WorkerConfig, failures: dict[str, int]) -> None:
+async def _save_failures(config: WorkerConfig, failures: dict[str, int]) -> None:
     path = config.failures_path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    await AsyncPath(path.parent).mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    await AsyncPath(tmp).write_text(
+        json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    await AsyncPath(tmp).replace(path)
 
 
 PROCESSED_KEEP = timedelta(days=7)
 PROCESSED_MAX_BYTES = 2 * 1024**3
 
 
-def _reclaim_empty_dirs(root: Path) -> None:
+async def _reclaim_empty_dirs(root: Path) -> None:
     """空目录一并回收，否则设备/source 目录会留一摞空壳。"""
-    for dirpath, _dirnames, _filenames in os.walk(root, topdown=False):
+    if not await AsyncPath(root).is_dir():
+        return
+    dirs = [path async for path in AsyncPath(root).rglob("*") if await path.is_dir()]
+    # rglob 不含起点自身；根目录最后删（`os.walk(topdown=False)` 的等价行为）。
+    dirs.append(AsyncPath(root))
+    for path in sorted(dirs, key=lambda item: len(item.parts), reverse=True):
         try:
-            Path(dirpath).rmdir()
+            await path.rmdir()
         except OSError:
             pass
 
 
-def purge_pending_review(
+async def purge_pending_review(
     data_dir: Path, *, older_than: timedelta = timedelta(days=30)
 ) -> tuple[int, int]:
     """清理 `pending_review/` 里超过保留期的文件，返回（文件数, 字节数）。
@@ -179,30 +197,30 @@ def purge_pending_review(
     由 purge-expired timer 每天顺手收一次。
     """
     root = data_dir / "pending_review"
-    if not root.is_dir():
+    if not await AsyncPath(root).is_dir():
         return 0, 0
     cutoff = time.time() - older_than.total_seconds()
     removed = removed_bytes = 0
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
-            path = Path(dirpath) / name
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if stat.st_mtime >= cutoff:
-                continue
-            try:
-                path.unlink()
-            except OSError:
-                continue
-            removed += 1
-            removed_bytes += stat.st_size
-    _reclaim_empty_dirs(root)
+    async for item in AsyncPath(root).rglob("*"):
+        if await item.is_dir():
+            continue
+        try:
+            stat = await item.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= cutoff:
+            continue
+        try:
+            await item.unlink()
+        except OSError:
+            continue
+        removed += 1
+        removed_bytes += stat.st_size
+    await _reclaim_empty_dirs(root)
     return removed, removed_bytes
 
 
-def prune_processed_raw(
+async def prune_processed_raw(
     data_dir: Path,
     *,
     max_bytes: int = PROCESSED_MAX_BYTES,
@@ -212,22 +230,22 @@ def prune_processed_raw(
 
     这个目录是 raw_store 的**完整副本**（处理成功后移动过去，供事后重跑抽取）。
     它不受 `MEMHUB_QUEUE_MAX_BYTES` 约束：配额一满 ingest 就 1008，但历史副本
-    会无限增长，磁盘照样被写满——上次事故的同一条路径。因此按「时间 + 总量」
+    会无限增长，磁盘照样能被写满——上次事故的同一条路径。因此按「时间 + 总量」
     双阈值裁剪：超过 7 天或总量超过 2 GiB 时按最旧优先删除。原始增量仍在云端
     PG 的批次窗口内可重放（24h），markdown 真源也保留了溯源信息。
     """
     root = data_dir / "processed_raw"
-    if not root.is_dir():
+    if not await AsyncPath(root).is_dir():
         return 0, 0
     entries: list[tuple[float, int, Path]] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
-            path = Path(dirpath) / name
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            entries.append((stat.st_mtime, stat.st_size, path))
+    async for item in AsyncPath(root).rglob("*"):
+        if await item.is_dir():
+            continue
+        try:
+            stat = await item.stat()
+        except OSError:
+            continue
+        entries.append((stat.st_mtime, stat.st_size, Path(item)))
     entries.sort(key=lambda item: item[0])
     cutoff = time.time() - older_than.total_seconds()
     total = sum(size for _mtime, size, _path in entries)
@@ -236,13 +254,13 @@ def prune_processed_raw(
         if mtime >= cutoff and total <= max_bytes:
             break  # 已是最旧且两条阈值都满足，后面只会更新
         try:
-            path.unlink()
+            await AsyncPath(path).unlink()
         except OSError:
             continue
         total -= size
         removed += 1
         removed_bytes += size
-    _reclaim_empty_dirs(root)
+    await _reclaim_empty_dirs(root)
     return removed, removed_bytes
 
 
@@ -257,7 +275,7 @@ def _document_text(payload: dict[str, object]) -> str:
     return content
 
 
-def process_file(
+async def process_file(
     client: LLMClient,
     config: WorkerConfig,
     path: Path,
@@ -265,7 +283,7 @@ def process_file(
     templates: dict[str, str] | None = None,
 ) -> tuple[int, int, int]:
     """处理一个 raw 文件；返回 (created, updated, edges)。失败抛异常，由调用方隔离。"""
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(await AsyncPath(path).read_text(encoding="utf-8"))
     source_id = str(payload.get("source_id", "unknown"))
     source_type = str(payload.get("source_type", "sessions"))
     device_id = str(payload.get("device_id", "unknown"))
@@ -281,9 +299,9 @@ def process_file(
     profile = PROFILE_BY_SOURCE.get(source_type, "sessions")
     if templates is None or profile not in templates:
         templates = dict(templates or {})
-        templates[profile] = load_profile(profile)
+        templates[profile] = await load_profile(profile)
 
-    extraction = extract_document(
+    extraction = await extract_document(
         client,
         template=templates[profile],
         path=file_path,
@@ -293,7 +311,7 @@ def process_file(
     )
     store = KnowledgeStore(config.knowledge_dir)
     kind = SourceKind.SESSION if source_type == "sessions" else SourceKind.WIKI
-    report = merge(
+    report = await merge(
         store,
         extraction,
         project=source_id,
@@ -302,7 +320,7 @@ def process_file(
     return len(report.created), len(report.updated), report.edges_added
 
 
-def run_round(
+async def run_round(
     client: LLMClient,
     config: WorkerConfig,
     *,
@@ -311,12 +329,13 @@ def run_round(
     """处理一批待提炼文件；不抛单文件异常。"""
     current = report or RoundReport()
     templates: dict[str, str] = {}
-    failures = _load_failures(config)
+    failures = await _load_failures(config)
     dirty = False
-    for path in iter_pending(config.raw_root, config.processed_root)[: config.limit]:
+    pending = await iter_pending(config.raw_root, config.processed_root)
+    for path in pending[: config.limit]:
         relative = str(path.relative_to(config.raw_root))
         try:
-            created, updated, edges = process_file(client, config, path, templates=templates)
+            created, updated, edges = await process_file(client, config, path, templates=templates)
         except (ExtractionFailed, LLMError, OSError, ValueError) as exc:
             current.failed += 1
             current.errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
@@ -325,7 +344,7 @@ def run_round(
             if attempts >= config.max_attempts:
                 # 毒文件不能让队列永远红着：再试下去每轮都在同一处付费失败。
                 # 移出 raw_store，留原始字节 + 失败原因给人看。
-                _move_to(config, path, config.pending_root)
+                await _move_to(config, path, config.pending_root)
                 failures.pop(relative, None)
                 print(
                     f"[worker] quarantine {path.name}: 连续 {attempts} 次失败"
@@ -340,7 +359,7 @@ def run_round(
                     file=sys.stderr,
                 )
             continue
-        _mark_processed(config, path)
+        await _mark_processed(config, path)
         if failures.pop(relative, None) is not None:
             dirty = True
         current.processed += 1
@@ -352,16 +371,16 @@ def run_round(
             flush=True,
         )
     if dirty:
-        _save_failures(config, failures)
+        await _save_failures(config, failures)
     return current
 
 
-def run_forever(
+async def run_forever(
     client: LLMClient,
     config: WorkerConfig,
     *,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
-    sleep: Callable[[float], None] = time.sleep,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_rounds: int | None = None,
 ) -> int:
     """主循环；返回进程退出码（0 无失败，1 有失败）。"""
@@ -373,9 +392,9 @@ def run_forever(
         local_now = now().astimezone()
         if window is not None and not in_window(local_now.time(), window):
             print(f"[worker] 窗口外（{config.window}），休眠 {config.interval:.0f}s", flush=True)
-            sleep(config.interval)
+            await sleep(config.interval)
             continue
-        report = run_round(client, config)
+        report = await run_round(client, config)
         if report.processed or report.failed:
             print(
                 f"[worker] round: {report.processed} ok / {report.failed} fail "
@@ -384,11 +403,11 @@ def run_forever(
             )
         if report.failed:
             failure_streak += 1
-            sleep(min(1800.0, config.interval * 2 ** min(failure_streak, 4)))
+            await sleep(min(1800.0, config.interval * 2 ** min(failure_streak, 4)))
         else:
             failure_streak = 0
             if not report.processed:
-                sleep(config.interval)
+                await sleep(config.interval)
     return 1 if failure_streak else 0
 
 
@@ -401,6 +420,8 @@ __all__ = [
     "parse_window",
     "probe_endpoint",
     "process_file",
+    "prune_processed_raw",
+    "purge_pending_review",
     "run_forever",
     "run_round",
 ]

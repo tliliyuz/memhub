@@ -28,7 +28,7 @@ class ExtractionFailed(RuntimeError):
     pass
 
 
-def extract_document(
+async def extract_document(
     client: LLMClient,
     *,
     template: str,
@@ -46,7 +46,7 @@ def extract_document(
     for index, chunk in enumerate(chunks):
         chunk_path = path if len(chunks) == 1 else f"{path}#chunk{index + 1}"
         prompt = render(template, path=chunk_path, text=chunk)
-        raw = client.complete(prompt, model=model, max_tokens=max_tokens)
+        raw = await client.complete(prompt, model=model, max_tokens=max_tokens)
         data = parse_json(raw)
         collected.append(_validate(_normalize_payload(data), chunk_path))
 

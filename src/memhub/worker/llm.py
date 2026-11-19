@@ -1,4 +1,4 @@
-"""LLM 客户端（Anthropic 协议）与 JSON 解析。
+"""LLM 客户端（Anthropic 协议，异步 HTTP）与 JSON 解析。
 
 注意：httpx 默认读取环境代理变量，`NO_PROXY` 里含 `[::1]` 时会抛
 `InvalidURL: Invalid port: ':1]'`。这里默认 `trust_env=False`，代理需显式传入。
@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
-import time
 from typing import Protocol
 
 import httpx
@@ -19,7 +19,7 @@ class LLMError(RuntimeError):
 
 
 class LLMClient(Protocol):
-    def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str: ...
+    async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str: ...
 
 
 class AnthropicClient:
@@ -36,9 +36,9 @@ class AnthropicClient:
         self._api_key = api_key
         self._timeout = timeout
         self._attempts = attempts
-        self._http = httpx.Client(timeout=timeout, trust_env=trust_env)
+        self._http = httpx.AsyncClient(timeout=timeout, trust_env=trust_env)
 
-    def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str:
+    async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str:
         payload = {
             "model": model,
             "max_tokens": max_tokens,
@@ -52,7 +52,7 @@ class AnthropicClient:
         last_error = ""
         for attempt in range(self._attempts):
             try:
-                response = self._http.post(self._url, headers=headers, json=payload)
+                response = await self._http.post(self._url, headers=headers, json=payload)
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
             else:
@@ -71,11 +71,11 @@ class AnthropicClient:
                 if response.status_code < 500 and response.status_code != 429:
                     raise LLMError(last_error)
             if attempt + 1 < self._attempts:
-                time.sleep(min(30.0, 2.0**attempt + random.random()))
+                await asyncio.sleep(min(30.0, 2.0**attempt + random.random()))
         raise LLMError(f"调用失败（{self._attempts} 次）: {last_error}")
 
-    def close(self) -> None:
-        self._http.close()
+    async def aclose(self) -> None:
+        await self._http.aclose()
 
 
 def parse_json(raw: str) -> dict[str, object]:

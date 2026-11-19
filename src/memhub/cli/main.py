@@ -1,4 +1,4 @@
-"""运维命令入口：ingest / project / serve。"""
+"""运维命令入口：ingest / project / serve（全异步 IO）。"""
 
 from __future__ import annotations
 
@@ -6,12 +6,14 @@ import argparse
 import asyncio
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
+from anyio import Path as AsyncPath
+
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
+from memhub.kb import proc
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
@@ -116,26 +118,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         print(__version__)
         return 0
-    if args.command == "ingest":
-        return _ingest(args)
-    if args.command == "project":
-        return _project(args)
-    if args.command == "serve":
-        return _serve(args)
-    if args.command == "mcp":
-        return _mcp(args)
-    if args.command == "purge-expired":
-        return _purge_expired(args)
-    if args.command == "worker":
-        return _worker(args)
-    if args.command == "api":
-        return _api(args)
-    if args.command == "kb":
-        return _kb(args)
-    if args.command == "provision-device":
-        return _provision_device(args)
-    parser.print_help()
-    return 0
+    if not args.command:
+        parser.print_help()
+        return 0
+    _prepare_event_loop()
+    try:
+        return asyncio.run(_dispatch(args))
+    except KeyboardInterrupt:
+        return 130
+
+
+async def _dispatch(args: argparse.Namespace) -> int:
+    handlers = {
+        "ingest": _ingest,
+        "project": _project,
+        "serve": _serve,
+        "mcp": _mcp,
+        "purge-expired": _purge_expired,
+        "worker": _worker,
+        "api": _api,
+        "kb": _kb,
+        "provision-device": _provision_device,
+    }
+    handler = handlers.get(args.command or "")
+    if handler is None:
+        return 0
+    return await handler(args)
 
 
 def _knowledge_dir(override: str | None) -> Path:
@@ -151,19 +159,19 @@ def _llm_client() -> tuple[AnthropicClient, str]:
     return AnthropicClient(base_url, api_key), model
 
 
-def _iter_files(path: Path, profile: str) -> list[Path]:
-    if path.is_file():
+async def _iter_files(path: Path, profile: str) -> list[Path]:
+    if await AsyncPath(path).is_file():
         return [path]
     pattern = "*.jsonl" if profile == "sessions" else "*.md"
-    return sorted(path.rglob(pattern))
+    return sorted([Path(item) async for item in AsyncPath(path).rglob(pattern)])
 
 
-def _ingest(args: argparse.Namespace) -> int:
+async def _ingest(args: argparse.Namespace) -> int:
     source_path = Path(args.path)
-    if not source_path.exists():
+    if not await AsyncPath(source_path).exists():
         print(f"路径不存在: {source_path}", file=sys.stderr)
         return 2
-    files = _iter_files(source_path, args.profile)
+    files = await _iter_files(source_path, args.profile)
     if args.limit:
         files = files[: args.limit]
     files = [path for path in files if path.name not in SKELETON_PAGES]
@@ -173,7 +181,7 @@ def _ingest(args: argparse.Namespace) -> int:
 
     project = args.project or source_path.name
     store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
-    template = load_profile(args.profile)
+    template = await load_profile(args.profile)
     client, model = (None, "") if args.dry_run else _llm_client()
     if client is None:
         print(f"[dry-run] {len(files)} 个文件 → project={project}, profile={args.profile}")
@@ -185,41 +193,44 @@ def _ingest(args: argparse.Namespace) -> int:
     device = os.environ.get("MEMHUB_DEVICE_NAME", "local")
     created = updated = skipped = failed = 0
 
-    for path in files:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-        text = render_jsonl(raw) if path.suffix == ".jsonl" else raw
-        if args.max_input_chars:
-            text = text[: args.max_input_chars]
-        if not text.strip():
-            print(f"  skip {path.name}: 无可抽取文本")
-            continue
-        try:
-            extraction = extract_document(
-                client,
-                template=template,
-                path=path.name,
-                text=text,
-                model=model,
-                max_chars=args.max_chars,
-            )
-        except (ExtractionFailed, LLMError) as exc:
-            failed += 1
-            print(f"  FAIL {path.name}: {exc}", file=sys.stderr)
-            continue
+    try:
+        for path in files:
+            raw = await AsyncPath(path).read_text(encoding="utf-8", errors="replace")
+            text = render_jsonl(raw) if path.suffix == ".jsonl" else raw
+            if args.max_input_chars:
+                text = text[: args.max_input_chars]
+            if not text.strip():
+                print(f"  skip {path.name}: 无可抽取文本")
+                continue
+            try:
+                extraction = await extract_document(
+                    client,
+                    template=template,
+                    path=path.name,
+                    text=text,
+                    model=model,
+                    max_chars=args.max_chars,
+                )
+            except (ExtractionFailed, LLMError) as exc:
+                failed += 1
+                print(f"  FAIL {path.name}: {exc}", file=sys.stderr)
+                continue
 
-        report = merge(
-            store,
-            extraction,
-            project=project,
-            source=SourceRef(type=source_kind, ref=path.name, device=device),
-        )
-        created += len(report.created)
-        updated += len(report.updated)
-        skipped += len(report.skipped_canonical)
-        print(
-            f"  ok {path.name}: +{len(report.created)} new, {len(report.updated)} updated,"
-            f" {report.edges_added} edges"
-        )
+            report = await merge(
+                store,
+                extraction,
+                project=project,
+                source=SourceRef(type=source_kind, ref=path.name, device=device),
+            )
+            created += len(report.created)
+            updated += len(report.updated)
+            skipped += len(report.skipped_canonical)
+            print(
+                f"  ok {path.name}: +{len(report.created)} new, {len(report.updated)} updated,"
+                f" {report.edges_added} edges"
+            )
+    finally:
+        await client.aclose()
 
     print(
         f"\n完成: {created} 新建 / {updated} 更新 / {skipped} 跳过(canonical) / {failed} 失败；"
@@ -228,10 +239,10 @@ def _ingest(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _project(args: argparse.Namespace) -> int:
+async def _project(args: argparse.Namespace) -> int:
     store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
     out = Path(args.out)
-    report = save_projection(store, out)
+    report = await save_projection(store, out)
     print(f"投影已写入 {out}: {report.nodes} 节点 / {report.edges} 边")
     if report.unresolved:
         print(f"未解析关系 {len(report.unresolved)} 条（目标不在真源中）:")
@@ -255,9 +266,9 @@ def _serve_env() -> dict[str, str]:
     return env
 
 
-def _serve(args: argparse.Namespace) -> int:
-    graph = Path(args.graph).resolve()
-    if not graph.is_file():
+async def _serve(args: argparse.Namespace) -> int:
+    graph = Path(await AsyncPath(args.graph).resolve())
+    if not await AsyncPath(graph).is_file():
         print(f"图谱不存在: {graph}（先运行 memhub project）", file=sys.stderr)
         return 2
     command = [
@@ -274,18 +285,20 @@ def _serve(args: argparse.Namespace) -> int:
     if args.no_browser:
         command.append("--no-browser")
     print(f"memhub explorer: http://127.0.0.1:{args.port}/  graph={graph}", flush=True)
-    return subprocess.call(command, env=_serve_env())
+    # 前台长驻，子进程直接继承本进程的 stdio。
+    result = await proc.run_command(command, env=_serve_env(), capture=False)
+    return result.returncode
 
 
-def _mcp(args: argparse.Namespace) -> int:
+async def _mcp(args: argparse.Namespace) -> int:
     store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
-    if not store.root.is_dir():
+    if not await AsyncPath(store.root).is_dir():
         print(f"知识库目录不存在: {store.root}", file=sys.stderr)
         return 2
-    return serve_mcp(store)
+    return await serve_mcp(store)
 
 
-def _purge_expired(args: argparse.Namespace) -> int:
+async def _purge_expired(args: argparse.Namespace) -> int:
     """批次 TTL 与隔离区清理：给 systemd timer 单独调用，不拉起 API 进程。"""
     from datetime import timedelta
 
@@ -294,7 +307,7 @@ def _purge_expired(args: argparse.Namespace) -> int:
     data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
     if data_dir and args.pending_review_days > 0:
         # 隔离区不属于批次记录，DSN 缺省时也要清理：毒文件不清理会无限占盘。
-        files, size = purge_pending_review(
+        files, size = await purge_pending_review(
             Path(data_dir), older_than=timedelta(days=args.pending_review_days)
         )
         print(f"已清理隔离区 {files} 个文件（{size} 字节）")
@@ -310,7 +323,7 @@ def _purge_expired(args: argparse.Namespace) -> int:
         if max_bytes <= 0:
             print(f"MEMHUB_PROCESSED_MAX_BYTES 必须大于 0：{max_bytes}", file=sys.stderr)
             return 2
-        files, size = prune_processed_raw(
+        files, size = await prune_processed_raw(
             Path(data_dir),
             max_bytes=max_bytes,
             older_than=timedelta(days=args.processed_raw_days),
@@ -323,21 +336,17 @@ def _purge_expired(args: argparse.Namespace) -> int:
         return 0
     from memhub.ingest.postgres import PostgresStore
 
-    async def purge() -> int:
-        store = PostgresStore(dsn, min_size=1, max_size=1)
-        try:
-            await store.migrate()  # 幂等：库是空的也能自建表，timer 不依赖部署顺序
-            return await store.purge_expired(keep=timedelta(hours=args.keep_hours))
-        finally:
-            await store.close()
-
-    _prepare_event_loop()
-    deleted = asyncio.run(purge())
+    store = PostgresStore(dsn, min_size=1, max_size=1)
+    try:
+        await store.migrate()  # 幂等：库是空的也能自建表，timer 不依赖部署顺序
+        deleted = await store.purge_expired(keep=timedelta(hours=args.keep_hours))
+    finally:
+        await store.close()
     print(f"已清理 {deleted} 条过期批次记录")
     return 0
 
 
-def _worker(args: argparse.Namespace) -> int:
+async def _worker(args: argparse.Namespace) -> int:
     """提炼守护进程。退出码：0 无失败；1 有失败；2 配置/LLM 端点错误。"""
     from memhub.worker.daemon import WorkerConfig, probe_endpoint, run_forever, run_round
 
@@ -349,9 +358,10 @@ def _worker(args: argparse.Namespace) -> int:
     if args.dry_run:
         # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰文件。
         raw_root = Path(data_dir) / "raw_store"
+        exists = await AsyncPath(raw_root).is_dir()
         print(
             f"[dry-run] data={data_dir} knowledge={knowledge_dir} "
-            f"raw_root={'exists' if raw_root.is_dir() else 'missing'} "
+            f"raw_root={'exists' if exists else 'missing'} "
             f"window={args.window or 'all-day'} once={args.once}",
             flush=True,
         )
@@ -362,7 +372,7 @@ def _worker(args: argparse.Namespace) -> int:
         print("缺少 MEMHUB_LLM_BASE_URL / MEMHUB_LLM_API_KEY", file=sys.stderr)
         return 2
     try:
-        probe_endpoint(base_url)
+        await probe_endpoint(base_url)
     except LLMError as exc:
         # 端点不可达时直接退出：进循环只会空转把日志写满（上次事故的教训）。
         print(f"LLM 端点自检失败: {exc}", file=sys.stderr)
@@ -377,10 +387,13 @@ def _worker(args: argparse.Namespace) -> int:
         interval=args.interval,
         limit=args.limit,
     )
-    if args.once:
-        report = run_round(client, config)
-        return 1 if report.failed else 0
-    return run_forever(client, config)
+    try:
+        if args.once:
+            report = await run_round(client, config)
+            return 1 if report.failed else 0
+        return await run_forever(client, config)
+    finally:
+        await client.aclose()
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -399,7 +412,7 @@ def resolve_bind_host(allow_non_loopback: bool = False) -> str:
     return host
 
 
-def _provision_device(args: argparse.Namespace) -> int:
+async def _provision_device(args: argparse.Namespace) -> int:
     """运维侧登记设备并取回 token。
 
     生产把 `/devices/register` 用 provision token 关掉了（开放注册等于任何人都能
@@ -407,6 +420,7 @@ def _provision_device(args: argparse.Namespace) -> int:
     token 只打到标准输出：调用方自己写进 OS 凭据库，不得落 json / shell history。
     """
     from memhub.ingest.app import issue_device_token
+    from memhub.ingest.postgres import PostgresStore
 
     if not DEVICE_ID_RE.match(args.device_id):
         print(f"device_id 必须是 UUID v4：{args.device_id!r}", file=sys.stderr)
@@ -419,51 +433,62 @@ def _provision_device(args: argparse.Namespace) -> int:
     if not secret:
         print("缺少 MEMHUB_DEVICE_TOKEN_SECRET", file=sys.stderr)
         return 2
-    from memhub.ingest.postgres import PostgresStore
-
-    async def register() -> None:
-        store = PostgresStore(dsn, min_size=1, max_size=1)
-        try:
-            await store.migrate()
-            await store.register_device(args.device_id, name=args.name, platform=args.platform)
-        finally:
-            await store.close()
-
-    _prepare_event_loop()
-    asyncio.run(register())
+    store = PostgresStore(dsn, min_size=1, max_size=1)
+    try:
+        await store.migrate()
+        await store.register_device(args.device_id, name=args.name, platform=args.platform)
+    finally:
+        await store.close()
     print(issue_device_token(secret, args.device_id))
     return 0
 
 
-def _kb(args: argparse.Namespace) -> int:
+async def _run_server(
+    target: str, *, host: str, port: int, log_level: str, factory: bool = True
+) -> None:
+    """在已经运行的（Selector）事件循环里起 uvicorn，不另开事件循环。"""
+    import uvicorn
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            target,
+            factory=factory,
+            host=host,
+            port=port,
+            log_level=log_level,
+        )
+    )
+    await server.serve()
+
+
+async def _kb(args: argparse.Namespace) -> int:
     """本地知识库管理台：kb-api + （可选）explorer 子进程。
 
     只绑回环：这是单用户管理面，没有公网入口。前端构建产物缺失时纯 API 运行，
     开发期用 Vite 的 5173 端口直连。
     """
-    import uvicorn
-
-    knowledge = _knowledge_dir(args.knowledge_dir).resolve()
-    if not knowledge.is_dir():
+    knowledge = Path(await AsyncPath(_knowledge_dir(args.knowledge_dir)).resolve())
+    if not await AsyncPath(knowledge).is_dir():
         print(f"知识库目录不存在: {knowledge}", file=sys.stderr)
         return 2
-    graph_out = Path(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
+    graph_out = Path(
+        await AsyncPath(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
+    )
     web_dist = args.web_dist or os.environ.get("MEMHUB_KB_WEB_DIST", "")
     os.environ["MEMHUB_KNOWLEDGE_DIR"] = str(knowledge)
     os.environ["MEMHUB_KB_GRAPH"] = str(graph_out)
     if web_dist:
-        os.environ["MEMHUB_KB_WEB_DIST"] = str(Path(web_dist).resolve())
+        os.environ["MEMHUB_KB_WEB_DIST"] = str(await AsyncPath(web_dist).resolve())
     if args.spawn_graph:
         os.environ["MEMHUB_KB_GRAPH_PORT"] = str(args.graph_port)
     port = args.port or int(os.environ.get("MEMHUB_KB_HTTP_PORT", "8701"))
     print(f"memhub kb-api: http://127.0.0.1:{port}/  真源={knowledge}", flush=True)
-    if graph_out.is_file():
+    if await AsyncPath(graph_out).is_file():
         print(f"投影: {graph_out}", flush=True)
     if args.spawn_graph:
         print(f"explorer 由 kb-api 托管: http://127.0.0.1:{args.graph_port}/", flush=True)
-    uvicorn.run(
+    await _run_server(
         "memhub.kb.api:create_app",
-        factory=True,
         host="127.0.0.1",
         port=port,
         log_level=os.environ.get("MEMHUB_LOG_LEVEL", "INFO").lower(),
@@ -471,9 +496,7 @@ def _kb(args: argparse.Namespace) -> int:
     return 0
 
 
-def _api(args: argparse.Namespace) -> int:
-    import uvicorn
-
+async def _api(args: argparse.Namespace) -> int:
     host = resolve_bind_host(args.allow_non_loopback)
     port = int(os.environ.get("MEMHUB_HTTP_PORT", "8700"))
     dsn = os.environ.get("MEMHUB_DB_URL", "")
@@ -482,20 +505,15 @@ def _api(args: argparse.Namespace) -> int:
         # 幂等，重复启动只会打印 "already up to date"。
         from memhub.ingest.postgres import PostgresStore
 
-        async def migrate() -> list[str]:
-            store = PostgresStore(dsn, min_size=1, max_size=1)
-            try:
-                return await store.migrate()
-            finally:
-                await store.close()
-
-        _prepare_event_loop()
-        applied = asyncio.run(migrate())
+        store = PostgresStore(dsn, min_size=1, max_size=1)
+        try:
+            applied = await store.migrate()
+        finally:
+            await store.close()
         print(f"schema: {applied or 'already up to date'}", flush=True)
     print(f"memhub ingest-api: http://{host}:{port}/", flush=True)
-    uvicorn.run(
+    await _run_server(
         "memhub.ingest.app:create_app",
-        factory=True,
         host=host,
         port=port,
         log_level=os.environ.get("MEMHUB_LOG_LEVEL", "INFO").lower(),

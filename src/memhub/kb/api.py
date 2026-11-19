@@ -1,4 +1,4 @@
-"""知识库管理 API（kb-api）。
+"""知识库管理 API（kb-api，全异步 IO）。
 
 本地单用户管理台的后端：列表/搜索/详情/新增/编辑/废弃/归档删除/边编辑/审计，
 外加投影重建。所有写操作落到 markdown 真源（见 `memhub.kb.manage`），
@@ -14,18 +14,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import subprocess
 import sys
-import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import anyio
+from anyio import Path as AsyncPath
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -33,7 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, Kind, Predicate, QuestionStatus, Tier
-from memhub.kb import catalog, manage, query
+from memhub.kb import catalog, manage, proc, query
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 
@@ -162,8 +163,7 @@ class KbUpdate(BaseModel):
 
 class _RebuildState:
     def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.thread: threading.Thread | None = None
+        self.task: asyncio.Task[None] | None = None
         self.due_at: float | None = None
         self.running = False
         self.started_at: str | None = None
@@ -183,7 +183,7 @@ class KnowledgeApi:
         graph_out: Path,
         *,
         auto_rebuild: bool = True,
-        on_rebuilt: Callable[[], None] | None = None,
+        on_rebuilt: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.store = KnowledgeStore(knowledge_dir)
         self.graph_out = graph_out
@@ -193,36 +193,32 @@ class KnowledgeApi:
 
     # ---- 投影 ----
 
-    def rebuild_now(self) -> dict[str, Any]:
-        with self.state.lock:
-            self.state.running = True
-            self.state.started_at = datetime.now(UTC).isoformat()
-            self.state.error = None
+    async def rebuild_now(self) -> dict[str, Any]:
+        self.state.running = True
+        self.state.started_at = datetime.now(UTC).isoformat()
+        self.state.error = None
         try:
-            report = save_projection(self.store, self.graph_out)
-            with self.state.lock:
-                self.state.nodes = report.nodes
-                self.state.edges = report.edges
-                self.state.unresolved = len(report.unresolved)
-                self.state.error = None
+            report = await save_projection(self.store, self.graph_out)
+            self.state.nodes = report.nodes
+            self.state.edges = report.edges
+            self.state.unresolved = len(report.unresolved)
+            self.state.error = None
         except Exception as exc:
-            with self.state.lock:
-                self.state.error = f"{type(exc).__name__}: {exc}"
+            self.state.error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
-            with self.state.lock:
-                self.state.running = False
-                self.state.finished_at = datetime.now(UTC).isoformat()
+            self.state.running = False
+            self.state.finished_at = datetime.now(UTC).isoformat()
         if self.on_rebuilt is not None:
-            self.on_rebuilt()
-        return self.rebuild_status()
+            await self.on_rebuilt()
+        return await self.rebuild_status()
 
-    def _graph_counts(self) -> tuple[int, int] | None:
+    async def _graph_counts(self) -> tuple[int, int] | None:
         """直接数现有投影文件：冷启动（本进程还没重建过）时也能报出真实规模。"""
-        if not self.graph_out.is_file():
+        if not await AsyncPath(self.graph_out).is_file():
             return None
         try:
-            data = json.loads(self.graph_out.read_text(encoding="utf-8"))
+            data = json.loads(await AsyncPath(self.graph_out).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         if not isinstance(data, dict):
@@ -231,12 +227,13 @@ class KnowledgeApi:
         edges = data.get("edges") or data.get("links") or []
         return len(nodes), len(edges)
 
-    def rebuild_status(self) -> dict[str, Any]:
+    async def rebuild_status(self) -> dict[str, Any]:
         state = self.state
         graph_mtime = None
-        if self.graph_out.is_file():
-            graph_mtime = datetime.fromtimestamp(self.graph_out.stat().st_mtime, tz=UTC).isoformat()
-        counts = self._graph_counts()
+        if await AsyncPath(self.graph_out).is_file():
+            mtime = (await AsyncPath(self.graph_out).stat()).st_mtime
+            graph_mtime = datetime.fromtimestamp(mtime, tz=UTC).isoformat()
+        counts = await self._graph_counts()
         nodes, edges = counts if counts is not None else (state.nodes, state.edges)
         return {
             "running": state.running,
@@ -248,23 +245,23 @@ class KnowledgeApi:
             "unresolved_edges": state.unresolved,
             "graph": str(self.graph_out),
             "graph_mtime": graph_mtime,
-            "stale": self.projection_stale(),
+            "stale": await self.projection_stale(),
         }
 
-    def projection_stale(self) -> bool:
+    async def projection_stale(self) -> bool:
         """真源比投影新（或有节点但还没有投影）即为过期。"""
-        if not self.graph_out.is_file():
-            return self.store.root.is_dir()
-        graph_mtime = self.graph_out.stat().st_mtime
-        for node_id in self.store.list_ids():
+        if not await AsyncPath(self.graph_out).is_file():
+            return await AsyncPath(self.store.root).is_dir()
+        graph_mtime = (await AsyncPath(self.graph_out).stat()).st_mtime
+        for node_id in await self.store.list_ids():
             try:
-                if self.store.path_for(node_id).stat().st_mtime > graph_mtime:
+                if (await AsyncPath(self.store.path_for(node_id)).stat()).st_mtime > graph_mtime:
                     return True
             except OSError:
                 continue
-        for path in self.store.root.rglob("_edges.jsonl"):
+        async for path in AsyncPath(self.store.root).rglob("_edges.jsonl"):
             try:
-                if path.stat().st_mtime > graph_mtime:
+                if (await path.stat()).st_mtime > graph_mtime:
                     return True
             except OSError:
                 continue
@@ -274,37 +271,26 @@ class KnowledgeApi:
         """写操作后的防抖重建：连续保存只重建一次。"""
         if not self.auto_rebuild:
             return
-        with self.state.lock:
-            self.state.due_at = time.monotonic() + REBUILD_DEBOUNCE_SECONDS
-            if self.state.thread is not None and self.state.thread.is_alive():
-                return
-            thread = threading.Thread(target=self._debounce_loop, daemon=True)
-            self.state.thread = thread
-        thread.start()
+        self.state.due_at = time.monotonic() + REBUILD_DEBOUNCE_SECONDS
+        if self.state.task is not None and not self.state.task.done():
+            return
+        self.state.task = asyncio.get_running_loop().create_task(self._debounce_loop())
 
-    def _debounce_loop(self) -> None:
+    async def _debounce_loop(self) -> None:
         while True:
-            with self.state.lock:
-                due_at = self.state.due_at
+            due_at = self.state.due_at
             if due_at is None:
-                with self.state.lock:
-                    self.state.thread = None
                 return
             wait = due_at - time.monotonic()
             if wait > 0:
-                time.sleep(min(wait, 0.5))
+                await asyncio.sleep(min(wait, 0.5))
                 continue
-            with self.state.lock:
-                self.state.due_at = None
+            self.state.due_at = None
             try:
-                self.rebuild_now()
-            except Exception as exc:  # noqa: BLE001 - 后台线程不能把异常抛给请求
+                await self.rebuild_now()
+            except Exception as exc:  # noqa: BLE001 - 后台任务不能把异常抛给请求
                 # 失败原因已经写进 state.error 供 UI 展示；这里只留一条服务端日志。
                 _log.warning("投影重建失败: %s", exc)
-            with self.state.lock:
-                if self.state.due_at is None:
-                    self.state.thread = None
-                    return
 
 
 def _error_response(exc: manage.ManageError) -> JSONResponse:
@@ -352,8 +338,8 @@ def create_app() -> FastAPI:
             content={"code": 1011, "message": str(exc), "data": {}},
         )
 
-    def _write(action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-        result = action()
+    async def _write(action: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        result = await action
         api.schedule_rebuild()
         return result
 
@@ -361,42 +347,44 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     @app.get("/api/v1/kb/healthz")
-    def healthz() -> dict[str, Any]:
+    async def healthz() -> dict[str, Any]:
         return {
             "ok": True,
             "knowledge_dir": str(api.store.root),
-            "nodes": len(api.store.list_ids()),
-            "projection": api.rebuild_status(),
+            "nodes": len(await api.store.list_ids()),
+            "projection": await api.rebuild_status(),
         }
 
     @app.get("/api/v1/kb/stats")
-    def stats() -> dict[str, Any]:
-        return manage.stats(api.store)
+    async def stats() -> dict[str, Any]:
+        return await manage.stats(api.store)
 
     # ---- 知识库（project）----
 
     @app.get("/api/v1/kb/projects")
-    def list_projects() -> dict[str, Any]:
-        return catalog.list_kbs(api.store)
+    async def list_projects() -> dict[str, Any]:
+        return await catalog.list_kbs(api.store)
 
     @app.post("/api/v1/kb/projects", status_code=201)
-    def create_project(body: KbCreate) -> dict[str, Any]:
-        return catalog.create_kb(
+    async def create_project(body: KbCreate) -> dict[str, Any]:
+        return await catalog.create_kb(
             api.store, kb_id=body.id, name=body.name, description=body.description
         )
 
     @app.patch("/api/v1/kb/projects/{project}")
-    def update_project(project: str, body: KbUpdate) -> dict[str, Any]:
-        return catalog.update_kb(api.store, project, name=body.name, description=body.description)
+    async def update_project(project: str, body: KbUpdate) -> dict[str, Any]:
+        return await catalog.update_kb(
+            api.store, project, name=body.name, description=body.description
+        )
 
     @app.get("/api/v1/kb/graph")
-    def knowledge_graph(project: str = Query(min_length=1)) -> dict[str, Any]:
-        return catalog.graph(api.store, project)
+    async def knowledge_graph(project: str = Query(min_length=1)) -> dict[str, Any]:
+        return await catalog.graph(api.store, project)
 
     # ---- 节点 ----
 
     @app.get("/api/v1/kb/nodes")
-    def list_nodes(
+    async def list_nodes(
         project: str | None = None,
         kind: str | None = None,
         tier: str | None = None,
@@ -405,7 +393,7 @@ def create_app() -> FastAPI:
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        return manage.list_nodes(
+        return await manage.list_nodes(
             api.store,
             project=project,
             kind=kind,
@@ -417,35 +405,35 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/v1/kb/nodes", status_code=201)
-    def create_node(body: NodeCreate) -> dict[str, Any]:
-        return _write(lambda: manage.create_node(api.store, body.to_draft()))
+    async def create_node(body: NodeCreate) -> dict[str, Any]:
+        return await _write(manage.create_node(api.store, body.to_draft()))
 
     @app.get("/api/v1/kb/nodes/{node_id:path}")
-    def get_node(node_id: str) -> dict[str, Any]:
-        return manage.get_node(api.store, node_id)
+    async def get_node(node_id: str) -> dict[str, Any]:
+        return await manage.get_node(api.store, node_id)
 
     # 注意顺序：`{node_id:path}` 是贪婪匹配，`/edges` 必须先注册，
     # 否则 PUT /nodes/a/b/edges 会被当成 id="a/b/edges" 的节点更新。
     @app.put("/api/v1/kb/nodes/{node_id:path}/edges")
-    def replace_edges(node_id: str, body: EdgesUpdate) -> dict[str, Any]:
+    async def replace_edges(node_id: str, body: EdgesUpdate) -> dict[str, Any]:
         edges = [
             Edge(source=node_id, predicate=item.predicate, target=item.target)
             for item in body.edges
         ]
-        return _write(lambda: manage.replace_out_edges(api.store, node_id, edges))
+        return await _write(manage.replace_out_edges(api.store, node_id, edges))
 
     @app.put("/api/v1/kb/nodes/{node_id:path}")
-    def update_node(node_id: str, body: NodeUpdate) -> dict[str, Any]:
-        return _write(
-            lambda: manage.update_node(
+    async def update_node(node_id: str, body: NodeUpdate) -> dict[str, Any]:
+        return await _write(
+            manage.update_node(
                 api.store, node_id, expected_revision=body.expected_revision, patch=body.to_patch()
             )
         )
 
     @app.post("/api/v1/kb/nodes/{node_id:path}/deprecate")
-    def deprecate_node(node_id: str, body: DeprecateRequest) -> dict[str, Any]:
-        return _write(
-            lambda: manage.deprecate_node(
+    async def deprecate_node(node_id: str, body: DeprecateRequest) -> dict[str, Any]:
+        return await _write(
+            manage.deprecate_node(
                 api.store,
                 node_id,
                 superseded_by=body.superseded_by,
@@ -455,14 +443,14 @@ def create_app() -> FastAPI:
         )
 
     @app.delete("/api/v1/kb/nodes/{node_id:path}")
-    def delete_node(
+    async def delete_node(
         node_id: str,
         revision: str = Query(min_length=1),
         reason: str = "",
         actor: str = "ui",
     ) -> dict[str, Any]:
-        return _write(
-            lambda: manage.delete_node(
+        return await _write(
+            manage.delete_node(
                 api.store, node_id, expected_revision=revision, reason=reason, actor=actor
             )
         )
@@ -470,17 +458,17 @@ def create_app() -> FastAPI:
     # ---- 回收站 ----
 
     @app.get("/api/v1/kb/trash")
-    def list_trash(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
-        return manage.list_trash(api.store, limit=limit)
+    async def list_trash(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+        return await manage.list_trash(api.store, limit=limit)
 
     @app.post("/api/v1/kb/trash/restore")
-    def restore_trash(body: RestoreRequest) -> dict[str, Any]:
-        return _write(lambda: manage.restore_node(api.store, body.trash))
+    async def restore_trash(body: RestoreRequest) -> dict[str, Any]:
+        return await _write(manage.restore_node(api.store, body.trash))
 
     # ---- 检索与审计 ----
 
     @app.get("/api/v1/kb/search")
-    def search(
+    async def search(
         q: str,
         project: str | None = None,
         kinds: str | None = None,
@@ -488,58 +476,78 @@ def create_app() -> FastAPI:
         limit: int = Query(default=20, ge=1, le=50),
     ) -> dict[str, Any]:
         kind_list = [item for item in (kinds or "").split(",") if item] or None
-        return query.search(api.store, q, project=project, kinds=kind_list, tier=tier, limit=limit)
+        return await query.search(
+            api.store, q, project=project, kinds=kind_list, tier=tier, limit=limit
+        )
 
     @app.get("/api/v1/kb/audit")
-    def audit(
+    async def audit(
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        return query.audit_list(api.store, limit=limit, offset=offset)
+        return await query.audit_list(api.store, limit=limit, offset=offset)
 
     # ---- 投影 ----
 
     @app.get("/api/v1/kb/rebuild")
     @app.get("/api/v1/kb/projection")
-    def rebuild_status() -> dict[str, Any]:
-        return api.rebuild_status()
+    async def rebuild_status() -> dict[str, Any]:
+        return await api.rebuild_status()
 
     @app.post("/api/v1/kb/rebuild", response_model=None)
-    def rebuild() -> Any:
+    async def rebuild() -> Any:
         try:
-            return api.rebuild_now()
+            return await api.rebuild_now()
         except Exception as exc:  # noqa: BLE001 - 返回 500 + 原因，让 UI 展示
             return JSONResponse(
                 status_code=500,
                 content={
                     "code": 2001,
                     "message": f"投影重建失败: {type(exc).__name__}: {exc}",
-                    "data": api.rebuild_status(),
+                    "data": await api.rebuild_status(),
                 },
             )
+
+    @app.on_event("startup")
+    async def _startup() -> None:
+        if graph_restarter is not None and await AsyncPath(graph_out).is_file():
+            await graph_restarter.start()
 
     # ---- 静态前端（打包产物）----
 
     index = web_dist / "index.html" if web_dist is not None else None
-    if web_dist is not None and index is not None and index.is_file():
-        assets = web_dist / "assets"
-        if assets.is_dir():
-            app.mount("/assets", StaticFiles(directory=assets), name="assets")
+    if web_dist is not None:
+        # `check_dir=False`：是否构建由请求期判断，启动期不做同步 stat。
+        app.mount(
+            "/assets",
+            StaticFiles(directory=web_dist / "assets", check_dir=False),
+            name="assets",
+        )
 
         @app.get("/{path:path}", response_model=None)
-        def spa(path: str) -> FileResponse | JSONResponse:
+        async def spa(path: str) -> FileResponse | JSONResponse:
             if path.startswith("api/"):
                 return JSONResponse(
                     status_code=404,
                     content={"code": 1011, "message": "未知接口", "data": {"path": path}},
                 )
+            if index is None or not await AsyncPath(index).is_file():
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "code": 2002,
+                        "message": "前端未构建",
+                        "data": {"dist": str(web_dist)},
+                    },
+                )
             candidate = web_dist / path
-            if path and candidate.is_file() and web_dist in candidate.resolve().parents:
+            if (
+                path
+                and await AsyncPath(candidate).is_file()
+                and web_dist in Path(await AsyncPath(candidate).resolve()).parents
+            ):
                 return FileResponse(candidate)
             return FileResponse(index)
-
-    if graph_restarter is not None and graph_out.is_file():
-        graph_restarter.start()
 
     return app
 
@@ -554,8 +562,8 @@ class _GraphRestarter:
     def __init__(self, graph: Path, port: int) -> None:
         self.graph = graph
         self.port = port
-        self.process: subprocess.Popen[bytes] | None = None
-        self.lock = threading.Lock()
+        self.process: Any = None
+        self.lock = anyio.Lock()
 
     @classmethod
     def from_env(cls) -> _GraphRestarter | None:
@@ -565,47 +573,48 @@ class _GraphRestarter:
         graph = Path(os.environ.get("MEMHUB_KB_GRAPH", DEFAULT_GRAPH))
         return cls(graph, int(port))
 
-    def start(self) -> None:
-        with self.lock:
-            if self.process is not None and self.process.poll() is None:
-                return
-            env = os.environ.copy()
-            env.setdefault("PYTHONUTF8", "1")
-            env.setdefault("PYTHONIOENCODING", "utf-8")
-            env.setdefault("SEMANTICA_ALLOW_ANONYMOUS", "true")
-            self.process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "semantica.explorer",
-                    "--graph",
-                    str(self.graph),
-                    "--port",
-                    str(self.port),
-                    "--host",
-                    "127.0.0.1",
-                    "--no-browser",
-                ],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+    async def start(self) -> None:
+        async with self.lock:
+            await self._spawn_locked()
 
-    def restart(self) -> None:
-        with self.lock:
+    async def _spawn_locked(self) -> None:
+        if self.process is not None and proc.exit_code(self.process) is None:
+            return
+        env = os.environ.copy()
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("SEMANTICA_ALLOW_ANONYMOUS", "true")
+        self.process = await proc.spawn(
+            [
+                sys.executable,
+                "-m",
+                "semantica.explorer",
+                "--graph",
+                str(self.graph),
+                "--port",
+                str(self.port),
+                "--host",
+                "127.0.0.1",
+                "--no-browser",
+            ],
+            env=env,
+        )
+
+    async def restart(self) -> None:
+        async with self.lock:
             process = self.process
             self.process = None
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        self.start()
+            if process is not None and proc.exit_code(process) is None:
+                proc.terminate(process)
+                with anyio.move_on_after(5):
+                    while proc.exit_code(process) is None:
+                        await anyio.sleep(0.1)
+                if proc.exit_code(process) is None:
+                    proc.kill(process)
+            await self._spawn_locked()
 
-    def stop(self) -> None:
-        with self.lock:
+    async def stop(self) -> None:
+        async with self.lock:
             process = self.process
             self.process = None
-        if process is not None and process.poll() is None:
-            process.terminate()
+            proc.terminate(process)

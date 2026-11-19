@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-19（全仓 I/O 异步化：kb / worker / mcp / cli）
+
+- 负责人收紧要求：**从数据库驱动到所有 I/O 一律 async，除特殊情况禁止同步函数**。在上一提交（数据访问层 ORM 化）基础上完成第二阶段，逐模块改造：
+  - `refactor(kb)`：`store/query/catalog/manage/projection` 的文件 IO 全部改 `anyio.Path`（异步 `rglob`/`open`/`replace`/`stat`），写锁等待改 `anyio.sleep`，写锁文件按文本模式创建（修掉此前 bytes 写入文本句柄的潜在 TypeError）；git 提交走统一进程封装。
+  - `refactor(kb-api)`：路由全部 `async def`；防抖重建用 `asyncio.Task`；静态文件存在性检查移到请求期 `await`（`StaticFiles(check_dir=False)` + 缺失时 503），启动期不再同步 stat；explorer 托管改用 `Popen` 封装，重启时在锁内先 terminate/kill 再拉起。
+  - `feat(kb)`：新增 `kb/proc.py`——全仓唯一子进程入口，`subprocess.run/Popen` 放 `anyio.to_thread`。原因：Windows 上 psycopg 异步驱动要求 SelectorEventLoop，而 SelectorEventLoop 不支持 asyncio 子进程（实测 `NotImplementedError`）。
+  - `refactor(worker)`：LLM 客户端换 `httpx.AsyncClient`；prompt 加载、raw 文件读写/移动、失败计数、隔离区与 `processed_raw` 裁剪全部异步；端点自检改 `asyncio.open_connection`；`run_forever` 的 sleep 可注入 async 实现。
+  - `refactor(mcp)`：协议处理全 async；stdout 写入与 stdin `readline`（阻塞流）放 `anyio.to_thread`。
+  - `refactor(ingest)`：`rawstore.save_batch/estimate_new_bytes/tree_size` 改原生 async（原子写 `anyio.Path`），`RawStoreQuota` 改 `anyio.Lock`；`/debug/sources` 与 `/healthz` 改 async；删除此前的 `asyncio.to_thread` 包装。
+  - `refactor(cli)`：全部命令改 `async def`，入口一次 `asyncio.run(_dispatch())`；`api`/`kb` 用 `uvicorn.Server.serve()` 在同一事件循环内启动，explorer 走 `proc.run_command`，worker 退出前 `await client.aclose()`。
+  - `test`：kb/query/catalog/manage/daemon/mcp/pipeline/rawstore 用例全 async 化；新增 async sleep 收集器与 `AsyncPath` 断言。
+  - `feat(guard)`：新增 `scripts/check_async_io.py`（AST 扫描）并挂 pre-commit——禁止 `subprocess.*`、`os.walk/stat/utime`、`time.sleep`、`shutil.*`、内置 `open()`、`httpx.Client()`、`anyio.run_process/open_process`、`asyncio.create_subprocess_*`，以及同步 `Path(...)` 上的阻塞方法；白名单只有 `kb/proc.py`。附 `tests/unit/test_no_async_io.py` 自测。
+- 验证：对临时 Docker PG 16 容器跑全量 **149 passed**（PG 契约真实执行，含并发重放）；未设 `MEMHUB_TEST_DB_URL` 时为 140 passed + 9 skipped；`ruff check/format`、mypy strict（31 文件）、`check_no_raw_sql.py`、`check_async_io.py` 均通过。
+
 ## 2026-11-19（数据访问层异步化：SQLAlchemy ORM + 禁手写 SQL）
 
 - `refactor(ingest)`：按 ADR-0005 把数据访问层整体改为异步——`StateStore` 协议全部 `async def`，`PostgresStore` 换成 SQLAlchemy 2.0 async engine（`create_async_engine` + `async_sessionmaker`，`postgresql+psycopg`，复用现有 psycopg 3，不引入 asyncpg / asyncmy）。连接池随 engine 异步管理；`MEMHUB_DB_URL` 参数语义不变。
@@ -10,7 +24,7 @@
 - `test`：`tests/contract/test_state_store.py` 全 async，同一组场景参数化跑内存与 PG 实现，新增 `asyncio.gather` 同批重放用例；`tests/conftest.py` 在 Windows 下给 pytest-asyncio 提供 `SelectorEventLoop`。
 - `deps`：新增 `sqlalchemy>=2.0.30,<2.1`（`postgres` extra）与 `pytest-asyncio`（`dev`）；`psycopg[binary,pool]` 保留。
 - 验证：对临时 Docker PG 16 容器跑全量 **142 passed**（PG 契约真实执行，含并发重放）；未设 `MEMHUB_TEST_DB_URL` 时 PG 用例跳过、其余通过；`ruff check/format`、mypy strict（30 文件）、`python scripts/check_no_raw_sql.py` 均通过。
-- 范围外：`kb-api`（`memhub kb`）无数据库访问，保持同步；markdown 文件 I/O 是否异步化另议。
+- 范围外（已被上条取代）：`kb-api`（`memhub kb`）无数据库访问，当时保持同步；markdown 文件 I/O 已在同日第二阶段全部异步化。
 
 ## 2026-11-19（治理：ego-lite 验收后关闭标签页）
 

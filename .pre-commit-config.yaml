@@ -45,3 +45,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^src/
+
+      - id: no-sync-io
+        name: 禁止同步 I/O（全仓 async；进程走 proc 模块）
+        entry: python scripts/check_async_io.py
+        language: system
+        pass_filenames: false
+        files: ^src/

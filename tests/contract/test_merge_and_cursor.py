@@ -34,7 +34,7 @@ def _node(slug: str, kind: str, body: str = "内容") -> dict[str, object]:
     }
 
 
-def test_question_node_defaults_to_open(tmp_path: Path) -> None:
+async def test_question_node_defaults_to_open(tmp_path: Path) -> None:
     store = KnowledgeStore(tmp_path)
     extraction = Extraction(
         nodes=[
@@ -42,14 +42,14 @@ def test_question_node_defaults_to_open(tmp_path: Path) -> None:
             ExtractedNode.model_validate(_node("a-fact", "fact")),
         ]
     )
-    report = merge(
+    report = await merge(
         store,
         extraction,
         project="demo",
         source=SourceRef(type=SourceKind.WIKI, ref="a.md"),
     )
     assert report.created == ["demo/question/unresolved-vector-store", "demo/fact/a-fact"]
-    node, _ = store.read("demo/question/unresolved-vector-store")
+    node, _ = await store.read("demo/question/unresolved-vector-store")
     assert node.status is not None and node.status.value == "open"
 
 

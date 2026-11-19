@@ -36,7 +36,7 @@ class MergeReport:
         return len(self.created) + len(self.updated)
 
 
-def merge(
+async def merge(
     store: KnowledgeStore,
     extraction: Extraction,
     *,
@@ -51,19 +51,19 @@ def merge(
     for node in extraction.nodes:
         node_id = f"{project}/{node.kind.value}/{node.slug}"
         slug_to_id[node.slug] = node_id
-        if not store.exists(node_id):
-            store.write(node_id, _new_node(node, project, source, moment), node.body)
+        if not await store.exists(node_id):
+            await store.write(node_id, _new_node(node, project, source, moment), node.body)
             report.created.append(node_id)
             continue
 
-        existing, existing_body = store.read(node_id)
+        existing, existing_body = await store.read(node_id)
         if existing.tier is Tier.CANONICAL:
             report.skipped_canonical.append(node_id)
             continue
 
         updated = _merge_existing(existing, node, source, moment)
         body = _merge_body(existing_body, node.body, moment)
-        store.write(node_id, updated, body)
+        await store.write(node_id, updated, body)
         report.updated.append(node_id)
 
     edges = [
@@ -75,7 +75,7 @@ def merge(
         )
         for edge in extraction.edges
     ]
-    report.edges_added = store.append_edges(project, edges, source.ref)
+    report.edges_added = await store.append_edges(project, edges, source.ref)
     return report
 
 

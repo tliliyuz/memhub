@@ -1,6 +1,8 @@
-"""markdown 真源 → semantica ContextGraph 投影。
+"""markdown 真源 → semantica ContextGraph 投影（异步 IO）。
 
 投影可随时丢弃重建；只读 markdown 与 `_edges.jsonl`，不反向写回真源。
+semantica 只有同步 API，`save_to_file` 用 `anyio.to_thread` 放到线程里执行；
+核心数据读取与组装仍是异步实现。
 """
 
 from __future__ import annotations
@@ -8,6 +10,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+import anyio
+from anyio import Path as AsyncPath
 
 from memhub.kb.store import KnowledgeStore
 
@@ -21,7 +27,7 @@ class ProjectionReport:
     unresolved: list[str] = field(default_factory=list)
 
 
-def build_graph(store: KnowledgeStore) -> tuple[object, ProjectionReport]:
+async def build_graph(store: KnowledgeStore) -> tuple[Any, ProjectionReport]:
     from semantica.context import ContextGraph  # type: ignore[import-untyped]
 
     graph = ContextGraph(advanced_analytics=False)
@@ -29,8 +35,8 @@ def build_graph(store: KnowledgeStore) -> tuple[object, ProjectionReport]:
     ids: set[str] = set()
     slug_index: dict[str, list[str]] = {}
 
-    for node_id in store.list_ids():
-        node, body = store.read(node_id)
+    for node_id in await store.list_ids():
+        node, body = await store.read(node_id)
         # semantica 把 `content` 当节点标签渲染（画布/搜索建议都用它），
         # 所以这里放短标题；正文作为属性保留，仍参与搜索与检查器展示。
         added = graph.add_node(
@@ -55,8 +61,10 @@ def build_graph(store: KnowledgeStore) -> tuple[object, ProjectionReport]:
         candidates = slug_index.get(reference, [])
         return candidates[0] if len(candidates) == 1 else None
 
-    for edges_path in sorted(store.root.rglob("_edges.jsonl")):
-        for line in edges_path.read_text(encoding="utf-8").splitlines():
+    paths = [Path(path) async for path in AsyncPath(store.root).rglob("_edges.jsonl")]
+    for edges_path in sorted(paths, key=str):
+        text = await AsyncPath(edges_path).read_text(encoding="utf-8")
+        for line in text.splitlines():
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -73,8 +81,9 @@ def build_graph(store: KnowledgeStore) -> tuple[object, ProjectionReport]:
     return graph, report
 
 
-def save_projection(store: KnowledgeStore, output: Path) -> ProjectionReport:
-    graph, report = build_graph(store)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    graph.save_to_file(output)  # type: ignore[attr-defined]
+async def save_projection(store: KnowledgeStore, output: Path) -> ProjectionReport:
+    graph, report = await build_graph(store)
+    await AsyncPath(output.parent).mkdir(parents=True, exist_ok=True)
+    # semantica 的保存接口是同步的，且没有异步替代品。
+    await anyio.to_thread.run_sync(graph.save_to_file, output)
     return report
