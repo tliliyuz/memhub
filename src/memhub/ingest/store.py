@@ -1,13 +1,17 @@
-"""内存态存储（仅 dev / 联调用）。
+"""运行态存储：设备、游标、批次幂等（`MemoryStore` 只给 dev / 联调）。
 
-生产的 raw_store 与游标在 SQLite/文件里，本模块刻意把接口收窄到几个方法，
-后续替换实现时 API 层不用改。
+生产实现是 `memhub.ingest.postgres.PostgresStore`（云上共享 PG 实例的独立 database）。
+本模块只定接口与内存实现；API 层只依赖 `StateStore` 协议，换实现不用改路由。
+
+**这里不存知识**：知识是 `knowledge/**/*.md` + git（ADR-0002），原始增量是文件系统里的
+`raw_store/`。本模块的行都是「推到哪儿了、收过哪批、谁注册过」这类运行状态。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from memhub.contract import Cursor, FileCursor, IngestRequest, IngestResult
 
@@ -21,6 +25,24 @@ class CursorConflict(Exception):
         super().__init__(f"{path}: expected offset {expected_offset}")
         self.path = path
         self.expected_offset = expected_offset
+
+
+class StateStore(Protocol):
+    """运行态读写的全部契约。所有方法都必须能在多线程下安全调用。"""
+
+    def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
+        """幂等登记设备；已存在时只更新元数据，不动游标。"""
+        ...
+
+    def is_registered(self, device_id: str) -> bool: ...
+
+    def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]: ...
+
+    def cursor_summary(self, device_id: str, source_id: str) -> Cursor: ...
+
+    def apply(self, request: IngestRequest) -> IngestResult:
+        """落一批增量：幂等重放、游标冲突、去重、更新游标，一次事务完成。"""
+        ...
 
 
 @dataclass
@@ -38,15 +60,20 @@ class ReplayedBatch:
 
 
 class MemoryStore:
+    """进程内实现：重启即清空。只用于 dev 与联调，不可用于生产。"""
+
     def __init__(self) -> None:
-        self.devices: set[str] = set()
+        self.devices: dict[str, dict[str, str]] = {}
         self.sources: dict[tuple[str, str], SourceState] = {}
         self.batches: dict[tuple[str, str], ReplayedBatch] = {}
         self.seen_shas: set[tuple[str, str]] = set()
 
     # -- devices ---------------------------------------------------------
-    def register_device(self, device_id: str) -> None:
-        self.devices.add(device_id)
+    def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
+        self.devices[device_id] = {"name": name, "platform": platform}
+
+    def is_registered(self, device_id: str) -> bool:
+        return device_id in self.devices
 
     # -- cursors ---------------------------------------------------------
     def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
@@ -62,7 +89,12 @@ class MemoryStore:
         return Cursor(files=len(state.files), bytes=state.total_bytes, last_at=state.last_at)
 
     # -- ingest ----------------------------------------------------------
-    def apply(self, request: IngestRequest) -> IngestResult:
+    def apply(
+        self,
+        request: IngestRequest,
+        *,
+        stored_paths: dict[str, str] | None = None,
+    ) -> IngestResult:
         key = (request.device_id, request.batch_id)
         now = datetime.now(UTC)
         previous = self.batches.get(key)
@@ -72,8 +104,12 @@ class MemoryStore:
         state = self.sources.setdefault((request.device_id, request.source_id), SourceState())
         reset_allowed = request.source_rev > state.source_rev
 
+        # 先校验整批，再落状态：任何一个文件冲突都整批回滚，不留半批游标或哈希。
         accepted = 0
         duplicates = 0
+        updates: list[FileCursor] = []
+        new_shas: list[tuple[str, str]] = []
+        seen = set(self.seen_shas)
         for batch_file in request.files:
             known = None if reset_allowed else state.files.get(batch_file.path)
             expected = known.offset if known is not None else 0
@@ -81,20 +117,25 @@ class MemoryStore:
                 raise CursorConflict(batch_file.path, expected)
 
             sha_key = (request.source_id, batch_file.sha256)
-            if sha_key in self.seen_shas:
+            if sha_key in seen:
                 duplicates += 1
             else:
-                self.seen_shas.add(sha_key)
+                seen.add(sha_key)
+                new_shas.append(sha_key)
                 accepted += 1
 
-            new_offset = max(expected, batch_file.to_offset)
-            state.files[batch_file.path] = FileCursor(
-                path=batch_file.path,
-                offset=new_offset,
-                size=batch_file.to_offset,
-                mtime=batch_file.mtime,
+            updates.append(
+                FileCursor(
+                    path=batch_file.path,
+                    offset=max(expected, batch_file.to_offset),
+                    size=batch_file.to_offset,
+                    mtime=batch_file.mtime,
+                )
             )
 
+        self.seen_shas.update(new_shas)
+        for file_cursor in updates:
+            state.files[file_cursor.path] = file_cursor
         if reset_allowed:
             state.source_rev = request.source_rev
         state.total_bytes = sum(file.offset for file in state.files.values())
@@ -108,3 +149,13 @@ class MemoryStore:
         )
         self.batches[key] = ReplayedBatch(at=now, result=result)
         return result
+
+
+__all__ = [
+    "REPLAY_WINDOW",
+    "CursorConflict",
+    "MemoryStore",
+    "ReplayedBatch",
+    "SourceState",
+    "StateStore",
+]

@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: memhub
+Version: 0.1.0
+Summary: Memhub 2.0：本地采集推送、云端提炼、markdown 真源 + 图谱投影
+Requires-Python: >=3.12
+Requires-Dist: pydantic<3,>=2.9
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: uvicorn<1,>=0.30
+Requires-Dist: httpx<1,>=0.27
+Requires-Dist: pyyaml<7,>=6.0
+Requires-Dist: python-frontmatter<2,>=1.1
+Provides-Extra: postgres
+Requires-Dist: psycopg[binary,pool]<3.3,>=3.2; extra == "postgres"
+Provides-Extra: engine
+Requires-Dist: semantica<0.8,>=0.7.0; extra == "engine"
+Requires-Dist: python-multipart<1,>=0.0.9; extra == "engine"
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: httpx2>=0.1; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+Requires-Dist: mypy>=1.11; extra == "dev"
+Requires-Dist: psycopg[binary,pool]<3.3,>=3.2; extra == "dev"

@@ -21,7 +21,7 @@
 | `MEMHUB_LOG_LEVEL` | 否 | `INFO` | 全栈 | 非法值启动失败 |
 | `MEMHUB_DATA_DIR` | 是 | — | ingest/worker | 启动失败 |
 | `MEMHUB_KNOWLEDGE_DIR` | 是 | — | kb/worker | 不存在则启动失败（不自动创建真源目录） |
-| `MEMHUB_DB_PATH` | 否 | `<DATA_DIR>/memhub.db` | ingest/worker | 目录不可写启动失败 |
+| `MEMHUB_DB_URL` | 否 | 空（退回内存态，仅 dev） | ingest | 格式 `postgresql://user@host:port/db`；生产必填，prod 下为空启动失败 |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
 | `MEMHUB_HTTP_PORT` | 否 | `8700` | ingest | 非法端口启动失败 |
 | `MEMHUB_LLM_BASE_URL` | 是 | — | worker | 启动失败（worker 不降级为无模型运行） |

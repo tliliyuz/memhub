@@ -13,6 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 运行态存储的生产实现（云上共享 PG 实例）。dev stub 用 MemoryStore，不需要它。
+postgres = [
+    "psycopg[binary,pool]>=3.2,<3.3",
+]
 engine = [
     # 解析/切分/去重/图谱/向量/explorer 复用 semantica
     "semantica>=0.7.0,<0.8",
@@ -24,6 +28,8 @@ dev = [
     "httpx2>=0.1",
     "ruff>=0.6",
     "mypy>=1.11",
+    # 让 `mypy src` 能解析 memhub.ingest.postgres（生产实现），测试也用它
+    "psycopg[binary,pool]>=3.2,<3.3",
 ]
 
 [build-system]

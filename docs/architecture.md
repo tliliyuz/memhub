@@ -20,7 +20,7 @@
  │   /                → explorer (只读可视化)                               │
  ├─────────────────────────────────────────────────────────────────────────┤
  │  ingest-api → raw_store (原始增量, 按 device/source 分片)                 │
- │           → queue (SQLite 表 / 文件队列)                                 │
+ │           → runtime state (PostgreSQL: 设备/游标/批次幂等, memhub_prod)   │
  │  worker:  value_filter(cheap) → extract(expensive) → merge              │
  │  merge → knowledge/ (markdown 真源, git) → rebuild projections          │
  │  projections: kg.json | vector/ | fts.db                                │

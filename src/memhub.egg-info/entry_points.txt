@@ -1,0 +1,2 @@
+[console_scripts]
+memhub = memhub.cli.main:main

@@ -1,9 +1,12 @@
-"""采集中转 API（dev stub）。
+"""采集 API。
 
-生产实现会替换 `MemoryStore` 并加上 SQLite / 文件落盘；路由、信封、错误码保持不变。
+存储由环境决定：设置了 `MEMHUB_DB_URL` 用共享 PG 实例（生产），否则退回进程内
+`MemoryStore`（仅 dev 联调，重启即丢）。路由、信封、错误码在两种存储下完全一致。
+
 启动：
 
-    MEMHUB_DEV_TOKEN=devtoken uvicorn memhub.ingest.app:create_app --factory --port 8700
+    MEMHUB_DB_URL=postgresql://memhub_app@127.0.0.1:5432/memhub_prod \
+      uvicorn memhub.ingest.app:create_app --factory --port 8700
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from memhub.contract import (
     IngestResult,
     SourcesConfig,
 )
-from memhub.ingest.store import CursorConflict, MemoryStore
+from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
 
 HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.TOKEN_INVALID: 401,
@@ -86,18 +89,29 @@ def _ok(data: object) -> dict[str, object]:
     return {"code": 0, "message": "ok", "data": data}
 
 
-def create_app() -> FastAPI:
-    dev_token = os.environ.get("MEMHUB_DEV_TOKEN", "")
-    store = MemoryStore()
-    app = FastAPI(title="memhub ingest (dev)", version="0.1.0")
+def build_store() -> StateStore:
+    """`MEMHUB_DB_URL` 有值即用 PG；否则退回内存实现（仅 dev）。"""
+    dsn = os.environ.get("MEMHUB_DB_URL", "")
+    if not dsn:
+        return MemoryStore()
+    from memhub.ingest.postgres import PostgresStore
 
-    def auth(store_local: MemoryStore, authorization: str | None, device_id: str) -> None:
+    return PostgresStore(dsn)
+
+
+def create_app(store: StateStore | None = None) -> FastAPI:
+    dev_token = os.environ.get("MEMHUB_DEV_TOKEN", "")
+    state = store or build_store()
+    app = FastAPI(title="memhub ingest", version="0.1.0")
+    app.state.store = state
+
+    def auth(authorization: str | None, device_id: str) -> None:
         """校验 Bearer 与 device 绑定；dev 下所有设备共享同一个 dev token。"""
         if not dev_token:
             raise ApiError(ErrorCode.TOKEN_INVALID, "server has no dev token configured")
         if authorization != f"Bearer {dev_token}":
             raise ApiError(ErrorCode.TOKEN_INVALID, "invalid device token")
-        if device_id not in store_local.devices:
+        if not state.is_registered(device_id):
             raise ApiError(ErrorCode.DEVICE_REVOKED, "device not registered")
 
     @app.exception_handler(ApiError)
@@ -132,7 +146,7 @@ def create_app() -> FastAPI:
         if not dev_token:
             raise ApiError(ErrorCode.INTERNAL, "server has no dev token configured")
         device_id = body.device_id or f"dev-{int(datetime.now(UTC).timestamp())}"
-        store.register_device(device_id)
+        state.register_device(device_id, name=body.name, platform=body.platform)
         return _ok(
             {
                 "device_id": device_id,
@@ -147,12 +161,12 @@ def create_app() -> FastAPI:
         source_id: Annotated[str, Query()],
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        auth(store, authorization, device_id)
-        source_rev, files = store.get_cursor(device_id, source_id)
+        auth(authorization, device_id)
+        source_rev, files = state.get_cursor(device_id, source_id)
         data = CursorData(
             source_id=source_id,
             source_rev=source_rev,
-            cursor=store.cursor_summary(device_id, source_id),
+            cursor=state.cursor_summary(device_id, source_id),
             files=files,
         )
         return _ok(data.model_dump(mode="json"))
@@ -162,7 +176,7 @@ def create_app() -> FastAPI:
         body: IngestRequest,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        auth(store, authorization, body.device_id)
+        auth(authorization, body.device_id)
         for batch_file in body.files:
             if "\x00" in batch_file.content:
                 raise ApiError(
@@ -170,7 +184,7 @@ def create_app() -> FastAPI:
                     "binary content is not accepted",
                     {"path": batch_file.path},
                 )
-        result: IngestResult = store.apply(body)
+        result: IngestResult = state.apply(body)
         return _ok(result.model_dump(mode="json"))
 
     @app.post("/ingest/heartbeat")
@@ -178,7 +192,7 @@ def create_app() -> FastAPI:
         body: Heartbeat,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        auth(store, authorization, body.device_id)
+        auth(authorization, body.device_id)
         return _ok({"commands": []})
 
     @app.get("/debug/sources")
