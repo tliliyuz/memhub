@@ -20,6 +20,7 @@ from memhub.worker.daemon import (
     iter_pending,
     parse_window,
     probe_endpoint,
+    prune_processed_raw,
     purge_pending_review,
     run_forever,
     run_round,
@@ -251,3 +252,39 @@ def test_purge_pending_review_reclaims_empty_dirs(tmp_path: Path) -> None:
     purge_pending_review(tmp_path, older_than=timedelta(days=30))
 
     assert not (tmp_path / "pending_review").exists()
+
+
+def test_prune_processed_raw_drops_oldest_until_under_cap(tmp_path: Path) -> None:
+    """processed_raw 是 raw_store 的副本，不受配额约束，必须按总量裁剪。"""
+    root = tmp_path / "processed_raw" / "dev" / "cc-sessions"
+    root.mkdir(parents=True)
+    now = datetime.now(UTC)
+    for index, size in enumerate([200, 300, 500]):
+        path = root / f"{index}.json"
+        path.write_bytes(b"x" * size)
+        stamp = (now - timedelta(days=3 - index)).timestamp()
+        os.utime(path, (stamp, stamp))
+
+    removed, removed_bytes = prune_processed_raw(
+        tmp_path, max_bytes=600, older_than=timedelta(days=7)
+    )
+
+    assert (removed, removed_bytes) == (2, 500)
+    assert sorted(path.name for path in root.iterdir()) == ["2.json"]
+
+
+def test_prune_processed_raw_drops_files_past_retention(tmp_path: Path) -> None:
+    root = tmp_path / "processed_raw" / "dev" / "cc-sessions"
+    root.mkdir(parents=True)
+    old = root / "old.json"
+    fresh = root / "fresh.json"
+    old.write_bytes(b"old")
+    fresh.write_bytes(b"new")
+    stamp = (datetime.now(UTC) - timedelta(days=10)).timestamp()
+    os.utime(old, (stamp, stamp))
+
+    removed, _ = prune_processed_raw(tmp_path, max_bytes=1 << 20, older_than=timedelta(days=7))
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()

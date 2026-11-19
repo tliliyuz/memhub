@@ -65,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
         default=30,
         help="pending_review/ 隔离文件保留天数（默认 30；0 表示不清理）",
     )
+    purge.add_argument(
+        "--processed-raw-days",
+        type=int,
+        default=7,
+        help="processed_raw/ 副本保留天数（默认 7；0 表示不按时间清理）",
+    )
 
     worker = sub.add_parser("worker", help="提炼守护进程：raw_store → 知识真源（串行）")
     worker.add_argument("--once", action="store_true", help="只跑一轮后退出（timer 用）")
@@ -264,7 +270,7 @@ def _purge_expired(args: argparse.Namespace) -> int:
     """批次 TTL 与隔离区清理：给 systemd timer 单独调用，不拉起 API 进程。"""
     from datetime import timedelta
 
-    from memhub.worker.daemon import purge_pending_review
+    from memhub.worker.daemon import PROCESSED_MAX_BYTES, prune_processed_raw, purge_pending_review
 
     data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
     if data_dir and args.pending_review_days > 0:
@@ -273,6 +279,24 @@ def _purge_expired(args: argparse.Namespace) -> int:
             Path(data_dir), older_than=timedelta(days=args.pending_review_days)
         )
         print(f"已清理隔离区 {files} 个文件（{size} 字节）")
+
+    if data_dir and args.processed_raw_days > 0:
+        # processed_raw 是 raw_store 的完整副本，不受配额约束；不裁剪同样会写满磁盘。
+        raw = os.environ.get("MEMHUB_PROCESSED_MAX_BYTES", "").strip()
+        try:
+            max_bytes = int(raw) if raw else PROCESSED_MAX_BYTES
+        except ValueError:
+            print(f"MEMHUB_PROCESSED_MAX_BYTES 必须是整数：{raw!r}", file=sys.stderr)
+            return 2
+        if max_bytes <= 0:
+            print(f"MEMHUB_PROCESSED_MAX_BYTES 必须大于 0：{max_bytes}", file=sys.stderr)
+            return 2
+        files, size = prune_processed_raw(
+            Path(data_dir),
+            max_bytes=max_bytes,
+            older_than=timedelta(days=args.processed_raw_days),
+        )
+        print(f"已裁剪 processed_raw {files} 个文件（{size} 字节）")
 
     dsn = os.environ.get("MEMHUB_DB_URL", "")
     if not dsn:

@@ -156,6 +156,19 @@ def _save_failures(config: WorkerConfig, failures: dict[str, int]) -> None:
     tmp.replace(path)
 
 
+PROCESSED_KEEP = timedelta(days=7)
+PROCESSED_MAX_BYTES = 2 * 1024**3
+
+
+def _reclaim_empty_dirs(root: Path) -> None:
+    """空目录一并回收，否则设备/source 目录会留一摞空壳。"""
+    for dirpath, _dirnames, _filenames in os.walk(root, topdown=False):
+        try:
+            Path(dirpath).rmdir()
+        except OSError:
+            pass
+
+
 def purge_pending_review(
     data_dir: Path, *, older_than: timedelta = timedelta(days=30)
 ) -> tuple[int, int]:
@@ -185,12 +198,51 @@ def purge_pending_review(
                 continue
             removed += 1
             removed_bytes += stat.st_size
-    # 空目录一并回收，否则设备/source 目录会留一摞空壳。
-    for dirpath, _dirnames, _filenames in os.walk(root, topdown=False):
+    _reclaim_empty_dirs(root)
+    return removed, removed_bytes
+
+
+def prune_processed_raw(
+    data_dir: Path,
+    *,
+    max_bytes: int = PROCESSED_MAX_BYTES,
+    older_than: timedelta = PROCESSED_KEEP,
+) -> tuple[int, int]:
+    """裁剪 `processed_raw/`，返回（文件数, 字节数）。
+
+    这个目录是 raw_store 的**完整副本**（处理成功后移动过去，供事后重跑抽取）。
+    它不受 `MEMHUB_QUEUE_MAX_BYTES` 约束：配额一满 ingest 就 1008，但历史副本
+    会无限增长，磁盘照样被写满——上次事故的同一条路径。因此按「时间 + 总量」
+    双阈值裁剪：超过 7 天或总量超过 2 GiB 时按最旧优先删除。原始增量仍在云端
+    PG 的批次窗口内可重放（24h），markdown 真源也保留了溯源信息。
+    """
+    root = data_dir / "processed_raw"
+    if not root.is_dir():
+        return 0, 0
+    entries: list[tuple[float, int, Path]] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime, stat.st_size, path))
+    entries.sort(key=lambda item: item[0])
+    cutoff = time.time() - older_than.total_seconds()
+    total = sum(size for _mtime, size, _path in entries)
+    removed = removed_bytes = 0
+    for mtime, size, path in entries:
+        if mtime >= cutoff and total <= max_bytes:
+            break  # 已是最旧且两条阈值都满足，后面只会更新
         try:
-            Path(dirpath).rmdir()
+            path.unlink()
         except OSError:
-            pass
+            continue
+        total -= size
+        removed += 1
+        removed_bytes += size
+    _reclaim_empty_dirs(root)
     return removed, removed_bytes
 
 

@@ -31,6 +31,7 @@
 | 磁盘 | ≤12 GiB（knowledge 5G / raw_store 4G 硬上限 / 日志 2G / 余量） |
 | raw_store 上限 | `MEMHUB_QUEUE_MAX_BYTES`（`.env.example` 为 1 GiB；磁盘预算硬顶 4 GiB，别超过），超出时 ingest 返回 `1008`，采集端降级 |
 | 隔离区清理 | `pending_review/` 中超过 30 天的文件由 purge timer 删除（`--pending-review-days`） |
+| 处理副本上限 | `processed_raw/`（raw_store 的完整副本）按 7 天或 `MEMHUB_PROCESSED_MAX_BYTES`（默认 2 GiB）先到先裁 |
 | 告警水位 | 磁盘 ≥80% 已用；可用内存 <300 MiB |
 
 同机评测中台：内存按 1.2 GiB 设计（1.5 GiB 为上限），磁盘 10 GiB；Postgres `shared_buffers`/`work_mem` 设上限，MinIO 计入内存与磁盘水位。
@@ -91,7 +92,7 @@ nginx 把它挂到公网前请确认只暴露只读页面；需要登录墙时�
 
 | 命令 | 作用 | 退出码 |
 |:---|:---|:---|
-| `memhub purge-expired` | 删 25h 外的批次记录 + 30 天外的隔离文件 | 0 正常 / 2 配置错 |
+| `memhub purge-expired` | 删 25h 外批次记录 + 30 天外隔离文件 + 裁剪 processed_raw | 0 正常 / 2 配置错 |
 | `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
 | `memhub project --knowledge-dir ... --out ...` | 重建图谱投影 | 0 / 2 |
 
