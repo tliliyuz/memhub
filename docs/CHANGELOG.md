@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（迁移幂等性与启动建表）
+
+- `fix(ingest)`：`ensure_schema` 用 `row[0]` 读版本，而连接池的行工厂是 `dict_row` → **第二次**迁移必 `KeyError`。空库首迁不读行，所以本地和首次部署都正常，线上 purge timer / `provision-device` / 容器重启才炸。现按行类型取 `version`；并补了 dict 行与 tuple 行两种假连接的回归测试（PG 测试本机默认跳过，这类问题只能靠它拦）。
+- `fix(cli)`：`memhub api` 启动时显式 `migrate()`（有 `MEMHUB_DB_URL` 时）并打印结果，容器重启不再依赖「有人先跑过一次 purge」才有表。
+- 验证：84 passed + 8 skipped（PG 契约用例本机默认跳过；本次靠假连接测试覆盖两种行工厂）。
+
 ## 2026-11-19（关闭开放注册）
 
 - `fix(ingest)`：`/devices/register` 此前在生产也是完全开放的——任何人都能自助领一枚合法 per-device token 往 raw_store 灌内容，最终污染知识库。契约 0.3 要求注册是**用户态操作**（桌面端持 `user_key`），用户体系还没落地；这一版用 `MEMHUB_PROVISION_TOKEN` 把口子关上：prod 缺该键拒绝启动，注册必须带 `Authorization: Bearer <provision_token>`，否则 401。prod 下 `device_id` 也改为必填（服务端自动生成只留给 dev stub）。

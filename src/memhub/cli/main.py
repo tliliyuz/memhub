@@ -373,6 +373,18 @@ def _api(args: argparse.Namespace) -> int:
 
     host = resolve_bind_host(args.allow_non_loopback)
     port = int(os.environ.get("MEMHUB_HTTP_PORT", "8700"))
+    dsn = os.environ.get("MEMHUB_DB_URL", "")
+    if dsn:
+        # 启动时把表建出来：容器重启不该依赖有人先跑一次 purge 才有表。
+        # 幂等，重复启动只会打印 "already up to date"。
+        from memhub.ingest.postgres import PostgresStore
+
+        store = PostgresStore(dsn, min_size=1, max_size=1)
+        try:
+            applied = store.migrate()
+        finally:
+            store.close()
+        print(f"schema: {applied or 'already up to date'}", flush=True)
     print(f"memhub ingest-api: http://{host}:{port}/", flush=True)
     uvicorn.run(
         "memhub.ingest.app:create_app",

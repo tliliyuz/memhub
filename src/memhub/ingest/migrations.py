@@ -74,6 +74,17 @@ MIGRATIONS: list[tuple[str, Sequence[str]]] = [
 ]
 
 
+def _version_of(row: Any) -> str:
+    """连接可能是 dict_row（池配置）也可能是默认 tuple 行。两种都要认。
+
+    踩过的坑：池里是 dict 行，`row[0]` 抛 KeyError；而空库首次迁移不读行，
+    所以第一次永远正常、第二次（重启 / timer / provision）才炸。
+    """
+    if isinstance(row, dict):
+        return str(row["version"])
+    return str(row[0])
+
+
 def ensure_schema(conn: Connection[Any]) -> list[str]:
     """幂等建表；返回本次实际应用的迁移版本。"""
     conn.execute(
@@ -85,7 +96,7 @@ def ensure_schema(conn: Connection[Any]) -> list[str]:
         """
     )
     applied = {
-        str(row[0]) for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        _version_of(row) for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
     }
     newly = [version for version, _ in MIGRATIONS if version not in applied]
     for version, statements in MIGRATIONS:
