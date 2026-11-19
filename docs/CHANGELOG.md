@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-19（worker：LLM 端点兼容带 `/v1` 的 base_url）
+
+- `fix(worker)`：`MEMHUB_LLM_BASE_URL` 以 `/v1` 结尾时，客户端此前会拼成 `/v1/v1/messages`，端点返回 404 且错误信息看起来像凭据问题。现在两种写法都归一为 `/v1/messages`；新增 `tests/unit/test_llm.py` 覆盖带/不带 `/v1` 与结尾斜杠四种形态。
+- 实测：用真实配置跑 `worker --once` 一次成功（上传→提炼 16 节点/15 边，全部状态从 `queued` 变为 `processed`）；在此之前同一配置稳定 404。
+- `docs`：`ENVIRONMENT.md` §3 注明 base_url 两种写法等价。
+
 ## 2026-11-19（知识库上传：文件直接进提炼队列）
 
 - `feat(kb)`：新增 `POST /api/v1/kb/uploads`（multipart：`project` + `files`）与 `GET /api/v1/kb/uploads/{batch_id}`——文件落 `<DATA_DIR>/raw_store/kb-console/<project>/`（`source_type=docs`），复用 `memhub.queue.rawstore` 的内容寻址布局与配额，不经过采集协议（device token/游标/批次幂等都不适用）；批次清单写 `<DATA_DIR>/uploads/<batch_id>.json`；状态按 `processed_raw` / `pending_review` / `state/failures.json` / raw_store 逐文件推导。限制 `.md/.txt/.jsonl`、≤60000 字符、单批 ≤20 文件。

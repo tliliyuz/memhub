@@ -22,6 +22,16 @@ class LLMClient(Protocol):
     async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str: ...
 
 
+def _messages_url(base_url: str) -> str:
+    """拼出 `/v1/messages`；base_url 已经以 `/v1` 结尾时不重复拼接。
+
+    两种写法都常见（`https://host`、`https://host/v1`），拼错会得到
+    `/v1/v1/messages` 这种 404，而报错信息看起来像凭据或路径问题。
+    """
+    base = base_url.rstrip("/")
+    return base + ("/messages" if base.endswith("/v1") else "/v1/messages")
+
+
 class AnthropicClient:
     def __init__(
         self,
@@ -32,7 +42,7 @@ class AnthropicClient:
         attempts: int = 3,
         trust_env: bool = False,
     ) -> None:
-        self._url = base_url.rstrip("/") + "/v1/messages"
+        self._url = _messages_url(base_url)
         self._api_key = api_key
         self._timeout = timeout
         self._attempts = attempts

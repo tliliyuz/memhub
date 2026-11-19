@@ -42,7 +42,7 @@
 
 ## 3. 模型调用
 
-- 走 Anthropic 协议（`POST {BASE_URL}/v1/messages`），`x-api-key` 头。
+- 走 Anthropic 协议（`POST {BASE_URL}/v1/messages`），`x-api-key` 头。`MEMHUB_LLM_BASE_URL` 写成 `https://host` 或 `https://host/v1` 都可以（客户端不会拼成 `/v1/v1/messages`）。
 - worker 与 ingest 之间不共享模型凭据：ingest 不持有 `MEMHUB_LLM_*`。
 - 不得把 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 直接当运行时配置使用——
   它们属于开发环境，生产配置必须是本文件 §2 的 `MEMHUB_*` 键。
