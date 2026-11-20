@@ -25,6 +25,8 @@ engine = [
     # semantica explorer 的表单上传依赖，缺失时启动即报 "Form data requires python-multipart"
     "python-multipart>=0.0.9,<1",
 ]
+# 可选的远程只读传输；stdio 和默认管理台不加载该 SDK。
+mcp-http = ["mcp==2.3.0"]
 dev = [
     "pytest>=8",
     "httpx2>=0.1",

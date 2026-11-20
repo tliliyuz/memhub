@@ -24,7 +24,8 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -43,6 +44,8 @@ from memhub.kb import archive, catalog, manage, proc, query
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
+from memhub.mcp.auth import load_grants
+from memhub.mcp.http import McpEndpoint
 from memhub.queue.rawstore import RawStoreQuota
 
 DEFAULT_GRAPH = "kb/kg.json"
@@ -351,7 +354,18 @@ def create_app() -> FastAPI:
         queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
         uploads = KbUploads(data_dir, RawStoreQuota(data_dir / "raw_store", queue_max))
 
-    app = FastAPI(title="memhub kb-api", version="0.1.0")
+    mcp = McpEndpoint(api.store, load_grants(os.environ.get("MEMHUB_MCP_GRANTS", "")))
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if graph_restarter is not None and await AsyncPath(graph_out).is_file():
+            await graph_restarter.start()
+        if await archive.projection_dirty(api.store.root):
+            api.schedule_rebuild()
+        async with mcp.lifespan():
+            yield
+
+    app = FastAPI(title="memhub kb-api", version="0.1.0", lifespan=lifespan)
     app.state.kb = api
     app.add_middleware(
         CORSMiddleware,
@@ -359,6 +373,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(mcp.wrap)
 
     @app.exception_handler(manage.ManageError)
     async def on_manage_error(_: Request, exc: Exception) -> JSONResponse:
@@ -635,13 +650,6 @@ def create_app() -> FastAPI:
                     "data": await api.rebuild_status(),
                 },
             )
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        if graph_restarter is not None and await AsyncPath(graph_out).is_file():
-            await graph_restarter.start()
-        if await archive.projection_dirty(api.store.root):
-            api.schedule_rebuild()
 
     # ---- 静态前端（打包产物）----
 
