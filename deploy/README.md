@@ -24,7 +24,7 @@
 | nginx | 80/443 | 全部 |
 | ingest-api | `127.0.0.1:8700` | `/api/v1/ingest/*`、`/devices/*` |
 | kb-api | `127.0.0.1:8701` | `/` 与 `/api/v1/kb/*`（GitHub 登录后） |
-| mcp | 无 | `memhub mcp` 是 stdio 服务，由 agent 客户端拉起，不占端口 |
+| mcp | 随 kb-api（`127.0.0.1:8701`） | `memhub mcp` 是 stdio 服务，由 agent 客户端拉起、不占端口；HTTP 入口 `/mcp` 与 kb-api 同进程，首版未单独部署 |
 | explorer（旧） | `127.0.0.1:8703` | 563fefe 起不再部署，`legacy` profile 备查 |
 | oauth2-proxy | `127.0.0.1:4180` | 不直接对外；nginx `/oauth2/*` 与 `auth_request` 判决 |
 
@@ -50,7 +50,7 @@
 
 - 重写 `memhub.work` vhost（不新开子域）：
   - `/api/` → 127.0.0.1:8700/8701（按前缀分流）
-  - `/mcp` → 127.0.0.1:8702
+  - `/mcp` → 127.0.0.1:8701（与 kb-api 同进程；**不**挂 oauth2-proxy 的 `auth_request`，改用独立 Bearer 凭据。首版未接入 nginx）
   - `/` → 127.0.0.1:8703（explorer，只读页面；片段见 §6）
   - **保留** `/.well-known/acme-challenge/` 的 webroot，否则续期静默失败
 - `api.memhub.work` 当前指向已死的 127.0.0.1:8096，需一并处理，不留死域名。

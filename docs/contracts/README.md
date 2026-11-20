@@ -18,11 +18,12 @@
 1. ~~设备注册流程~~ — 已定（0.2）：桌面端用已有凭据调 `POST /devices/register` 换 `device_token`，存 OS 凭据库；采集器只持 `device_token`，作用域仅 `/ingest/*`。不复用 PKCE，也不复用面板 `user_key`（无设备作用域、每用户 20 把、最后一把不可吊销）。
 2. **sessions 源的项目归属**：Claude Code 的 `projects/<encoded-path>` 能否可靠映射到知识库 `project`。当前按 `auto` 留给云端推断。
 3. **portal 去留**：`memhub.work/portal` 目前是一个静态页；重写 vhost 时若占用 `/`，需确认 portal 保留为 `/portal/` 还是撤掉。→ 责任人：用户
-4. **MCP 接入形态**：远端 SSE/HTTP 还是本地 stdio + 服务端 API。倾向：远端 HTTP（`/mcp`），本地仅留一个轻代理用于无公网场景。
+4. ~~MCP 接入形态~~ — 已定（0.4）：本地 `memhub mcp` 保留 stdio；远端由 kb-api 在 `/mcp` 提供无状态 Streamable HTTP，使用独立只读凭据与库范围（[mcp-tools.md](mcp-tools.md) §4）。不保留本地轻代理。
 5. ~~同 device_id 重复注册~~ — 已定（0.3）：未吊销时幂等返回同一有效 token、不旋转；吊销后重新注册签发新 token 并解除吊销；自动轮换只由 `/devices/refresh` 触发。
 
 ## 变更记录
 
+- 0.4 — MCP 首版定为四个只读工具；新增远端 `/mcp` 传输、独立只读凭据与库范围（`mcp-tools.md` 0.2）。
 - 0.3 — 注册段补充：生产必须带 `user_key` 鉴权、`device_id` 生产必填（400/1002）、同 device_id 重复注册幂等、吊销后重注册签发新 token；`source-registry` 明确 `base_url` 必须与签发 token 的服务器一致；示例中的 `device_id` 统一改为 UUID v4。
 - 0.2 — 按客户端评审修订：device token 作用域与注册流程、游标加 `size/mtime/source_rev`、`code` 非 HTTP 状态、batch 幂等 24h + 200 重放、退避抖动与不丢数据、令牌不落盘、Windows reparse/offline 跳过。
 - 0.1 — 初稿：节点 schema、源注册表、采集 API。

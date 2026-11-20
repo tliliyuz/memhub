@@ -19,7 +19,7 @@
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer 依赖
+python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer 依赖；验证 MCP HTTP 再追加 ,mcp-http
 cp .env.example .env
 ```
 
@@ -83,6 +83,7 @@ prompts/      各 source_type 的抽取 profile
 | 契约字段 | 契约测试 + 文档同步 |
 | ingest | 单元测试 + 契约测试 + 手工 curl 游标/推送 |
 | worker/kb | 单元测试 + 固定样本回归（同一输入产出同一节点集） |
+| MCP 工具或入口 | `pytest tests/unit/test_mcp_read_tools.py tests/contract/test_mcp_http.py`；HTTP 用例需安装 `.[dev,mcp-http]`，未装时整组跳过 |
 | 部署文件 | `docker compose config` + 在临时目录验证 systemd unit 语法 |
 | 治理脚本 | 全部脚本 + 在临时仓库验证能检出目标违规 |
 
@@ -144,7 +145,7 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main serve --graph kb/kg.json 
 产物不入库：`kb/kg.json` 是投影，随时可从真源重建；`knowledge/` 下的 markdown 才是真源。
 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
 
-## 10. MCP 检索服务（stdio）
+## 10. MCP 检索服务（stdio 与 HTTP）
 
 ```bash
 # 直接跑：每行一条 JSON-RPC 2.0，stdout 只放协议，日志走 stderr
@@ -158,9 +159,31 @@ claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp --knowledge
 `kb_search`（默认只给 canonical，候选要显式 `tier="all"`）、`kb_read`（全文 ≤8KB + 出入边）、
 `kb_related`（depth ≤2）、`kb_audit_list`（矛盾/断链/孤立/低置信/陈旧，现算）。
 
-分层：工具定义与传输在 `src/memhub/mcp/server.py`，检索算法在 `src/memhub/kb/query.py`；
-以后换 FTS/向量只改 `query.py`，工具形状不变。远程 `https://memhub.work/mcp`
-（Streamable HTTP + device_token）复用 `handle_message`，当前未实现。
+分层：工具定义与入口在 `src/memhub/mcp/`——`tools.py` 共享实现与校验、`server.py` stdio 适配、
+`http.py` HTTP 入口、`auth.py` 只读凭据；检索算法在 `src/memhub/kb/query.py`，受限读取与
+路径校验在 `src/memhub/kb/reader.py`。以后换 FTS/向量只改 `query.py`，工具形状不变。
+
+### 10.1 HTTP 入口（可选，默认关闭）
+
+```bash
+python -m pip install -e ".[dev,mcp-http]"     # 官方 MCP Python SDK，只有 HTTP 入口需要
+MEMHUB_MCP_GRANTS='[{"sha256":"<令牌的 SHA-256>","scope":"mcp:read",
+  "expires_at":"<UTC ISO 时间>","projects":["<库 id>"]}]' \
+  PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb --knowledge-dir ./knowledge
+# 客户端：POST http://127.0.0.1:8701/mcp，Authorization: Bearer <原始令牌>
+```
+
+- 由 kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP（JSON 响应，不开 SSE 监听）。协议协商与
+  报文解析交给官方 SDK，不复用 stdio 的 JSON-RPC 解析；未配置凭据时该路径直接 404，不落到 SPA。
+- 每个请求重新计算授权范围：配置只存令牌的 SHA-256 摘要，作用域固定 `mcp:read`，库名单由配置决定；
+  浏览器 Cookie 与 `/ingest/*` 的 device token 都不授予 `/mcp` 权限。吊销 = 删摘要 + 重启。
+- 同一进程同时只处理一个 POST，其余返回 429（`Retry-After: 1`）；请求体上限 16 KiB；带 `Origin`
+  的请求一律 403，供纯机器客户端使用。
+- 依赖：`mcp==2.3.0`（MIT，`modelcontextprotocol/python-sdk`；一并拉入 mcp-types、httpx2、
+  sse-starlette、pyjwt[crypto] 等）。用它换掉自写协议层：Streamable HTTP 的会话、协商与错误语义
+  由参考实现维护。未安装时只有启用 HTTP 才会报错，基础安装与 stdio 不受影响。
+- 契约见 [`mcp-tools.md`](../contracts/mcp-tools.md) §4。公网接入、nginx 路由、目标客户端联调
+  与容器内存预算尚未验收。
 
 stdio 编码固定 UTF-8（`serve()` 会 `reconfigure` 两个流）：Windows 管道默认 cp936，
 不固定的话中文 JSON 到 agent 那边就是乱码。冒烟：

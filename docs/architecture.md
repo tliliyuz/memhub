@@ -19,7 +19,7 @@
  │  nginx                                                                  │
  │   /api/v1/ingest/*  → ingest-api (FastAPI)                              │
  │   /api/v1/kb/*      → kb-api                                            │
- │   /mcp              → mcp-server (streamable HTTP)                      │
+ │   /mcp              → kb-api (MCP, streamable HTTP)                     │
  │   /                → explorer (只读可视化)                               │
  ├─────────────────────────────────────────────────────────────────────────┤
  │  ingest-api / kb-api(上传) → queue.rawstore (原始增量, 按 device/source)  │
@@ -41,7 +41,7 @@
 |---|---|
 | Memory Proxy 在模型请求路径上 | 请求路径上没有 memhub；模型直连 Magpie |
 | 记忆失败 = 模型不可用 | 采集/提炼失败只影响记忆新鲜度，用户正常工作 |
-| Team Brain MCP 本地进程 + 共享 key | 远端 `/mcp`，per-device token，可吊销 |
+| Team Brain MCP 本地进程 + 共享 key | 远端 `/mcp`，每条只读凭据限定库范围；吊销靠改配置重启 |
 | 会话靠 Proxy 旁路抓取 | collector 直接读本地 session 文件，游标增量 |
 | 状态散在 Proxy/本地 relay | 状态只在云端（raw_store + 游标 + 知识库） |
 | 数据格式即实现 | markdown 真源 + 可重建投影 |
@@ -79,9 +79,11 @@ raw 片段 ──► value_filter ──► extract ──► merge ──► gi
 - 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
 - 真源操作走 git：每次写产生一个 commit，可回滚。
 
-### mcp-server
-- Streamable HTTP，挂在 `/mcp`。
-- 工具即 kb-api 的薄封装；无本地状态，可多副本。
+### mcp-server（首版随 kb-api 进程）
+- 由 kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP，协议解析交给官方 MCP Python SDK；只有配置了
+  只读凭据时才启用，未配置时该路径直接 404，不落到管理台。
+- 工具是 kb-api 检索层的薄封装，授权库范围按请求注入；不持有状态，也不提供任何写操作。
+- 独立进程与多副本形态尚未实现；拆分需先改本节与 §5 的部署形态。
 
 ### explorer
 - semantica 自带 FastAPI + React SPA，只读挂在 `/`。
@@ -98,7 +100,8 @@ raw 片段 ──► value_filter ──► extract ──► merge ──► gi
 
 ## 5. 部署形态
 
-- Docker Compose：`ingest-api` / `worker` / `kb-api` / `mcp` / `explorer` / `nginx`（nginx 也可用宿主机的）。
+- Docker Compose：`ingest-api` / `worker` / `kb-api` / `nginx`（nginx 也可用宿主机的）；`/mcp` 由
+  kb-api 进程提供，不单列服务。
 - systemd timer：`rebuild.timer`（投影重建）、`disk-guard.timer`、`git-gc.timer`。
 - 真源目录 `knowledge/` 挂 volume + 每日 git push 到私有远端（可选）。
 - 配置与密钥：`.env`（600）+ systemd `EnvironmentFile`；不写进镜像。
