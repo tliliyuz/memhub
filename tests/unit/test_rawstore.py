@@ -24,13 +24,14 @@ NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
 
 
 def _request(
-    content: str, *, path: str = "sessions/a.jsonl", device: str = "dev-1"
+    content: str, *, path: str = "sessions/a.jsonl", device: str = "dev-1", project: str = "auto"
 ) -> IngestRequest:
     return IngestRequest(
         batch_id="b-1",
         device_id=device,
         source_id="cc-sessions",
         source_type="sessions",
+        project=project,
         files=[
             BatchFile(
                 path=path,
@@ -54,6 +55,17 @@ async def test_writes_content_addressed_file(tmp_path: Path) -> None:
     assert payload["content"] == "hello"
     assert payload["path"] == "sessions/a.jsonl"
     assert payload["mtime"] == NOW.isoformat()
+    assert payload["project"] == "auto"
+
+
+async def test_project_travels_with_the_payload(tmp_path: Path) -> None:
+    """worker 只能从落盘 payload 里读知识库归属，字段不能丢。"""
+    request = _request("hello", project="sdp-tag")
+    assert await save_batch(tmp_path, request) == 1
+    sha = request.files[0].sha256
+    target = batch_dir(tmp_path, "dev-1", "cc-sessions") / sha[:2] / f"{sha}.json"
+    payload = json.loads(await AsyncPath(target).read_text(encoding="utf-8"))
+    assert payload["project"] == "sdp-tag"
 
 
 async def test_second_push_of_same_content_is_noop(tmp_path: Path) -> None:

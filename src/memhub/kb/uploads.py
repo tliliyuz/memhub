@@ -30,8 +30,7 @@ from typing import Any
 from anyio import Path as AsyncPath
 from starlette.datastructures import UploadFile
 
-from memhub.contract import BatchFile, IngestRequest
-from memhub.kb.catalog import KB_ID_RE
+from memhub.contract import KB_ID_RE, BatchFile, IngestRequest
 from memhub.queue.rawstore import (
     QuotaExceeded,
     RawStoreQuota,

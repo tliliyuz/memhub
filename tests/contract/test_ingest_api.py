@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Self
 
 import pytest
 from fastapi.testclient import TestClient
@@ -47,6 +49,7 @@ def _push(
     *,
     source_rev: int = 0,
     batch_id: str | None = None,
+    project: str = "auto",
 ) -> tuple[int, dict[str, object]]:
     response = client.post(
         "/ingest/raw",
@@ -56,6 +59,7 @@ def _push(
             "device_id": DEVICE,
             "source_id": "cc-sessions",
             "source_type": "sessions",
+            "project": project,
             "source_rev": source_rev,
             "files": files,
         },
@@ -166,6 +170,156 @@ def test_raw_bytes_are_persisted_when_data_dir_is_set(
     stored = list((tmp_path / "raw_store").rglob("*.json"))
     assert len(stored) == 1
     assert __import__("json").loads(stored[0].read_text(encoding="utf-8"))["content"] == "hello"
+
+
+def test_auto_project_is_the_default_and_persisted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """不指定 project 时落盘为 auto；worker 见到 auto 回退 source_id（旧行为）。"""
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        status, _ = _push(fresh, [_file("a.jsonl", "hello")])
+        assert status == 200
+    stored = list((tmp_path / "raw_store").rglob("*.json"))
+    assert json.loads(stored[0].read_text(encoding="utf-8"))["project"] == "auto"
+
+
+def test_chosen_project_is_persisted_for_the_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """桌面端按目录选的知识库要随批次落盘，worker 才能写进对应 markdown 目录。"""
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        status, _ = _push(fresh, [_file("a.jsonl", "hello")], project="sdp-tag")
+        assert status == 200
+    stored = list((tmp_path / "raw_store").rglob("*.json"))
+    assert json.loads(stored[0].read_text(encoding="utf-8"))["project"] == "sdp-tag"
+
+
+@pytest.mark.parametrize("project", ["../etc", "Sdp-Tag", "", "a/b", "auto?"])
+def test_invalid_project_is_rejected(client: TestClient, project: str) -> None:
+    """project 直接变成真源目录名；非法值必须 400，不能静默兜底到别的库。"""
+    status, body = _push(client, [_file("a.jsonl", "hello")], project=project)
+    assert status == 400
+    assert body["code"] == 1003
+
+
+def test_project_list_is_proxied_to_kb_api(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """桌面端选知识库的下拉框数据来自 kb-api（真源唯一写者），不直接读盘。"""
+    calls: list[tuple[str, str]] = []
+
+    async def fake(base_url: str, method: str, path: str, payload=None):  # type: ignore[no-untyped-def]
+        calls.append((method, path))
+        return {"items": [{"id": "sdp-tag", "name": "SDP Tag"}], "total": 1}
+
+    monkeypatch.setattr("memhub.ingest.app._kb_api_request", fake)
+    response = client.get("/ingest/projects", params={"device_id": DEVICE}, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["id"] == "sdp-tag"
+    assert calls == [("GET", "/api/v1/kb/projects")]
+
+
+def test_project_list_requires_device_token(client: TestClient) -> None:
+    response = client.get("/ingest/projects", params={"device_id": DEVICE})
+    assert response.status_code == 401
+
+
+def test_project_create_is_validated_and_proxied(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, object] | None] = []
+
+    async def fake(base_url: str, method: str, path: str, payload=None):  # type: ignore[no-untyped-def]
+        seen.append(payload)
+        return {"id": "new-kb", "name": "新库"}
+
+    monkeypatch.setattr("memhub.ingest.app._kb_api_request", fake)
+    response = client.post(
+        "/ingest/projects",
+        headers=AUTH,
+        json={"device_id": DEVICE, "id": "new-kb", "name": "新库"},
+    )
+    assert response.status_code == 201
+    assert response.json()["data"]["id"] == "new-kb"
+    assert seen == [{"id": "new-kb", "name": "新库", "description": ""}]
+
+
+def test_project_create_rejects_bad_id(client: TestClient) -> None:
+    response = client.post(
+        "/ingest/projects",
+        headers=AUTH,
+        json={"device_id": DEVICE, "id": "New KB/../x"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == 1003
+
+
+class _FakeKbResponse:
+    def __init__(self, status_code: int, body: dict[str, object]) -> None:
+        self.status_code = status_code
+        self._body = body
+        self.text = json.dumps(body, ensure_ascii=False)
+
+    def json(self) -> dict[str, object]:
+        return self._body
+
+
+def _fake_http(response: _FakeKbResponse):  # type: ignore[no-untyped-def]
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_: object) -> bool:
+            return False
+
+        async def request(self, *_: object, **__: object) -> _FakeKbResponse:
+            return response
+
+    return FakeClient
+
+
+def test_project_errors_keep_kb_business_code(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kb-api 的 1010（已存在）/1012（非法）要透传，桌面端才能分开提示。"""
+    monkeypatch.setattr(
+        "memhub.ingest.app.httpx.AsyncClient",
+        _fake_http(_FakeKbResponse(409, {"code": 1010, "message": "知识库已存在"})),
+    )
+    response = client.post(
+        "/ingest/projects", headers=AUTH, json={"device_id": DEVICE, "id": "sdp-tag"}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == 1010
+    assert response.json()["message"] == "知识库已存在"
+
+
+def test_kb_api_outage_is_internal_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kb 容器没起来时返回 2001/500，桌面端据此退回手填 id。"""
+    monkeypatch.setattr(
+        "memhub.ingest.app.httpx.AsyncClient",
+        _fake_http(_FakeKbResponse(502, {"message": "bad gateway"})),
+    )
+    response = client.get("/ingest/projects", params={"device_id": DEVICE}, headers=AUTH)
+    assert response.status_code == 500
+    assert response.json()["code"] == 2001
 
 
 def test_prod_requires_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:

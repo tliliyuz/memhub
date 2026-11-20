@@ -17,19 +17,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from datetime import time as dt_time
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
 from anyio import Path as AsyncPath
 
-from memhub.contract import SourceKind, SourceRef
+from memhub.contract import SourceKind, SourceRef, resolve_project
 from memhub.kb.store import KnowledgeStore
 from memhub.worker.extract import ExtractionFailed, extract_document
 from memhub.worker.llm import LLMClient, LLMError
@@ -51,6 +53,9 @@ class WorkerConfig:
     # text 块，线上首跑已踩；默认 32000，可用 MEMHUB_LLM_MAX_TOKENS 覆盖。
     max_tokens: int = 32000
     window: str | None = None
+    # 窗口按哪个时区解释。None = 系统本地时区（容器里通常是 UTC！）。
+    # 线上踩过：没设 TZ 的容器让 `--window 21:00-02:00` 实际跑在 05:00-10:00 CST。
+    window_tz: tzinfo | None = None
     interval: float = 300.0
     limit: int = 20
     max_attempts: int = 3
@@ -98,6 +103,32 @@ def in_window(now: dt_time, window: tuple[dt_time, dt_time]) -> bool:
     if start <= end:
         return start <= now < end
     return now >= start or now < end  # 跨午夜
+
+
+def parse_window_tz(spec: str) -> tzinfo | None:
+    """窗口时区：空 = 系统本地；`UTC` / `+08:00` / IANA 名（IANA 依赖系统 tzdata）。
+
+    只用显式偏移就不必给镜像装 tzdata——slim 镜像缺 zoneinfo 时
+    `astimezone()` 会静默退回 UTC，线上正是这样把 21:00 跑成了 05:00。
+    """
+    text = spec.strip()
+    if not text:
+        return None
+    if text.upper() == "UTC":
+        return UTC
+    match = re.fullmatch(r"([+-])(\d{1,2}):?(\d{2})", text)
+    if match:
+        sign, hours, minutes = match.groups()
+        if int(hours) > 14 or int(minutes) > 59:
+            raise ValueError(f"窗口时区偏移非法：{spec!r}")
+        delta = timedelta(hours=int(hours), minutes=int(minutes))
+        return timezone(-delta if sign == "-" else delta)
+    try:
+        return ZoneInfo(text)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"不认识的窗口时区：{spec!r}（可用 UTC / +08:00 / IANA 名；IANA 需要系统 tzdata）"
+        ) from exc
 
 
 async def iter_pending(raw_root: Path, processed_root: Path) -> list[Path]:
@@ -315,10 +346,13 @@ async def process_file(
     )
     store = KnowledgeStore(config.knowledge_dir)
     kind = SourceKind.SESSION if source_type == "sessions" else SourceKind.WIKI
+    # 知识库由采集端在 sources[].project 里选（桌面端 UI 按目录指定）；
+    # "auto"/缺失/非法才回退 source_id——旧批次没有 project 字段。
+    project = resolve_project(payload.get("project"), source_id)
     report = await merge(
         store,
         extraction,
-        project=source_id,
+        project=project,
         source=SourceRef(type=kind, ref=file_path, device=device_id),
     )
     return len(report.created), len(report.updated), report.edges_added
@@ -363,7 +397,12 @@ async def run_round(
                     file=sys.stderr,
                 )
             continue
-        await _mark_processed(config, path)
+        try:
+            await _mark_processed(config, path)
+        except FileNotFoundError:
+            # 另一个 worker 已经把它移走了（移动是原子的，谁先得手谁负责）。
+            # 内容已经提炼并写进真源，这里不能让整轮因竞态崩掉。
+            print(f"[worker] skip move {path.name}: 已被其他进程处理", flush=True)
         if failures.pop(relative, None) is not None:
             dirty = True
         current.processed += 1
@@ -393,7 +432,7 @@ async def run_forever(
     rounds = 0
     while max_rounds is None or rounds < max_rounds:
         rounds += 1
-        local_now = now().astimezone()
+        local_now = now().astimezone(config.window_tz)
         if window is not None and not in_window(local_now.time(), window):
             print(f"[worker] 窗口外（{config.window}），休眠 {config.interval:.0f}s", flush=True)
             await sleep(config.interval)
@@ -422,6 +461,7 @@ __all__ = [
     "in_window",
     "iter_pending",
     "parse_window",
+    "parse_window_tz",
     "probe_endpoint",
     "process_file",
     "prune_processed_raw",

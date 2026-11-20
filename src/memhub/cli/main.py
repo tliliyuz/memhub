@@ -353,7 +353,13 @@ async def _purge_expired(args: argparse.Namespace) -> int:
 
 async def _worker(args: argparse.Namespace) -> int:
     """提炼守护进程。退出码：0 无失败；1 有失败；2 配置/LLM 端点错误。"""
-    from memhub.worker.daemon import WorkerConfig, probe_endpoint, run_forever, run_round
+    from memhub.worker.daemon import (
+        WorkerConfig,
+        parse_window_tz,
+        probe_endpoint,
+        run_forever,
+        run_round,
+    )
 
     data_dir = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
     knowledge_dir = args.knowledge_dir or os.environ.get("MEMHUB_KNOWLEDGE_DIR", "")
@@ -396,6 +402,14 @@ async def _worker(args: argparse.Namespace) -> int:
         print(f"MEMHUB_LLM_MAX_TOKENS 必须为正数：{max_tokens}", file=sys.stderr)
         return 2
 
+    # 窗口时区：容器默认 UTC，`--window 21:00-02:00` 会实际跑在 05:00-10:00 CST。
+    # 生产用 MEMHUB_WINDOW_TZ=+08:00（显式偏移，不依赖镜像里的 tzdata）。
+    try:
+        window_tz = parse_window_tz(os.environ.get("MEMHUB_WINDOW_TZ", ""))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     client, model = _llm_client()
     config = WorkerConfig(
         data_dir=Path(data_dir),
@@ -403,6 +417,7 @@ async def _worker(args: argparse.Namespace) -> int:
         model=model,
         max_tokens=max_tokens,
         window=args.window or None,
+        window_tz=window_tz,
         interval=args.interval,
         limit=args.limit,
     )

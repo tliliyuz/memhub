@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,12 +21,12 @@ from typing import Any
 
 from anyio import Path as AsyncPath
 
+from memhub.contract import KB_ID_RE
 from memhub.kb import query
 from memhub.kb.manage import InvalidError, NotFoundError, write_lock
 from memhub.kb.store import KnowledgeStore
 
 REGISTRY_NAME = ".kbs.json"
-KB_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 def _registry_path(store: KnowledgeStore) -> Path:

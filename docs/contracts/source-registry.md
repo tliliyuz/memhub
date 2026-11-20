@@ -57,7 +57,7 @@
 | `sources[].path` | ✓ | 绝对路径；manifest 外路径由桌面端在 UI 里让用户选 |
 | `sources[].file_glob` | | 默认按 type：sessions→`**/*.jsonl`，wiki/docs→`**/*.md` |
 | `sources[].enabled` | | 默认 true |
-| `sources[].project` | | 归入哪个知识库项目；`auto` 由云端按路径/内容推断 |
+| `sources[].project` | | 该目录的内容沉淀到哪个知识库（真源一级目录名）。**由桌面端 UI 让用户选**：从 `GET /api/v1/ingest/projects` 拉已有知识库，或 `POST /api/v1/ingest/projects` 新建；写配置时即按知识库 id 规则校验。`auto`（默认）表示不指定，服务端回退到 `source_id`（每个源一个库） |
 | `sources[].exclude` | | glob 排除列表 |
 | `sources[].scan_interval_sec` | | 覆盖全局 |
 

@@ -19,18 +19,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 from anyio import Path as AsyncPath
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import (
+    KB_ID_RE,
     Cursor,
     ErrorCode,
     FileCursor,
     IngestRequest,
     IngestResult,
     SourcesConfig,
+    valid_project,
 )
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
 from memhub.queue.rawstore import (
@@ -50,6 +53,12 @@ HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.QUEUE_BACKPRESSURE: 503,
     ErrorCode.SCOPE_DENIED: 403,
+    # 知识库代理（/ingest/projects）透传 kb-api 的业务码，桌面端要能区分
+    # 「id 冲突」「库不存在」「参数非法」。
+    ErrorCode.KB_CONFLICT: 409,
+    ErrorCode.KB_NOT_FOUND: 404,
+    ErrorCode.KB_INVALID: 422,
+    ErrorCode.KB_QUEUE_FULL: 503,
     ErrorCode.INTERNAL: 500,
 }
 
@@ -94,6 +103,57 @@ class CursorData(BaseModel):
     source_rev: int
     cursor: Cursor
     files: list[FileCursor]
+
+
+class ProjectCreate(BaseModel):
+    """桌面端「新建知识库」：id 即真源一级目录名，名称/描述进 `.kbs.json`。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(default="", max_length=200)
+    description: str = Field(default="", max_length=2000)
+
+
+DEFAULT_KB_API_URL = "http://127.0.0.1:8701"
+
+
+async def _kb_api_request(
+    base_url: str, method: str, path: str, payload: dict[str, Any] | None = None
+) -> Any:
+    """把知识库列表/新建转发给 kb-api。
+
+    知识真源只有 kb-api 一个写者（`.kbs.json` 是读改写），采集端不直接碰盘；
+    host 网络下 127.0.0.1:8701 可达，kb 未起时这里返回 500，桌面端可回退手填 id。
+    """
+    url = base_url.rstrip("/") + path
+    try:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as http:
+            response = await http.request(method, url, json=payload)
+    except httpx.HTTPError as exc:
+        raise ApiError(ErrorCode.INTERNAL, f"知识库服务不可达：{exc}") from exc
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"message": response.text[:200]}
+    if response.status_code >= 400:
+        upstream_code = body.get("code") if isinstance(body, dict) else None
+        message = body.get("message") if isinstance(body, dict) else None
+        # kb-api 用同一套 ErrorCode（1010 冲突 / 1011 不存在 / 1012 非法），
+        # 认出就原样透传，桌面端才能把「已存在」和「参数错」分开提示。
+        code: ErrorCode | None = None
+        try:
+            parsed = ErrorCode(int(upstream_code))  # type: ignore[arg-type]
+        except (TypeError, ValueError, KeyError):
+            parsed = None
+        if parsed is not None and parsed is not ErrorCode.OK:
+            code = parsed
+        else:
+            # 不认识的响应（网关/异常页）：5xx 算上游故障，其余算请求问题。
+            code = ErrorCode.INTERNAL if response.status_code >= 500 else ErrorCode.BAD_REQUEST
+        raise ApiError(code, str(message or "知识库请求失败"), {"upstream": response.status_code})
+    return body
 
 
 def _ok(data: object) -> dict[str, object]:
@@ -178,6 +238,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
     quota = RawStoreQuota(raw_root / "raw_store", queue_max) if raw_root is not None else None
     state = store or build_store()
+    kb_api_url = os.environ.get("MEMHUB_KB_API_URL", DEFAULT_KB_API_URL)
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
 
@@ -269,12 +330,50 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         )
         return _ok(data.model_dump(mode="json"))
 
+    @app.get("/ingest/projects")
+    async def list_projects(
+        device_id: Annotated[str, Query()],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        """桌面端选知识库用的列表（已有知识库），转发 kb-api 的同一份数据。"""
+        await auth(authorization, device_id)
+        return _ok(await _kb_api_request(kb_api_url, "GET", "/api/v1/kb/projects"))
+
+    @app.post("/ingest/projects", status_code=201)
+    async def create_project(
+        body: ProjectCreate,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        """桌面端「新建知识库」；之后采集端用同一个 id 作为 project 推送。"""
+        await auth(authorization, body.device_id)
+        if not KB_ID_RE.fullmatch(body.id):
+            raise ApiError(
+                ErrorCode.BAD_REQUEST,
+                "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位",
+                {"id": body.id},
+            )
+        created = await _kb_api_request(
+            kb_api_url,
+            "POST",
+            "/api/v1/kb/projects",
+            {"id": body.id, "name": body.name or body.id, "description": body.description},
+        )
+        return _ok(created)
+
     @app.post("/ingest/raw")
     async def raw(
         body: IngestRequest,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
         await auth(authorization, body.device_id)
+        if not valid_project(body.project):
+            # project 直接变成真源目录名：白名单之外的串一律拒绝，不做静默兜底，
+            # 否则采集端以为写进了某个库、实际落到了别处。
+            raise ApiError(
+                ErrorCode.BAD_REQUEST,
+                "project 必须是 auto 或知识库 id（小写字母/数字/./_/-，以字母或数字开头，≤64 位）",
+                {"project": body.project},
+            )
         for batch_file in body.files:
             if "\x00" in batch_file.content:
                 raise ApiError(

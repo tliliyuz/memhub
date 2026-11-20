@@ -68,6 +68,11 @@ services:
     #   docker run --rm ... memhub/app-worker:0.1.0 memhub worker --once
     # （--once 只跑一轮、不受窗口限制；退出码 0 全成功 / 1 有失败 / 2 配置错）
     command: ["memhub", "worker", "--window", "21:00-02:00", "--limit", "20"]
+    environment:
+      # 窗口按北京时间解释。容器默认 UTC：不设这个变量时 `--window 21:00-02:00`
+      # 实际跑在 05:00-10:00 CST（线上踩过）。用显式偏移而不是 TZ=Asia/Shanghai——
+      # slim 镜像不一定带 tzdata，缺 zoneinfo 时 astimezone() 会静默退回 UTC。
+      MEMHUB_WINDOW_TZ: "+08:00"
     restart: "on-failure:5"
     # 实测：抽一枚 60K 字符会话（5 段、54 节点 / 36 边）峰值 ~155MB（本机 venv），
     # 单并发 + 60K 输入上限让峰值有界。640m 是 4 倍余量。

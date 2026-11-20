@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from datetime import time as dtime
 from pathlib import Path
 
@@ -22,6 +22,7 @@ from memhub.worker.daemon import (
     in_window,
     iter_pending,
     parse_window,
+    parse_window_tz,
     probe_endpoint,
     prune_processed_raw,
     purge_pending_review,
@@ -80,13 +81,16 @@ async def _config(tmp_path: Path, **kwargs: object) -> WorkerConfig:
     )
 
 
-async def _push(tmp_path: Path, content: str, *, path: str = "sessions/a.jsonl") -> None:
+async def _push(
+    tmp_path: Path, content: str, *, path: str = "sessions/a.jsonl", project: str = "auto"
+) -> None:
     sha = hashlib.sha256(content.encode()).hexdigest()
     request = IngestRequest(
         batch_id=f"b-{sha[:6]}",
         device_id="dev-1",
         source_id="cc-sessions",
         source_type="sessions",
+        project=project,
         files=[
             BatchFile(
                 path=path,
@@ -127,6 +131,43 @@ def test_cross_midnight_window() -> None:
     assert not in_window(dtime(12, 0), window)
 
 
+def test_parse_window_tz() -> None:
+    assert parse_window_tz("") is None
+    assert parse_window_tz("UTC") is UTC
+    assert parse_window_tz("+08:00") == timezone(timedelta(hours=8))
+    assert parse_window_tz("-0530") == timezone(-timedelta(hours=5, minutes=30))
+    with pytest.raises(ValueError):
+        parse_window_tz("+15:00")
+    with pytest.raises(ValueError):
+        parse_window_tz("Mars/Olympus")
+
+
+async def test_window_uses_configured_timezone(tmp_path: Path) -> None:
+    """容器默认 UTC：13:30Z 是北京 21:30（窗口内），10:00Z 是北京 18:00（窗口外）。"""
+    await _push(tmp_path, "hello")
+    beijing = timezone(timedelta(hours=8))
+    config = await _config(tmp_path, window="21:00-02:00", window_tz=beijing, interval=60.0)
+
+    sleeps: list[float] = []
+    inside = datetime(2026, 11, 19, 13, 30, tzinfo=UTC)
+    assert (
+        await run_forever(
+            FakeClient(), config, now=lambda: inside, sleep=_sleeper(sleeps), max_rounds=1
+        )
+        == 0
+    )
+    assert sleeps == [], "窗口内必须直接处理，不能睡"
+
+    outside = datetime(2026, 11, 19, 10, 0, tzinfo=UTC)
+    assert (
+        await run_forever(
+            FakeClient(), config, now=lambda: outside, sleep=_sleeper(sleeps), max_rounds=1
+        )
+        == 0
+    )
+    assert sleeps == [60.0], "窗口外只睡 interval，不去碰 LLM"
+
+
 async def test_iter_pending_skips_processed(tmp_path: Path) -> None:
     await _push(tmp_path, "hello")
     config = await _config(tmp_path)
@@ -161,6 +202,42 @@ async def test_round_passes_configured_max_tokens(tmp_path: Path) -> None:
 
     assert (await run_round(client, config)).processed == 1
     assert client.max_tokens_seen == [12345]
+
+
+async def test_round_writes_into_the_project_chosen_by_the_client(tmp_path: Path) -> None:
+    """桌面端按目录选了知识库，worker 必须写进 knowledge/<project>/。"""
+    await _push(tmp_path, _session_line("用户说：sdp-tag 用标签页拖拽。"), project="sdp-tag")
+    config = await _config(tmp_path)
+
+    assert (await run_round(FakeClient(), config)).processed == 1
+    files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
+    assert len(files) == 1
+    parts = Path(files[0]).relative_to(config.knowledge_dir).parts
+    assert parts[0] == "sdp-tag", "选了库就不能再写到 source_id 目录下"
+
+
+async def test_auto_project_falls_back_to_source_id(tmp_path: Path) -> None:
+    """旧批次/没选库时保持原行为：knowledge/<source_id>/。"""
+    await _push(tmp_path, _session_line("用户说：网络重试需要退避。"))
+    config = await _config(tmp_path)
+
+    assert (await run_round(FakeClient(), config)).processed == 1
+    files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
+    parts = Path(files[0]).relative_to(config.knowledge_dir).parts
+    assert parts[0] == "cc-sessions"
+
+
+async def test_bad_project_cannot_escape_knowledge_dir(tmp_path: Path) -> None:
+    """project 直接做目录名；旧批次/恶意值不能把文件写到真源之外。"""
+    await _push(tmp_path, _session_line("用户说：越界测试。"), project="../../etc")
+    config = await _config(tmp_path)
+
+    assert (await run_round(FakeClient(), config)).processed == 1
+    root = config.knowledge_dir.resolve()
+    files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
+    assert files
+    for item in files:
+        assert root in Path(item).resolve().parents
 
 
 async def test_round_keeps_failed_file_for_retry(tmp_path: Path) -> None:

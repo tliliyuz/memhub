@@ -154,6 +154,9 @@ async def save_batch(data_dir: Path, request: IngestRequest) -> int:
             "device_id": request.device_id,
             "source_id": request.source_id,
             "source_type": request.source_type,
+            # 目标知识库由采集端选（桌面端 UI 里按目录指定）；worker 落到
+            # knowledge/<project>/。"auto" 时 worker 回退 source_id（旧行为）。
+            "project": request.project,
             "batch_id": request.batch_id,
             "path": batch_file.path,
             "from_offset": batch_file.from_offset,

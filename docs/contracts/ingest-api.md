@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.3
+> 版本: 0.4
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -131,6 +131,7 @@ Authorization: Bearer <device_token>
 | `from_offset/to_offset` | 用于服务端拼接；`from_offset` 必须 ≥ 服务端已知 offset，否则返回 `409 {code:1004, data:{expected_offset}}`，客户端回退。 |
 | `sha256` | 原文片段哈希，服务端用于二次去重。 |
 | `cursor_before` / `cursor_after` | **仅诊断**，服务端不校验，也不据此产生 1004。游标以每条文件的 `from_offset` 为准。 |
+| `project` | 归入哪个知识库（真源一级目录名）。由桌面端按采集目录选择、写进 `sources[].project`。`auto`（默认）= 不指定，worker 回退到 `source_id`（旧行为）；否则必须是合法知识库 id（`^[a-z0-9][a-z0-9._-]{0,63}$`），非法值整批 `400 {code:1003}`，不做静默兜底。目标库不必提前存在——首次写入自动建目录；但要列表里有名字/描述，先调 `POST /ingest/projects`（见下）。 |
 
 服务端游标校验只看两处：`source_rev`（是否允许重扫）与每条文件的 `from_offset`（相对已知 offset 是否回退）。
 
@@ -164,6 +165,37 @@ Authorization: Bearer <device_token>
 - `state`: `running | degraded | paused | unauthorized`。采集器被吊销/停推时必须显式报 `unauthorized`，不静默。
 - `skipped` 计数用于排查「某个目录永远同步不上却不报错」；`offline` 特指 Windows 上带 `FILE_ATTRIBUTE_OFFLINE` 的占位文件。
 - 返回 `data.commands[]`：`{"type":"reload_config"}` / `{"type":"pause","until":"..."}` / `{"type":"upgrade","min_version":"..."}`。
+
+### `GET /ingest/projects?device_id=<id>`
+
+桌面端「被采集目录 → 已有知识库」下拉框的数据源：返回云端已有的知识库列表（与管理台 `/api/v1/kb/projects` 同一份数据，服务端转发 kb-api；真源目录的唯一写者仍是 kb-api）。
+
+```json
+{ "code": 0, "message": "ok", "data": {
+    "items": [
+      { "id": "sdp-tag", "name": "SDP Tag", "description": "标签系统",
+        "nodes": 206, "edges": 131, "updated_at": "2026-11-20T01:38:16Z" }
+    ],
+    "total": 1
+  } }
+```
+
+- 鉴权同 `/ingest/raw`（设备 token）。
+- kb-api 不可达时返回 `500 {code:2001}`。桌面端应回退成「手填 id」，不能把采集流程阻塞在这个查询上。
+- 用户选中的 `id` 写回 `sources.json` 的 `sources[].project`；采集器原样放进 `/ingest/raw` 的 `project`。
+- 改一个源的 `project` **只影响之后推送的内容**：已提炼的批次按内容寻址落在 `processed_raw/`，不会因为改库名而重跑，也不会搬去新库。
+
+### `POST /ingest/projects`
+
+桌面端「新建知识库」：给被采集目录建一个新的沉淀目标。
+
+```json
+{ "device_id": "...", "id": "sdp-tag", "name": "SDP Tag", "description": "标签系统" }
+```
+
+- `id` 即真源目录名，规则同上（`^[a-z0-9][a-z0-9._-]{0,63}$`）；`name`/`description` 进 `.kbs.json`。
+- 业务码透传：重名 `409 {code:1010}`、参数非法 `400/422 {code:1012}`、kb 不可达 `500 {code:2001}`，`data.upstream` 带上游 HTTP 状态码。
+- 也可以不显式新建：首次推送写入时 worker 自动建目录，但管理台列表里显示名就是 id、描述为空。推荐「先建库再推送」。
 
 ### `DELETE /ingest/source/{source_id}?device_id=<id>&purge=true`
 

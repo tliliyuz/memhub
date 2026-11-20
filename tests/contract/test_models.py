@@ -78,3 +78,22 @@ def test_sources_config_rejects_unknown_fields() -> None:
 def test_error_code_is_integer() -> None:
     body = ErrorBody(code=ErrorCode.CURSOR_CONFLICT, message="offset rollback")
     assert body.model_dump()["code"] == 1004
+
+
+def test_source_project_must_be_auto_or_kb_id() -> None:
+    """sources[].project 会变成真源目录名；桌面端写配置时就要拦住非法值。"""
+    ok = SourceEntry(id="cc", name="x", type="sessions", path="C:/x", project="sdp-tag")
+    assert ok.project == "sdp-tag"
+    with pytest.raises(ValidationError):
+        SourceEntry(id="cc", name="x", type="sessions", path="C:/x", project="Sdp Tag")
+
+
+def test_resolve_project_falls_back_to_source_id() -> None:
+    from memhub.contract import resolve_project
+
+    assert resolve_project("sdp-tag", "claude-session-abc") == "sdp-tag"
+    assert resolve_project("auto", "claude-session-abc") == "claude-session-abc"
+    assert resolve_project(None, "claude-session-abc") == "claude-session-abc"
+    # 非法值不能当目录名：白名单化，且不留下可逃逸真源的路径片段。
+    assert resolve_project("../../etc", "My Source") == "my-source"
+    assert "/" not in resolve_project("a/b", "src")

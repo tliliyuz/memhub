@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-20（采集归属：知识库由用户在客户端选；窗口时区；并发竞态）
+
+- `feat(contract)`：`project` 从「协议里有、实现丢弃」变成端到端生效。规则收敛到一个地方：`KB_ID_PATTERN`（`^[a-z0-9][a-z0-9._-]{0,63}$`，真源里就是一级目录名）、`valid_project`、`sanitize_kb_id`、`resolve_project`。`sources.json` 的 `sources[].project` 在桌面端写配置时就按同一规则校验。
+- `feat(ingest)`：`/ingest/raw` 接受并校验 `project`（`auto` = 不指定），落盘 payload 带上 `project`；非法值整批 `400/1003`，不静默兜底。`rawstore.save_batch` 不再丢弃该字段。
+- `feat(worker)`：`process_file` 用 `resolve_project(payload["project"], source_id)` 决定写入 `knowledge/<project>/`；`auto`/缺失（旧批次）/非法值回退按白名单化后的 `source_id`——顺带堵住 `source_id` 直接拼路径的越界面。
+- `feat(ingest)`：新增 `GET /ingest/projects`（已有知识库列表）与 `POST /ingest/projects`（新建知识库），设备 token 鉴权，转发同机 kb-api（`MEMHUB_KB_API_URL`，默认 `127.0.0.1:8701`），业务码透传（1010 冲突 / 1011 不存在 / 1012 非法），kb 未起返回 500/2001。桌面端据此做「被采集目录 → 知识库」下拉与「新建」。
+- `fix(worker)`：窗口时区。容器默认 UTC，`--window 21:00-02:00` 实际跑在 05:00-10:00 CST（文档写的是本地时间）。新增 `MEMHUB_WINDOW_TZ`（`UTC` / `+08:00` / IANA 名，非法值退出 2），`WorkerConfig.window_tz` 参与门控；compose 生产设 `+08:00`（显式偏移，不依赖 slim 镜像的 tzdata——缺 zoneinfo 时 `astimezone()` 会静默退回 UTC）。
+- `fix(worker)`：手动 `--once` 与守护进程同时处理同一文件时，后者在 `_mark_processed` 的 `AsyncPath.replace` 上 `FileNotFoundError` 打崩整轮（实测重启 1 次、重复写入 63 个语义重复节点）。移动失败按「已被其他进程处理」跳过，不再中断一轮。
+- 测试：`test_ingest_api`（project 落盘/非法值/代理端点/业务码透传）、`test_daemon`（选库落盘、auto 回退、越界防护、窗口时区）、`test_rawstore`、`test_models`。全量 `179 passed, 9 skipped`。
+
 ## 2026-11-20（修复：worker 输出预算被 thinking 吃光）
 
 - `fix(worker)`：线上首次 `worker --once` 失败——`LLMError: 模型返回空内容（stop_reason=max_tokens, blocks=[thinking]）`。`max_tokens=8000` 是**含 thinking 的总预算**，抽取提示词下模型把 8000 全花在思考上，200 响应里只有 thinking 块、没有 text；重试 3 次都是同一结果。默认预算提到 `32000`（`llm.py` 新增 `DEFAULT_MAX_TOKENS`，`extract_document` 与 `WorkerConfig` 同步），不关闭 thinking——限制思考长度比整段关掉更保守。

@@ -6,10 +6,38 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import IntEnum, StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# 知识库 id 在真源里就是一级目录名（`<knowledge>/<id>/...`），必须能安全拼路径。
+# 采集端的 `sources[].project` 与桌面端「新建知识库」都按这个规则校验。
+KB_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]{0,63}$"
+KB_ID_RE = re.compile(KB_ID_PATTERN)
+# 保留值：采集端不指定知识库，由 worker 回退到 source_id（旧行为）。
+PROJECT_AUTO = "auto"
+_NON_KB_ID = re.compile(r"[^a-z0-9._-]")
+
+
+def valid_project(value: str) -> bool:
+    """`auto` 或合法知识库 id；其余一律拒绝（这个值会直接变成目录名）。"""
+    return value == PROJECT_AUTO or KB_ID_RE.fullmatch(value) is not None
+
+
+def sanitize_kb_id(value: str) -> str:
+    """把任意串白名单化成目录名；老批次没有 project、source_id 不合规时兜底。"""
+    cleaned = _NON_KB_ID.sub("-", value.strip().lower())[:64].lstrip("._-")
+    return cleaned or "unknown"
+
+
+def resolve_project(project: object, source_id: str) -> str:
+    """worker 落库用哪个知识库：采集端指定优先，`auto`/缺失/非法回退 source_id。"""
+    value = project.strip() if isinstance(project, str) else ""
+    if value and value != PROJECT_AUTO and KB_ID_RE.fullmatch(value):
+        return value
+    return sanitize_kb_id(source_id)
 
 
 class Kind(StrEnum):
@@ -134,6 +162,14 @@ class SourceEntry(BaseModel):
     project: str = "auto"
     exclude: list[str] = Field(default_factory=list)
     scan_interval_sec: int | None = Field(default=None, gt=0)
+
+    @field_validator("project")
+    @classmethod
+    def check_project(cls, value: str) -> str:
+        # 桌面端写 sources.json 时就该拦住拼错的库名，别等到云端 400 才发现。
+        if not valid_project(value):
+            raise ValueError("project 必须是 auto 或知识库 id（小写字母/数字/./_/-，≤64 位）")
+        return value
 
 
 class CollectorConfig(BaseModel):

@@ -1,6 +1,9 @@
 """跨端契约模型与枚举。"""
 
 from memhub.contract.models import (
+    KB_ID_PATTERN,
+    KB_ID_RE,
+    PROJECT_AUTO,
     BatchFile,
     CollectorConfig,
     Cursor,
@@ -20,9 +23,15 @@ from memhub.contract.models import (
     SourceRef,
     SourcesConfig,
     Tier,
+    resolve_project,
+    sanitize_kb_id,
+    valid_project,
 )
 
 __all__ = [
+    "KB_ID_PATTERN",
+    "KB_ID_RE",
+    "PROJECT_AUTO",
     "BatchFile",
     "CollectorConfig",
     "Cursor",
@@ -42,4 +51,7 @@ __all__ = [
     "SourceRef",
     "SourcesConfig",
     "Tier",
+    "resolve_project",
+    "sanitize_kb_id",
+    "valid_project",
 ]
