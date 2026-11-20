@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -27,6 +28,25 @@ def _client(handler: httpx.AsyncBaseTransport, *, attempts: int = 2) -> Anthropi
     client = AnthropicClient("https://api.example.com", "test-key", attempts=attempts)
     client._http = httpx.AsyncClient(transport=handler)
     return client
+
+
+async def test_default_max_tokens_leaves_room_for_thinking() -> None:
+    """8000 会被 thinking 吃光（线上首跑 stop_reason=max_tokens），默认必须更宽。"""
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]},
+        )
+
+    client = _client(httpx.MockTransport(handler))
+    try:
+        assert await client.complete("hi", model="m") == "ok"
+    finally:
+        await client.aclose()
+    assert payloads[0]["max_tokens"] == 32000
 
 
 async def test_empty_text_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:

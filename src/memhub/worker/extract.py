@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 
 from memhub.contract import Predicate
-from memhub.worker.llm import LLMClient, parse_json
+from memhub.worker.llm import DEFAULT_MAX_TOKENS, LLMClient, parse_json
 from memhub.worker.prompts import render
 from memhub.worker.schema import (
     ExtractedEdge,
@@ -36,7 +36,7 @@ async def extract_document(
     text: str,
     model: str,
     max_chars: int = 12000,
-    max_tokens: int = 8000,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Extraction:
     chunks = split_markdown(text, max_chars=max_chars)
     if not chunks:

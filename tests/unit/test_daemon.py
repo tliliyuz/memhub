@@ -53,9 +53,11 @@ class FakeClient:
         self.reply = reply
         self.error = error
         self.calls = 0
+        self.max_tokens_seen: list[int] = []
 
-    async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str:
+    async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
         self.calls += 1
+        self.max_tokens_seen.append(max_tokens)
         if self.error is not None:
             raise self.error
         return self.reply
@@ -149,6 +151,16 @@ async def test_round_extracts_and_marks_processed(tmp_path: Path) -> None:
     assert await iter_pending(config.raw_root, config.processed_root) == []
     processed = [item async for item in AsyncPath(config.processed_root).rglob("*.json")]
     assert len(processed) == 1
+
+
+async def test_round_passes_configured_max_tokens(tmp_path: Path) -> None:
+    """输出预算必须从 WorkerConfig 透传到 LLM 调用（MEMHUB_LLM_MAX_TOKENS 的落点）。"""
+    await _push(tmp_path, _session_line("用户说：网络重试需要退避。"))
+    config = await _config(tmp_path, max_tokens=12345)
+    client = FakeClient()
+
+    assert (await run_round(client, config)).processed == 1
+    assert client.max_tokens_seen == [12345]
 
 
 async def test_round_keeps_failed_file_for_retry(tmp_path: Path) -> None:

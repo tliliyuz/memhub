@@ -383,11 +383,25 @@ async def _worker(args: argparse.Namespace) -> int:
         print(f"LLM 端点自检失败: {exc}", file=sys.stderr)
         return 2
 
+    # 输出预算含 thinking：默认 8000 时模型会把预算全花在思考上、不给 text 块
+    # （stop_reason=max_tokens, blocks=[thinking]，线上首跑已踩）。默认 32000，
+    # 用 MEMHUB_LLM_MAX_TOKENS 覆盖；非法值按配置错误退出（2），不静默回退。
+    raw_max_tokens = os.environ.get("MEMHUB_LLM_MAX_TOKENS", "").strip()
+    try:
+        max_tokens = int(raw_max_tokens) if raw_max_tokens else 32000
+    except ValueError:
+        print(f"MEMHUB_LLM_MAX_TOKENS 必须是整数：{raw_max_tokens!r}", file=sys.stderr)
+        return 2
+    if max_tokens <= 0:
+        print(f"MEMHUB_LLM_MAX_TOKENS 必须为正数：{max_tokens}", file=sys.stderr)
+        return 2
+
     client, model = _llm_client()
     config = WorkerConfig(
         data_dir=Path(data_dir),
         knowledge_dir=Path(knowledge_dir),
         model=model,
+        max_tokens=max_tokens,
         window=args.window or None,
         interval=args.interval,
         limit=args.limit,

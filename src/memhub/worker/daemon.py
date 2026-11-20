@@ -47,6 +47,9 @@ class WorkerConfig:
     model: str
     max_chars: int = 12000
     max_input_chars: int = 60000
+    # 单次 LLM 调用的输出预算（含 thinking）。8000 会被 thinking 吃光、拿不到
+    # text 块，线上首跑已踩；默认 32000，可用 MEMHUB_LLM_MAX_TOKENS 覆盖。
+    max_tokens: int = 32000
     window: str | None = None
     interval: float = 300.0
     limit: int = 20
@@ -308,6 +311,7 @@ async def process_file(
         text=text,
         model=config.model,
         max_chars=config.max_chars,
+        max_tokens=config.max_tokens,
     )
     store = KnowledgeStore(config.knowledge_dir)
     kind = SourceKind.SESSION if source_type == "sessions" else SourceKind.WIKI

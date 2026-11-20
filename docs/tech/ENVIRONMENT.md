@@ -28,6 +28,7 @@
 | `MEMHUB_LLM_API_KEY` | 是 | — | worker | 启动失败；日志中永不出现 |
 | `MEMHUB_LLM_MODEL_FILTER` | 是 | — | worker/value_filter | 启动失败 |
 | `MEMHUB_LLM_MODEL_EXTRACT` | 是 | — | worker/extract | 启动失败 |
+| `MEMHUB_LLM_MAX_TOKENS` | 否 | `32000` | worker | 单次调用的输出预算（含 thinking）；非法值或非正数退出 2。8000 会被思考吃光、`stop_reason=max_tokens` 且无 text 块（线上首跑已踩） |
 | `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
 | `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；`/devices/register` 必须带 `Authorization: Bearer <provision_token>`，否则 401——用户体系未落地前用它关闭开放注册 |
 | `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的共享 token；`MEMHUB_ENV=prod` 时**被忽略**（代码层不读取） |

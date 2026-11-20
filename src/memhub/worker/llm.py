@@ -18,8 +18,16 @@ class LLMError(RuntimeError):
     pass
 
 
+# 上线首跑踩过：8000 token 全被 thinking 吃掉，返回 200 但只有 thinking 块
+# （stop_reason=max_tokens, blocks=[thinking]），抽取在重试 3 次后失败。
+# 默认放宽到 32000；仍不关闭 thinking——限制思考长度比整段关掉更保守。
+DEFAULT_MAX_TOKENS = 32000
+
+
 class LLMClient(Protocol):
-    async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str: ...
+    async def complete(
+        self, prompt: str, *, model: str, max_tokens: int = DEFAULT_MAX_TOKENS
+    ) -> str: ...
 
 
 def _messages_url(base_url: str) -> str:
@@ -48,7 +56,9 @@ class AnthropicClient:
         self._attempts = attempts
         self._http = httpx.AsyncClient(timeout=timeout, trust_env=trust_env)
 
-    async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str:
+    async def complete(
+        self, prompt: str, *, model: str, max_tokens: int = DEFAULT_MAX_TOKENS
+    ) -> str:
         payload = {
             "model": model,
             "max_tokens": max_tokens,

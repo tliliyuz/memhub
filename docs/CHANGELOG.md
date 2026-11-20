@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-20（修复：worker 输出预算被 thinking 吃光）
+
+- `fix(worker)`：线上首次 `worker --once` 失败——`LLMError: 模型返回空内容（stop_reason=max_tokens, blocks=[thinking]）`。`max_tokens=8000` 是**含 thinking 的总预算**，抽取提示词下模型把 8000 全花在思考上，200 响应里只有 thinking 块、没有 text；重试 3 次都是同一结果。默认预算提到 `32000`（`llm.py` 新增 `DEFAULT_MAX_TOKENS`，`extract_document` 与 `WorkerConfig` 同步），不关闭 thinking——限制思考长度比整段关掉更保守。
+- `feat(worker)`：新增可选环境变量 `MEMHUB_LLM_MAX_TOKENS`（默认 `32000`）覆盖单次输出预算；非整数或非正数按配置错误退出 2，不静默回退。同步 `.env.example` 与 `docs/tech/ENVIRONMENT.md` §2。
+- 测试：`test_llm` 断言默认请求体 `max_tokens == 32000`；`test_daemon` 断言 `WorkerConfig.max_tokens` 透传到 `LLMClient.complete`。全量 `158 passed, 9 skipped`。
+
 ## 2026-11-19（发布：管理台上云，explorer 退役）
 
 - `feat(deploy)`：新增 `deploy/Dockerfile.kb`——复用 worker wheelhouse（需要 `engine` extra 的 semantica 投影），把 `web/dist` 烘进镜像，命令为 `memhub kb --knowledge-dir /var/lib/memhub/knowledge --graph-out /var/lib/memhub/kb/kg.json --web-dist /app/web-dist --data-dir /var/lib/memhub/data`；`compose.yml` 增加 `kb` 服务（384m，实测重建 437 节点 / 2631 边峰值 143MB）。

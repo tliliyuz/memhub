@@ -21,7 +21,7 @@ class FakeClient:
         self._payloads = payloads
         self.prompts: list[str] = []
 
-    async def complete(self, prompt: str, *, model: str, max_tokens: int = 8000) -> str:
+    async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
         self.prompts.append(prompt)
         return json.dumps(self._payloads.pop(0), ensure_ascii=False)
 
