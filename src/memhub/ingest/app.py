@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import (
     KB_ID_RE,
+    PROJECT_AUTO,
     Cursor,
     ErrorCode,
     FileCursor,
@@ -346,10 +347,12 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     ) -> dict[str, object]:
         """桌面端「新建知识库」；之后采集端用同一个 id 作为 project 推送。"""
         await auth(authorization, body.device_id)
-        if not KB_ID_RE.fullmatch(body.id):
+        # auto 是推送侧的保留值（回退按 source_id 归档），不是真正可以建的库；
+        # 放行会建出一个名叫 auto 的目录，之后谁也没法引用它。
+        if body.id == PROJECT_AUTO or not KB_ID_RE.fullmatch(body.id):
             raise ApiError(
                 ErrorCode.BAD_REQUEST,
-                "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位",
+                "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位；auto 是保留值",
                 {"id": body.id},
             )
         created = await _kb_api_request(

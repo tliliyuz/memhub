@@ -256,6 +256,17 @@ def test_project_create_is_validated_and_proxied(
     assert seen == [{"id": "new-kb", "name": "新库", "description": ""}]
 
 
+def test_project_create_rejects_reserved_auto(client: TestClient) -> None:
+    """auto 是推送侧的保留值；建成真库会得到一个谁都无法引用的目录名。"""
+    response = client.post(
+        "/ingest/projects",
+        headers=AUTH,
+        json={"device_id": DEVICE, "id": "auto"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == 1003
+
+
 def test_project_create_rejects_bad_id(client: TestClient) -> None:
     response = client.post(
         "/ingest/projects",

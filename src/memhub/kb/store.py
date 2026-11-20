@@ -16,6 +16,10 @@ from anyio import Path as AsyncPath
 
 from memhub.contract import Edge, NodeFrontmatter
 
+# 删除是软删：原文件移到 `<root>/_trash/<时间戳>/<原 id>.md`。
+# manage 的删除/恢复与这里的 list_ids 共用同一个名字。
+TRASH_DIR = "_trash"
+
 
 class KnowledgeStore:
     def __init__(self, root: Path) -> None:
@@ -51,6 +55,10 @@ class KnowledgeStore:
         ids: list[str] = []
         async for path in AsyncPath(base).rglob("*.md"):
             relative = Path(path).relative_to(self.root)
+            # 回收站里的文件仍是 markdown，但不是节点：不跳过的话删除过的节点会以
+            # `_trash/<时间戳>/<原 id>` 的伪节点身份重新出现在投影和图谱里。
+            if relative.parts[0] == TRASH_DIR:
+                continue
             ids.append(relative.with_suffix("").as_posix())
         return sorted(ids)
 

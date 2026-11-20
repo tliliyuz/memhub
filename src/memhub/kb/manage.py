@@ -39,12 +39,11 @@ from memhub.contract import (
     Tier,
 )
 from memhub.kb import proc, query
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.store import TRASH_DIR, KnowledgeStore
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 LOCK_NAME = ".memhub-write.lock"
 LOCK_STALE_SECONDS = 120.0
-TRASH_DIR = "_trash"
 
 _log = logging.getLogger(__name__)
 
