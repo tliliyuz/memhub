@@ -26,7 +26,7 @@ export function AppTitle() {
               className='grid flex-1 text-start text-sm leading-tight'
             >
               <span className='truncate font-bold'>memhub</span>
-              <span className='truncate text-xs'>本地知识库</span>
+              <span className='truncate text-xs'>云端知识图谱</span>
             </Link>
             <ToggleSidebar />
           </div>

@@ -13,7 +13,7 @@ from anyio import Path as AsyncPath
 
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
-from memhub.kb import proc
+from memhub.kb import archive, manage, proc
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
@@ -53,6 +53,9 @@ def main(argv: list[str] | None = None) -> int:
     project_cmd = sub.add_parser("project", help="重建 semantica 图谱投影")
     project_cmd.add_argument("--knowledge-dir", default=None)
     project_cmd.add_argument("--out", default="kb/kg.json")
+
+    recover = sub.add_parser("recover-kb-archive", help="核对并续做未完成的整库归档或恢复")
+    recover.add_argument("--knowledge-dir", default=None)
 
     serve = sub.add_parser("serve", help="启动 semantica explorer 看图")
     serve.add_argument("--graph", default="kb/kg.json")
@@ -137,6 +140,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
     handlers = {
         "ingest": _ingest,
         "project": _project,
+        "recover-kb-archive": _recover_kb_archive,
         "serve": _serve,
         "mcp": _mcp,
         "purge-expired": _purge_expired,
@@ -253,6 +257,17 @@ async def _project(args: argparse.Namespace) -> int:
         print(f"未解析关系 {len(report.unresolved)} 条（目标不在真源中）:")
         for item in report.unresolved[:20]:
             print(f"  - {item}")
+    return 0
+
+
+async def _recover_kb_archive(args: argparse.Namespace) -> int:
+    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    try:
+        recovered = await archive.recover(store)
+    except (manage.ManageError, OSError) as exc:
+        print(f"未能完成归档恢复：{exc}", file=sys.stderr)
+        return 1
+    print("已续做归档操作；请重建投影。" if recovered else "没有待续做的归档操作。")
     return 0
 
 

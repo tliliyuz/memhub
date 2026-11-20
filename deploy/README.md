@@ -154,6 +154,13 @@ docker run --rm --name memhub-rebuild \
 
 timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控，不需要 timer。
 
+### 整库归档版本升级与回滚
+
+- `kb`、`worker` 和一次性 `memhub project` 重建任务须使用同一发布提交的 wheel。先禁用重建 timer 并等正在运行的任务结束，再停旧 `kb` 和 `worker`，然后同时切到新版本。不要混用两代写锁；ingest 不需要重建或停机。同步 nginx 配置和 oauth2-proxy 启动参数，先执行 `nginx -t`；保留旧镜像 ID、服务配置和真源备份。
+- 若存在 `knowledge/_kb_archives/pending.json`，不要手动删标记或锁文件。在新 worker 镜像中，以同一卷、同一用户运行 `memhub recover-kb-archive --knowledge-dir /var/lib/memhub/knowledge`。若报告冲突，保持写入暂停、备份现场并核对变更，不覆盖人工修改。成功后重建投影。
+- 旧版本不识别整库回收站及其写入阻止标记。回滚前先解决未完成的操作，恢复仍须受到阻止的已归档库，或停用旧写者直到另行处理对应队列。保留 `_kb_archives/`；镜像回滚不等于真源回滚，不用旧备份覆盖上线后的正常写入。
+- 用临时样本验收整库归档/恢复，勿归档线上库做冒烟；用实际 GitHub 会话核验用户名、头像、退出后需要重新认证，以及 `/portal`、`api.memhub.work`、回调与白名单等既有入口。
+
 ## 7. 部署顺序
 
 1. 改 daemon.json → reload docker

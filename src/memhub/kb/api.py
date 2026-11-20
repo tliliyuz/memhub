@@ -28,17 +28,18 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import quote
 
 import anyio
 from anyio import Path as AsyncPath
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, QuestionStatus, Tier
-from memhub.kb import catalog, manage, proc, query
+from memhub.kb import archive, catalog, manage, proc, query
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
@@ -168,6 +169,12 @@ class RestoreRequest(BaseModel):
     trash: str = Field(min_length=1)
 
 
+class RestoreProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    archive_id: str = Field(min_length=1, max_length=32)
+
+
 class KbCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -220,7 +227,7 @@ class KnowledgeApi:
         self.state.started_at = datetime.now(UTC).isoformat()
         self.state.error = None
         try:
-            report = await save_projection(self.store, self.graph_out)
+            report = await save_projection(self.store, self.graph_out, clear_archive_dirty=True)
             self.state.nodes = report.nodes
             self.state.edges = report.edges
             self.state.unresolved = len(report.unresolved)
@@ -271,7 +278,9 @@ class KnowledgeApi:
         }
 
     async def projection_stale(self) -> bool:
-        """真源比投影新（或有节点但还没有投影）即为过期。"""
+        """归档删除可能不留下较新的 Markdown，需检查持久标记。"""
+        if await archive.projection_dirty(self.store.root):
+            return True
         if not await AsyncPath(self.graph_out).is_file():
             return await AsyncPath(self.store.root).is_dir()
         graph_mtime = (await AsyncPath(self.graph_out).stat()).st_mtime
@@ -433,6 +442,10 @@ def create_app() -> FastAPI:
             api.store, project, name=body.name, description=body.description
         )
 
+    @app.delete("/api/v1/kb/projects/{project}")
+    async def delete_project(project: str, actor: str = "ui") -> dict[str, Any]:
+        return await _write(catalog.delete_kb(api.store, project, actor=actor))
+
     @app.get("/api/v1/kb/graph")
     async def knowledge_graph(project: str = Query(min_length=1)) -> dict[str, Any]:
         return await catalog.graph(api.store, project)
@@ -514,12 +527,40 @@ def create_app() -> FastAPI:
     # ---- 回收站 ----
 
     @app.get("/api/v1/kb/trash")
-    async def list_trash(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
-        return await manage.list_trash(api.store, limit=limit)
+    async def list_trash(
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        project: str | None = None,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        return await manage.list_trash(api.store, limit=limit, offset=offset, project=project, q=q)
 
     @app.post("/api/v1/kb/trash/restore")
     async def restore_trash(body: RestoreRequest) -> dict[str, Any]:
         return await _write(manage.restore_node(api.store, body.trash))
+
+    @app.get("/api/v1/kb/trash/projects")
+    async def list_project_trash() -> dict[str, Any]:
+        return await catalog.list_archives(api.store)
+
+    @app.post("/api/v1/kb/trash/projects/restore")
+    async def restore_project_trash(body: RestoreProjectRequest) -> dict[str, Any]:
+        return await _write(catalog.restore_kb(api.store, body.archive_id))
+
+    # ---- 当前登录用户（nginx 经 oauth2-proxy 注入 X-Memhub-User）----
+
+    @app.get("/api/v1/kb/me")
+    async def me(request: Request, response: Response) -> dict[str, Any]:
+        # 生产环境由网关覆盖此头；本地直连时没有登录身份。
+        response.headers["Cache-Control"] = "no-store"
+        user = request.headers.get("x-memhub-user", "").strip()
+        return {
+            "authenticated": bool(user),
+            "user": user or None,
+            "avatar_url": f"https://github.com/{quote(user, safe='')}.png?size=64"
+            if user
+            else None,
+        }
 
     # ---- 上传（送进提炼队列）----
 
@@ -599,6 +640,8 @@ def create_app() -> FastAPI:
     async def _startup() -> None:
         if graph_restarter is not None and await AsyncPath(graph_out).is_file():
             await graph_restarter.start()
+        if await archive.projection_dirty(api.store.root):
+            api.schedule_rebuild()
 
     # ---- 静态前端（打包产物）----
 

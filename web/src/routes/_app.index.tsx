@@ -3,6 +3,7 @@ import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
+  Archive,
   BookOpenText,
   Database,
   GitFork,
@@ -13,7 +14,7 @@ import {
   Unlink,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { KINDS, api, type KnowledgeBase } from '@/lib/api'
+import { ApiError, KINDS, api, type KnowledgeBase } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -314,6 +315,27 @@ function KnowledgeBaseIndex() {
 }
 
 function KbCard({ kb }: { kb: KnowledgeBase }) {
+  const queryClient = useQueryClient()
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
+  const archive = useMutation({
+    mutationFn: () => api.deleteProject(kb.id),
+    onSuccess: async (result) => {
+      toast.success(`知识库 ${result.id} 已归档`, {
+        description: `${result.archived_count} 个节点、${result.removed_edges} 条关系；可在回收站整库恢复。`,
+      })
+      setConfirmOpen(false)
+      await queryClient.invalidateQueries()
+    },
+  })
+  const missing = archive.error instanceof ApiError && archive.error.status === 404
+
+  const handleConfirmOpen = (open: boolean) => {
+    if (archive.isPending) return
+    if (open) archive.reset()
+    setConfirmOpen(open)
+  }
+
   return (
     <Card className='flex flex-col'>
       <CardHeader className='pb-2'>
@@ -327,9 +349,21 @@ function KbCard({ kb }: { kb: KnowledgeBase }) {
               {kb.name}
             </Link>
           </CardTitle>
-          <Badge variant='outline' className='shrink-0 font-mono text-[10px]'>
-            {kb.id}
-          </Badge>
+          <div className='flex shrink-0 items-center gap-1.5'>
+            <Badge variant='outline' className='font-mono text-[10px]'>
+              {kb.id}
+            </Badge>
+            <Button
+              variant='ghost'
+              size='icon'
+              className='size-6 text-muted-foreground hover:text-destructive'
+              aria-label={`归档知识库 ${kb.name}`}
+              title='归档知识库'
+              onClick={() => handleConfirmOpen(true)}
+            >
+              <Archive className='size-3.5' />
+            </Button>
+          </div>
         </div>
         <CardDescription className='line-clamp-2 min-h-8 text-xs'>
           {kb.description || '没有描述'}
@@ -367,6 +401,49 @@ function KbCard({ kb }: { kb: KnowledgeBase }) {
           </Button>
         </div>
       </CardContent>
+
+      <Dialog open={confirmOpen} onOpenChange={handleConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className='break-words'>归档知识库「{kb.name}」？</DialogTitle>
+            <DialogDescription>
+              归档后，{kb.id} 将不再显示在知识库列表中。库内 {kb.nodes} 个节点、库信息和受影响的关系将保存在同一个归档中。
+              可在回收站的「已归档知识库」中整库恢复，无需逐条恢复节点。
+            </DialogDescription>
+          </DialogHeader>
+          {archive.error && (
+            <p role='alert' className='break-words text-sm text-destructive'>
+              归档失败：{archive.error.message}。
+              {missing ? '请刷新知识库列表。' : '请确认知识库仍可用并处理上述问题后重试；必要时联系管理员。'}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              variant='outline'
+              disabled={archive.isPending}
+              onClick={() => handleConfirmOpen(false)}
+            >
+              取消
+            </Button>
+            {missing ? (
+              <Button onClick={() => {
+                setConfirmOpen(false)
+                void queryClient.invalidateQueries()
+              }}>
+                刷新列表
+              </Button>
+            ) : (
+              <Button
+                variant='destructive'
+                disabled={archive.isPending}
+                onClick={() => archive.mutate()}
+              >
+                {archive.isPending ? '归档中…' : '确认归档'}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }

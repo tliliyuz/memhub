@@ -9,6 +9,7 @@
 
 失败语义：
 - 单文件抽取失败 → 留在 raw_store，下一轮重试，本轮继续处理其他文件；
+- 真源写入推迟 → 保留原始文件和失败次数；单库归档不阻塞其他库；
 - LLM 端点启动自检失败 → exit 2（配置错误，别进循环空转把日志写满）；
 - 运行期连续失败按指数退避，日志只打摘要，不打 traceback。
 """
@@ -32,6 +33,7 @@ import anyio
 from anyio import Path as AsyncPath
 
 from memhub.contract import SourceKind, SourceRef, resolve_project
+from memhub.kb.manage import WriteDeferred, guard_project_write, write_lock
 from memhub.kb.store import KnowledgeStore
 from memhub.worker.extract import ExtractionFailed, extract_document
 from memhub.worker.llm import LLMClient, LLMError
@@ -323,6 +325,11 @@ async def process_file(
     source_type = str(payload.get("source_type", "sessions"))
     device_id = str(payload.get("device_id", "unknown"))
     file_path = str(payload.get("path", path.name))
+    # 未指定合法知识库时用 source_id 兼容旧批次。
+    project = resolve_project(payload.get("project"), source_id)
+    # 预检避免已知阻塞时调用模型；不持锁等待模型，merge 会加锁复检。
+    async with write_lock(config.knowledge_dir, timeout=0):
+        await guard_project_write(config.knowledge_dir, project)
 
     text = _document_text(payload)[: config.max_input_chars]
     # 日志里要能区分「渲染后为空」和「模型拒抽」：两者在 `+0 new` 上完全同形，
@@ -347,14 +354,12 @@ async def process_file(
     )
     store = KnowledgeStore(config.knowledge_dir)
     kind = SourceKind.SESSION if source_type == "sessions" else SourceKind.WIKI
-    # 知识库由采集端在 sources[].project 里选（桌面端 UI 按目录指定）；
-    # "auto"/缺失/非法才回退 source_id——旧批次没有 project 字段。
-    project = resolve_project(payload.get("project"), source_id)
     report = await merge(
         store,
         extraction,
         project=project,
         source=SourceRef(type=kind, ref=file_path, device=device_id),
+        lock_timeout=0,
     )
     return len(report.created), len(report.updated), report.edges_added
 
@@ -371,11 +376,21 @@ async def run_round(
     failures = await _load_failures(config)
     dirty = False
     pending = await iter_pending(config.raw_root, config.processed_root)
-    for path in pending[: config.limit]:
+    attempted = 0
+    for path in pending:
+        if attempted >= config.limit:
+            break
         relative = str(path.relative_to(config.raw_root))
         try:
             created, updated, edges = await process_file(client, config, path, templates=templates)
+        except WriteDeferred as exc:
+            # 不动文件或失败计数；单库推迟不占用本轮配额。
+            print(f"[worker] defer {path.name}: {exc}", flush=True)
+            if exc.reason in {"busy", "pending"}:
+                break  # 全局阻塞，下一轮再试，不逐个重复预检。
+            continue
         except (ExtractionFailed, LLMError, OSError, ValueError) as exc:
+            attempted += 1
             current.failed += 1
             current.errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
             attempts = failures.get(relative, 0) + 1
@@ -406,6 +421,7 @@ async def run_round(
             print(f"[worker] skip move {path.name}: 已被其他进程处理", flush=True)
         if failures.pop(relative, None) is not None:
             dirty = True
+        attempted += 1
         current.processed += 1
         current.created += created
         current.updated += updated

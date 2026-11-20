@@ -15,6 +15,7 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import BatchFile, IngestRequest
+from memhub.kb import manage
 from memhub.queue.rawstore import save_batch
 from memhub.worker.daemon import (
     RoundReport,
@@ -212,6 +213,83 @@ async def test_meta_only_session_is_not_sent_to_the_model(tmp_path: Path) -> Non
 
     assert report.processed == 1
     assert client.calls == 0, "没有真实对话就不该调用模型"
+
+
+async def test_archived_inputs_stay_queued_without_starving_active_projects(tmp_path: Path) -> None:
+    await _push(tmp_path, "blocked", project="archived")
+    config = await _config(tmp_path, limit=1, max_attempts=2)
+    [blocked] = await iter_pending(config.raw_root, config.processed_root)
+    original = await AsyncPath(blocked).read_bytes()
+    # 已有一次抽取失败：归档推迟不能把这条记录推进隔离区。
+    attempts = {str(blocked.relative_to(config.raw_root)): 1}
+    await AsyncPath(config.failures_path.parent).mkdir(parents=True, exist_ok=True)
+    await AsyncPath(config.failures_path).write_text(json.dumps(attempts), encoding="utf-8")
+    await _set_mtime(blocked, 1)
+    await _push(tmp_path, "healthy", project="active")
+    marker = AsyncPath(config.knowledge_dir / "_kb_archives" / "blocked" / "archived")
+    await marker.parent.mkdir(parents=True)
+    await marker.touch()
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.failed, report.created) == (1, 0, 1)
+    assert client.calls == 1
+    assert await iter_pending(config.raw_root, config.processed_root) == [blocked]
+    assert await AsyncPath(blocked).read_bytes() == original
+    assert not await AsyncPath(config.pending_root).exists()
+    assert json.loads(await AsyncPath(config.failures_path).read_text(encoding="utf-8")) == attempts
+    assert not await AsyncPath(config.knowledge_dir / "archived").exists()
+
+    await marker.unlink()
+    assert (await run_round(client, config)).processed == 1
+    assert await iter_pending(config.raw_root, config.processed_root) == []
+
+
+@pytest.mark.parametrize(
+    "archive_state", ["_kb_archives/pending.json", "_kb_archives/blocked/demo"]
+)
+async def test_archive_started_during_extraction_blocks_worker_merge(
+    tmp_path: Path, archive_state: str
+) -> None:
+    await _push(tmp_path, "input", project="demo")
+    config = await _config(tmp_path, max_attempts=1)
+    marker = AsyncPath(config.knowledge_dir / archive_state)
+
+    class ArchivingClient(FakeClient):
+        async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
+            async with manage.write_lock(config.knowledge_dir):
+                await marker.parent.mkdir(parents=True)
+                await marker.touch()
+            return await super().complete(prompt, model=model, max_tokens=max_tokens)
+
+    client = ArchivingClient()
+    report = await run_round(client, config)
+
+    assert client.calls == 1
+    assert (report.processed, report.failed, report.created) == (0, 0, 0)
+    assert len(await iter_pending(config.raw_root, config.processed_root)) == 1
+    assert not await AsyncPath(config.knowledge_dir / "demo").exists()
+    assert not await AsyncPath(config.failures_path).exists()
+    assert not await AsyncPath(config.pending_root).exists()
+    # 已知日志或标记存在时不应再次付费抽取。
+    assert (await run_round(client, config)).processed == 0
+    assert client.calls == 1
+
+
+async def test_busy_writer_defers_worker_before_extraction(tmp_path: Path) -> None:
+    await _push(tmp_path, "input")
+    config = await _config(tmp_path, max_attempts=1)
+    client = FakeClient()
+
+    async with manage.write_lock(config.knowledge_dir):
+        with anyio.fail_after(2):
+            report = await run_round(client, config)
+
+    assert (report.processed, report.failed) == (0, 0)
+    assert client.calls == 0
+    assert len(await iter_pending(config.raw_root, config.processed_root)) == 1
+    assert not await AsyncPath(config.failures_path).exists()
 
 
 async def test_round_passes_configured_max_tokens(tmp_path: Path) -> None:

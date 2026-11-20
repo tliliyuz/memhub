@@ -55,6 +55,68 @@ def test_health_and_stats(client: TestClient) -> None:
     assert stats["by_kind"] == {"fact": 1}
 
 
+def test_current_user_uses_gateway_identity(client: TestClient) -> None:
+    local = client.get("/api/v1/kb/me")
+    assert local.json() == {"authenticated": False, "user": None, "avatar_url": None}
+
+    logged_in = client.get("/api/v1/kb/me", headers={"X-Memhub-User": "sample-user"})
+    assert logged_in.status_code == 200
+    assert logged_in.headers["Cache-Control"] == "no-store"
+    assert logged_in.json() == {
+        "authenticated": True,
+        "user": "sample-user",
+        "avatar_url": "https://github.com/sample-user.png?size=64",
+    }
+
+
+def test_archive_project_and_page_trash(client: TestClient) -> None:
+    first = _create(client, project="old", slug="first")
+    second = _create(client, project="old", slug="second")
+    _create(client, project="keep")
+
+    deleted = client.delete("/api/v1/kb/projects/old")
+    assert deleted.status_code == 200
+    assert deleted.json()["archived_count"] == 2
+    assert client.delete("/api/v1/kb/projects/old").status_code == 404
+    assert [item["id"] for item in client.get("/api/v1/kb/projects").json()["items"]] == ["keep"]
+
+    archives = client.get("/api/v1/kb/trash/projects")
+    assert archives.status_code == 200
+    archive_id = deleted.json()["archive_id"]
+    assert [item["archive_id"] for item in archives.json()["items"]] == [archive_id]
+    assert client.get("/api/v1/kb/trash").json()["total"] == 0
+    rebuilt = client.post("/api/v1/kb/rebuild")
+    assert rebuilt.status_code == 200, rebuilt.text
+    assert rebuilt.json()["nodes"] == 1
+    assert rebuilt.json()["stale"] is False
+    restored = client.post("/api/v1/kb/trash/projects/restore", json={"archive_id": archive_id})
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["restored_count"] == 2
+    assert client.get("/api/v1/kb/trash/projects").json()["total"] == 0
+    for node in (first, second):
+        assert client.get(f"/api/v1/kb/nodes/{node['id']}").status_code == 200
+
+
+def test_page_individual_trash(client: TestClient) -> None:
+    first = _create(client, project="old", slug="first")
+    second = _create(client, project="old", slug="second", title="Second")
+    for node in (first, second):
+        response = client.delete(
+            f"/api/v1/kb/nodes/{node['id']}", params={"revision": node["revision"]}
+        )
+        assert response.status_code == 200
+    page = client.get("/api/v1/kb/trash", params={"project": "old", "limit": 1, "offset": 1})
+    assert page.status_code == 200
+    assert page.json()["total"] == 2
+    assert page.json()["total_all"] == 2
+    assert page.json()["offset"] == 1
+    assert [item["id"] for item in page.json()["items"]] == [first["id"]]
+    filtered = client.get("/api/v1/kb/trash", params={"q": "second"}).json()
+    assert filtered["total"] == 1
+    assert filtered["total_all"] == 2
+    assert [item["id"] for item in filtered["items"]] == [second["id"]]
+
+
 def test_crud_roundtrip_and_conflict(client: TestClient) -> None:
     created = _create(client)
     node_id = str(created["id"])

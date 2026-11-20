@@ -15,6 +15,7 @@ from typing import Any
 import anyio
 from anyio import Path as AsyncPath
 
+from memhub.kb import archive, manage
 from memhub.kb.store import KnowledgeStore
 
 MAX_CONTENT = 4000
@@ -81,9 +82,15 @@ async def build_graph(store: KnowledgeStore) -> tuple[Any, ProjectionReport]:
     return graph, report
 
 
-async def save_projection(store: KnowledgeStore, output: Path) -> ProjectionReport:
-    graph, report = await build_graph(store)
-    await AsyncPath(output.parent).mkdir(parents=True, exist_ok=True)
-    # semantica 的保存接口是同步的，且没有异步替代品。
-    await anyio.to_thread.run_sync(graph.save_to_file, output)
-    return report
+async def save_projection(
+    store: KnowledgeStore, output: Path, *, clear_archive_dirty: bool = False
+) -> ProjectionReport:
+    # 与真源写者互斥，且有未完成归档时不发布新投影。
+    async with manage.write_lock(store.root):
+        graph, report = await build_graph(store)
+        await AsyncPath(output.parent).mkdir(parents=True, exist_ok=True)
+        # semantica 的保存接口是同步的，且没有异步替代品。
+        await anyio.to_thread.run_sync(graph.save_to_file, output)
+        if clear_archive_dirty:
+            await archive.clear_projection_dirty(store.root)
+        return report

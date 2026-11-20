@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import re
+import sys
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -37,13 +39,16 @@ from memhub.contract import (
     SourceKind,
     SourceRef,
     Tier,
+    valid_project,
 )
 from memhub.kb import proc, query
 from memhub.kb.store import TRASH_DIR, KnowledgeStore
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-LOCK_NAME = ".memhub-write.lock"
-LOCK_STALE_SECONDS = 120.0
+# 独立于旧版 O_EXCL 锁文件；回退时旧版不受持久锁文件影响（不可混跑）。
+LOCK_NAME = ".memhub-write-v2.lock"
+_LEGACY_LOCK_NAME = ".memhub-write.lock"
+_ARCHIVE_STATE_DIR = "_kb_archives"
 
 _log = logging.getLogger(__name__)
 
@@ -70,6 +75,16 @@ class ConflictError(ManageError):
     code = ErrorCode.KB_CONFLICT
 
 
+class WriteDeferred(ConflictError):
+    """写入需要等待；不是输入失败，不应消耗 worker 的重试次数。"""
+
+    def __init__(
+        self, message: str, data: dict[str, Any] | None = None, *, reason: str | None = None
+    ) -> None:
+        super().__init__(message, data)
+        self.reason = reason
+
+
 class InvalidError(ManageError):
     status = 422
     code = ErrorCode.KB_INVALID
@@ -78,48 +93,86 @@ class InvalidError(ManageError):
 # ---------------------------------------------------------------- 锁与修订号
 
 
-@asynccontextmanager
-async def write_lock(root: Path, *, timeout: float = 10.0) -> AsyncIterator[None]:
-    """跨进程写锁（单主机）。
+def _try_write_lock(fd: int) -> bool:
+    if sys.platform == "win32":
+        import msvcrt
 
-    用 O_EXCL 建锁文件；超过 `LOCK_STALE_SECONDS` 的锁视为崩溃残留并接管。
-    这足够保护「worker 与 kb-api 同机」的当前形态；未来多机写同一真源时
-    应换成基于 git 的乐观并发。等待用 async sleep，不占线程。
+        try:
+            # 文件打开后偏移为零；锁范围可超出 EOF，无需写入占位字节。
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno != errno.EACCES:
+                raise
+            return False
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
+
+
+async def _archive_state_exists(path: Path) -> bool:
+    try:
+        await AsyncPath(path).lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+@asynccontextmanager
+async def write_lock(
+    root: Path, *, timeout: float = 10.0, recovery: bool = False
+) -> AsyncIterator[None]:
+    """单主机跨进程写锁。正常退出、取消或进程死亡时，关闭句柄即释放。
+
+    锁文件不可删除或替换，否则不同进程可能锁住不同文件。等待用 async sleep，
+    不依赖文件年龄。只有恢复归档事务的调用方可以绕过待恢复日志。
     """
     path = root / LOCK_NAME
+    await AsyncPath(root).mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
-    handle = None
-    while True:
-        try:
-            handle = await AsyncPath(path).open("x", encoding="utf-8", newline="\n")
-            await handle.write(f"{os.getpid()} {time.time():.0f}")
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - (await AsyncPath(path).stat()).st_mtime
-            except OSError:
-                age = 0.0
-            if age > LOCK_STALE_SECONDS:
-                try:
-                    await AsyncPath(path).unlink()
-                except OSError:
-                    pass
-                continue
-            if time.monotonic() >= deadline:
-                raise ConflictError(
-                    "真源正被其他进程写入（worker 或另一个管理端请求），稍后重试",
-                    {"lock": str(path), "age_seconds": round(age, 1)},
-                ) from None
-            await anyio.sleep(0.05)
+    # 保护句柄交接与关闭，避免取消后留下无人持有的开文件句柄。
+    with anyio.CancelScope(shield=True):
+        handle = await AsyncPath(path).open("a+b")
     try:
+        # Windows 的字节范围锁从当前偏移开始；始终锁同一字节。
+        await handle.seek(0)
+        fd = handle.wrapped.fileno()
+        while not await anyio.to_thread.run_sync(_try_write_lock, fd):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise WriteDeferred(
+                    "真源正被其他进程写入（worker 或另一个管理端请求），稍后重试",
+                    {"lock": str(path)},
+                    reason="busy",
+                )
+            await anyio.sleep(min(remaining, 0.05))
+        pending = root / _ARCHIVE_STATE_DIR / "pending.json"
+        if not recovery and await _archive_state_exists(pending):
+            raise WriteDeferred(
+                "有未恢复的知识库归档事务，暂不能写入真源",
+                reason="pending",
+            )
         yield
     finally:
-        if handle is not None:
+        with anyio.CancelScope(shield=True):
             await handle.aclose()
-        try:
-            await AsyncPath(path).unlink()
-        except OSError:
-            pass
+
+
+async def guard_project_write(root: Path, project: str) -> None:
+    """在持有写锁时，检查项目是否仍被归档阻止写入。"""
+    if not valid_project(project):
+        raise InvalidError(f"project 不合法: {project!r}")
+    marker = root / _ARCHIVE_STATE_DIR / "blocked" / project
+    if await _archive_state_exists(marker):
+        raise WriteDeferred(
+            f"知识库 {project} 已归档，恢复后才能写入",
+            {"project": project},
+            reason="archived",
+        )
 
 
 async def revision_of(path: Path) -> str:
@@ -282,6 +335,7 @@ async def create_node(store: KnowledgeStore, draft: NodeDraft) -> dict[str, Any]
     node_id = f"{draft.project}/{draft.kind.value}/{slug}"
     now = datetime.now(UTC)
     async with write_lock(store.root):
+        await guard_project_write(store.root, draft.project)
         if await store.exists(node_id):
             raise ConflictError(f"节点已存在: {node_id}", {"id": node_id})
         node = _build_node(
@@ -486,7 +540,14 @@ async def delete_node(
     }
 
 
-async def list_trash(store: KnowledgeStore, *, limit: int = 100) -> dict[str, Any]:
+async def list_trash(
+    store: KnowledgeStore,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    project: str | None = None,
+    q: str | None = None,
+) -> dict[str, Any]:
     base = store.root / TRASH_DIR
     items: list[dict[str, Any]] = []
     if await AsyncPath(base).is_dir():
@@ -499,20 +560,34 @@ async def list_trash(store: KnowledgeStore, *, limit: int = 100) -> dict[str, An
             relative = Path(meta_path).relative_to(base)
             meta["trash"] = relative.with_suffix("").with_suffix("").as_posix()
             items.append(meta)
-    return {"items": items[: max(1, min(limit, 500))], "total": len(items)}
+    total_all = len(items)
+    if project:
+        items = [item for item in items if item.get("project") == project]
+    if q:
+        needle = q.casefold()
+        items = [
+            item
+            for item in items
+            if needle in str(item.get("title", "")).casefold()
+            or needle in str(item.get("id", "")).casefold()
+        ]
+    offset = max(0, offset)
+    page = items[offset : offset + max(1, min(limit, 500))]
+    return {"items": page, "total": len(items), "offset": offset, "total_all": total_all}
 
 
 async def restore_node(store: KnowledgeStore, trash: str) -> dict[str, Any]:
-    base = Path(await AsyncPath(store.root / TRASH_DIR).resolve())
     parts = trash.split("/")
     if len(parts) < 2 or any(part in {"", ".", ".."} or "\\" in part for part in parts):
         raise InvalidError(f"trash 路径不合法: {trash!r}")
     stamp = parts[0]
     node_id = "/".join(parts[1:])
-    source = Path(await AsyncPath(base / stamp / f"{node_id}.md").resolve())
-    if not await AsyncPath(source).is_file() or base not in source.parents:
-        raise NotFoundError(f"回收站里没有: {trash}")
     async with write_lock(store.root):
+        await guard_project_write(store.root, parts[1])
+        base = Path(await AsyncPath(store.root / TRASH_DIR).resolve())
+        source = Path(await AsyncPath(base / stamp / f"{node_id}.md").resolve())
+        if not await AsyncPath(source).is_file() or base not in source.parents:
+            raise NotFoundError(f"回收站里没有: {trash}")
         if await store.exists(node_id):
             raise ConflictError(f"节点已重新存在，无法恢复: {node_id}", {"id": node_id})
         target = store.path_for(node_id)
@@ -533,12 +608,12 @@ async def restore_node(store: KnowledgeStore, trash: str) -> dict[str, Any]:
 
 
 async def _resolver(
-    store: KnowledgeStore, *, include: str | None = None
+    store: KnowledgeStore, *, include: str | set[str] | None = None
 ) -> Callable[[str], str | None]:
     ids = set(await store.list_ids())
     if include is not None:
         # 删除时文件已移入 _trash，解析器要把它当成「仍存在」才能找到相连的边。
-        ids.add(include)
+        ids.update({include} if isinstance(include, str) else include)
     slug_index: dict[str, list[str]] = {}
     for node_id in ids:
         slug_index.setdefault(node_id.rsplit("/", 1)[-1], []).append(node_id)
@@ -579,22 +654,52 @@ async def _remove_incident_edges(store: KnowledgeStore, node_id: str) -> int:
     return removed
 
 
+async def remove_nodes_edges(store: KnowledgeStore, node_ids: set[str], *, drop_file: Path) -> int:
+    """清理相连边及整个库的边文件；已归档节点仍参与解析。"""
+    resolve = await _resolver(store, include=node_ids)
+    removed = 0
+    for path in await _edge_files(store):
+        edge_file = AsyncPath(path)
+        lines = (await edge_file.read_text(encoding="utf-8")).splitlines(keepends=True)
+        if path == drop_file:
+            removed += sum(bool(line.strip()) for line in lines)
+            await edge_file.unlink()
+            continue
+        kept: list[str] = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                record = None
+            if isinstance(record, dict) and (
+                resolve(str(record.get("source", ""))) in node_ids
+                or resolve(str(record.get("target", ""))) in node_ids
+            ):
+                removed += 1
+            else:
+                kept.append(line)
+        if len(kept) != len(lines):
+            await edge_file.write_text("".join(kept), encoding="utf-8", newline="\n")
+    return removed
+
+
 async def replace_out_edges(
     store: KnowledgeStore,
     node_id: str,
     edges: list[Edge],
 ) -> dict[str, Any]:
     """用给定列表替换 node_id 的出边；入边不动。"""
-    if not await store.exists(node_id):
-        raise NotFoundError(f"节点不存在: {node_id}")
-    node, _ = await store.read(node_id)
-    valid_predicates = {item.value for item in Predicate}
-    for edge in edges:
-        if edge.source != node_id:
-            raise InvalidError(f"边的 source 必须是 {node_id}，收到 {edge.source}")
-        if edge.predicate.value not in valid_predicates:
-            raise InvalidError(f"predicate 不合法: {edge.predicate}")
     async with write_lock(store.root):
+        await guard_project_write(store.root, node_id.split("/", 1)[0])
+        if not await store.exists(node_id):
+            raise NotFoundError(f"节点不存在: {node_id}")
+        node, _ = await store.read(node_id)
+        valid_predicates = {item.value for item in Predicate}
+        for edge in edges:
+            if edge.source != node_id:
+                raise InvalidError(f"边的 source 必须是 {node_id}，收到 {edge.source}")
+            if edge.predicate.value not in valid_predicates:
+                raise InvalidError(f"predicate 不合法: {edge.predicate}")
         await _drop_out_edges(store, node_id)
         added = await store.append_edges(node.project, edges, node_id) if edges else 0
         commit = await _git_commit(store.root, f"kb: edit edges of {node_id}")
@@ -645,25 +750,27 @@ async def _git_commit(root: Path, message: str) -> str | None:
     if repo is None:
         return None
     try:
-        relative = resolved.relative_to(repo).as_posix()
-        # 锁文件是运行时状态，不能进真源的历史。
-        code, _, stderr = await _git(
-            repo,
-            [
-                "add",
-                "-A",
-                "--",
-                relative,
-                f":(exclude){relative}/{LOCK_NAME}",
-            ],
-            timeout=30,
-        )
+        relative = resolved.relative_to(repo)
+        archives = (relative / _ARCHIVE_STATE_DIR).as_posix()
+        journal_name = "[0-9a-f]" * 32 + ".zip"
+        # 排除运行时状态；归档快照、active.json 和 blocked 标记仍属于真源。
+        pathspec = [
+            "--",
+            relative.as_posix(),
+            f":(exclude,literal){(relative / LOCK_NAME).as_posix()}",
+            f":(exclude,literal){(relative / _LEGACY_LOCK_NAME).as_posix()}",
+            f":(exclude,literal){archives}/pending.json",
+            f":(exclude,literal){archives}/projection-dirty",
+            f":(exclude,glob){archives}/**/.*.tmp",
+            f":(exclude,glob){archives}/*/{journal_name}",
+        ]
+        code, _, stderr = await _git(repo, ["add", "-A", *pathspec], timeout=30)
         if code != 0:
             raise OSError(stderr.decode("utf-8", "replace").strip() or f"git add exit {code}")
-        code, _, _ = await _git(repo, ["diff", "--cached", "--quiet", "--", relative], timeout=30)
+        code, _, _ = await _git(repo, ["diff", "--cached", "--quiet", *pathspec], timeout=30)
         if code == 0:
             return None
-        code, _, stderr = await _git(repo, ["commit", "-m", message, "--", relative], timeout=60)
+        code, _, stderr = await _git(repo, ["commit", "-m", message, *pathspec], timeout=60)
         if code != 0:
             raise OSError(stderr.decode("utf-8", "replace").strip() or f"git commit exit {code}")
         code, stdout, stderr = await _git(repo, ["rev-parse", "--short", "HEAD"], timeout=30)

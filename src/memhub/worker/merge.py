@@ -20,6 +20,7 @@ from memhub.contract import (
     SourceRef,
     Tier,
 )
+from memhub.kb.manage import guard_project_write, write_lock
 from memhub.kb.store import KnowledgeStore
 from memhub.worker.schema import ExtractedNode, Extraction
 
@@ -43,39 +44,42 @@ async def merge(
     project: str,
     source: SourceRef,
     now: datetime | None = None,
+    lock_timeout: float = 10.0,
 ) -> MergeReport:
     moment = now or datetime.now(UTC)
     report = MergeReport()
     slug_to_id: dict[str, str] = {}
 
-    for node in extraction.nodes:
-        node_id = f"{project}/{node.kind.value}/{node.slug}"
-        slug_to_id[node.slug] = node_id
-        if not await store.exists(node_id):
-            await store.write(node_id, _new_node(node, project, source, moment), node.body)
-            report.created.append(node_id)
-            continue
+    async with write_lock(store.root, timeout=lock_timeout):
+        await guard_project_write(store.root, project)
+        for node in extraction.nodes:
+            node_id = f"{project}/{node.kind.value}/{node.slug}"
+            slug_to_id[node.slug] = node_id
+            if not await store.exists(node_id):
+                await store.write(node_id, _new_node(node, project, source, moment), node.body)
+                report.created.append(node_id)
+                continue
 
-        existing, existing_body = await store.read(node_id)
-        if existing.tier is Tier.CANONICAL:
-            report.skipped_canonical.append(node_id)
-            continue
+            existing, existing_body = await store.read(node_id)
+            if existing.tier is Tier.CANONICAL:
+                report.skipped_canonical.append(node_id)
+                continue
 
-        updated = _merge_existing(existing, node, source, moment)
-        body = _merge_body(existing_body, node.body, moment)
-        await store.write(node_id, updated, body)
-        report.updated.append(node_id)
+            updated = _merge_existing(existing, node, source, moment)
+            body = _merge_body(existing_body, node.body, moment)
+            await store.write(node_id, updated, body)
+            report.updated.append(node_id)
 
-    edges = [
-        Edge(
-            source=slug_to_id.get(edge.source, edge.source),
-            predicate=edge.predicate,
-            target=slug_to_id.get(edge.target, edge.target),
-            source_doc=source.ref,
-        )
-        for edge in extraction.edges
-    ]
-    report.edges_added = await store.append_edges(project, edges, source.ref)
+        edges = [
+            Edge(
+                source=slug_to_id.get(edge.source, edge.source),
+                predicate=edge.predicate,
+                target=slug_to_id.get(edge.target, edge.target),
+                source_doc=source.ref,
+            )
+            for edge in extraction.edges
+        ]
+        report.edges_added = await store.append_edges(project, edges, source.ref)
     return report
 
 

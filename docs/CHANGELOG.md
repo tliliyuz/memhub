@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-20（管理台：知识库归档删除、回收站分页与 GitHub 身份）
+
+- `feat(kb)`：支持独立的整库归档与恢复。快照保留 Markdown 原始字节、库登记、库内和跨库关系；恢复时不覆盖已有库或归档期间其他库的无关改动。单节点回收站保持原有行为。
+- `fix(kb/worker)`：管理端、提炼合并和投影发布共用跨进程锁；已归档的库不被队列重新建出。未完成的整库操作可用 `memhub recover-kb-archive` 核对并续做。
+- `feat(kb)`：回收站接口支持 `offset`、`project`、`q`，返回过滤后 `total` 与未过滤 `total_all`；管理台改为 20 条一页的筛选列表。
+- `feat(web)`：侧栏副标题改为「云端知识图谱」；通过 oauth2-proxy 注入的 GitHub 登录名显示真实用户名与头像，增加退出登录；本机直连时保留明确的未认证占位。
+- `fix(deploy)`：nginx 从 `X-Auth-Request-User` 透传 GitHub 登录名，避免 GitHub provider 不提供 `Preferred-Username` 时用户信息为空；oauth2-proxy 继续启用 `--set-xauthrequest=true`。
+- `docs`：同步 kb-admin API 契约，补充整库归档删除、回收站分页过滤和 `/me` 身份接口。
+- 验证：`pytest -q` 全量 `213 passed, 9 skipped`；`pnpm run build` 与前端请求契约 5 项通过，保留现有图谱分包告警。Ruff、Windows/Linux 目标 mypy、异步 IO 检查和 Compose 结构校验通过。临时样本浏览器验证整库归档与恢复；真实 GitHub 登录与登出留待上线验收。
+
 ## 2026-11-20（worker：过滤 isMeta 注入，不再把技能文档当会话知识）
 
 - `fix(worker)`：会话渲染跳过 `isMeta` 为真的事件，避免以 `user` 角色注入的技能文档混入提炼输入。只按显式标记过滤，不声称能识别所有未标记的跨会话消息或通知；工具调用标记、普通对话与输入长度策略保持不变。

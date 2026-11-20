@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import signal
+import sys
 from pathlib import Path
 
 import anyio
@@ -10,7 +12,7 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import Edge, Kind, Predicate, Tier
-from memhub.kb import manage
+from memhub.kb import manage, proc
 from memhub.kb.store import KnowledgeStore
 
 
@@ -194,6 +196,37 @@ async def test_replace_out_edges_rewrites_only_source_side(store: KnowledgeStore
     assert (await manage.get_node(store, str(b["id"])))["edges"]["out"] == []
 
 
+async def test_replace_out_edges_rechecks_source_after_waiting_for_lock(
+    store: KnowledgeStore,
+) -> None:
+    created = await manage.create_node(store, _draft())
+    node_id = str(created["id"])
+    project = store.root / "memhub"
+    archived = store.root / "_kb_archives" / "memhub"
+    marker = AsyncPath(store.root / "_kb_archives" / "blocked" / "memhub")
+    await marker.parent.mkdir(parents=True)
+    # Writer 会在持锁者完成归档后进入临界区，不能使用等待前读取的节点。
+    result: list[manage.ConflictError] = []
+
+    async def replace_edges() -> None:
+        try:
+            await manage.replace_out_edges(
+                store,
+                node_id,
+                [Edge(source=node_id, predicate=Predicate.RELATED_TO, target="next")],
+            )
+        except manage.ConflictError as exc:
+            result.append(exc)
+
+    async with anyio.create_task_group() as tasks, manage.write_lock(store.root):
+        tasks.start_soon(replace_edges)
+        await anyio.sleep(0.1)
+        await AsyncPath(project).rename(archived)
+        await marker.touch()
+    assert result and type(result[0]).__name__ == "WriteDeferred"
+    assert not await AsyncPath(project).exists()
+
+
 async def test_replace_out_edges_rejects_foreign_source(store: KnowledgeStore) -> None:
     a = await manage.create_node(store, _draft(slug="a"))
     b = await manage.create_node(store, _draft(title="B", slug="b"))
@@ -251,6 +284,51 @@ async def test_stats_counts_kinds_tiers_and_orphans(store: KnowledgeStore) -> No
     assert stats["by_kind"] == {"fact": 1, "pitfall": 1}
 
 
+@pytest.mark.parametrize("nested", [False, True])
+async def test_git_commit_excludes_runtime_files_but_keeps_archive_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    root = tmp_path / "knowledge" if nested else tmp_path
+    await AsyncPath(root).mkdir(exist_ok=True)
+    await manage._git(tmp_path, ["init"], timeout=10)
+    archive_id = "a" * 32
+    runtime = {
+        ".memhub-write.lock",
+        manage.LOCK_NAME,
+        "_kb_archives/pending.json",
+        "_kb_archives/projection-dirty",
+        "_kb_archives/.orphan.tmp",
+        f"_kb_archives/{archive_id}/.orphan.tmp",
+        f"_kb_archives/{archive_id}/{'b' * 32}.zip",
+    }
+    tracked = {
+        "active/fact/example.md",
+        "_kb_archives/blocked/demo",
+        f"_kb_archives/{archive_id}/active.json",
+        f"_kb_archives/{archive_id}/snapshot.zip",
+    }
+    for relative in runtime | tracked:
+        path = AsyncPath(root / relative)
+        await path.parent.mkdir(exist_ok=True, parents=True)
+        await path.touch()
+
+    git = manage._git
+
+    async def stage_only_git(
+        repo: Path, args: list[str], *, timeout: float
+    ) -> tuple[int, bytes, bytes]:
+        if args[0] in {"commit", "rev-parse"}:
+            return 0, b"test", b""
+        return await git(repo, args, timeout=timeout)
+
+    monkeypatch.setattr(manage, "_git", stage_only_git)
+    assert await manage._git_commit(root, "test") == "test"
+    _, stdout, _ = await git(tmp_path, ["ls-files"], timeout=10)
+    assert set(stdout.decode().splitlines()) == {
+        (root.relative_to(tmp_path) / relative).as_posix() for relative in tracked
+    }
+
+
 async def test_revision_is_content_addressed(store: KnowledgeStore) -> None:
     created = await manage.create_node(store, _draft())
     path = store.path_for(str(created["id"]))
@@ -260,11 +338,148 @@ async def test_revision_is_content_addressed(store: KnowledgeStore) -> None:
     assert await manage.revision_of(path) != before
 
 
-async def test_write_lock_takes_over_stale_lock(store: KnowledgeStore) -> None:
-    lock = store.root / manage.LOCK_NAME
-    await AsyncPath(lock).write_text("stale", encoding="utf-8")
-    old = 0.0
-    await anyio.to_thread.run_sync(os.utime, lock, (old, old))
+async def test_write_lock_is_stable_and_ignores_legacy_file(store: KnowledgeStore) -> None:
+    legacy = store.root / ".memhub-write.lock"
+    await AsyncPath(legacy).write_text("old lock", encoding="utf-8")
     async with manage.write_lock(store.root, timeout=0.1):
-        assert await AsyncPath(lock).is_file()
-    assert not await AsyncPath(lock).exists()
+        assert await AsyncPath(store.root / manage.LOCK_NAME).is_file()
+    assert await AsyncPath(legacy).read_text(encoding="utf-8") == "old lock"
+    assert await AsyncPath(store.root / manage.LOCK_NAME).is_file()
+    async with manage.write_lock(store.root, timeout=0):
+        pass
+
+
+async def test_write_lock_never_steals_from_live_process_and_survives_its_death(
+    store: KnowledgeStore,
+) -> None:
+    ready = store.root / "ready"
+    script = """
+import asyncio
+import os
+import sys
+from pathlib import Path
+from memhub.kb.manage import write_lock
+
+async def main():
+    async with write_lock(Path(sys.argv[1])):
+        ready = Path(sys.argv[2])
+        temp = ready.with_suffix('.tmp')
+        temp.write_text(str(os.getpid()))
+        temp.replace(ready)
+        await asyncio.sleep(20)
+
+asyncio.run(main())
+"""
+    child = await proc.spawn([sys.executable, "-c", script, str(store.root), str(ready)])
+    pid = None
+    try:
+        with anyio.fail_after(10):
+            while not await AsyncPath(ready).exists():
+                assert proc.exit_code(child) is None
+                await anyio.sleep(0.01)
+            # Windows venv 的启动器和持锁的 Python 可能是不同进程。
+            pid = int(await AsyncPath(ready).read_text())
+        lock = store.root / manage.LOCK_NAME
+        await anyio.to_thread.run_sync(os.utime, lock, (0, 0))
+        with pytest.raises(manage.WriteDeferred, match="其他进程写入"):
+            async with manage.write_lock(store.root, timeout=0.1):
+                pytest.fail("不能接管仍被活进程持有的锁")
+    finally:
+        if pid is None:
+            proc.kill(child)
+        elif proc.exit_code(child) is None:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        await anyio.to_thread.run_sync(child.wait, 5)
+
+    assert await AsyncPath(lock).is_file()
+    async with manage.write_lock(store.root, timeout=0.1):
+        pass
+
+
+async def test_write_lock_releases_when_holder_is_cancelled(store: KnowledgeStore) -> None:
+    acquired = anyio.Event()
+
+    async def hold_lock() -> None:
+        async with manage.write_lock(store.root):
+            acquired.set()
+            await anyio.sleep_forever()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(hold_lock)
+        await acquired.wait()
+        tasks.cancel_scope.cancel()
+
+    async with manage.write_lock(store.root, timeout=0):
+        pass
+
+
+async def test_write_lock_blocks_pending_journal_but_allows_recovery(store: KnowledgeStore) -> None:
+    pending = AsyncPath(store.root / "_kb_archives" / "pending.json")
+    await pending.parent.mkdir()
+    await pending.write_text("unfinished", encoding="utf-8")
+
+    with pytest.raises(manage.ConflictError) as exc:
+        async with manage.write_lock(store.root):
+            pytest.fail("事务日志存在时，普通写入不能继续")
+    assert type(exc.value).__name__ == "WriteDeferred"
+
+    async with manage.write_lock(store.root, recovery=True):
+        assert await pending.exists()
+        await pending.unlink()
+    async with manage.write_lock(store.root, timeout=0):
+        pass
+
+
+async def test_archived_project_cannot_be_recreated_by_node_writes(store: KnowledgeStore) -> None:
+    created = await manage.create_node(store, _draft())
+    deleted = await manage.delete_node(
+        store, str(created["id"]), expected_revision=str(created["revision"])
+    )
+    marker = AsyncPath(store.root / "_kb_archives" / "blocked" / "memhub")
+    await marker.parent.mkdir(parents=True)
+    await marker.touch()
+
+    with pytest.raises(manage.ConflictError) as exc:
+        await manage.create_node(store, _draft(slug="new"))
+    assert type(exc.value).__name__ == "WriteDeferred"
+    with pytest.raises(manage.ConflictError) as exc:
+        await manage.restore_node(store, str(deleted["trash"]))
+    assert type(exc.value).__name__ == "WriteDeferred"
+    assert not await store.exists(str(created["id"]))
+    assert (await manage.list_trash(store))["total"] == 1
+
+    await manage.create_node(store, _draft(project="other"))
+    await marker.unlink()
+    await manage.restore_node(store, str(deleted["trash"]))
+    assert await store.exists(str(created["id"]))
+
+
+async def test_list_trash_filters_and_pages(store: KnowledgeStore) -> None:
+    ids: list[str] = []
+    for project, title, slug in [
+        ("alpha", "Alpha 事实", "alpha-fact"),
+        ("beta", "Beta 事实", "beta-fact"),
+        ("beta", "Beta 次要", "beta-minor"),
+    ]:
+        created = await manage.create_node(store, _draft(project=project, title=title, slug=slug))
+        ids.append(str(created["id"]))
+    a, b, c = ids
+    for node_id in (a, b, c):
+        revision = str(await manage.node_revision(store, node_id))
+        await manage.delete_node(store, node_id, expected_revision=revision, reason="test")
+
+    everything = await manage.list_trash(store, limit=500)
+    assert everything["total"] == 3 and everything["total_all"] == 3
+
+    by_project = await manage.list_trash(store, limit=500, project="beta")
+    assert by_project["total"] == 2
+    assert {item["id"] for item in by_project["items"]} == {b, c}
+    assert by_project["total_all"] == 3
+
+    hits = await manage.list_trash(store, limit=500, q="alpha")
+    assert hits["total"] == 1 and hits["items"][0]["id"] == a
+
+    page = await manage.list_trash(store, limit=1, offset=1, project="beta")
+    assert len(page["items"]) == 1 and page["offset"] == 1
+    assert page["items"][0]["id"] == b  # 按路径倒序：beta-minor 在前，翻页后是 beta-fact
+    assert page["total"] == 2  # total 是过滤后的总数，不是本页条数

@@ -163,6 +163,17 @@ export type TrashItem = {
   trash: string
 }
 
+export type ArchivedProject = {
+  archive_id: string
+  id: string
+  name: string
+  deleted_at: string
+  archived_count: number
+  removed_edges: number
+}
+
+const projectTrashPath = '/api/v1/kb/trash/projects'
+
 export type Issue = {
   type: 'contradiction' | 'broken_link' | 'orphan' | 'low_confidence' | 'stale'
   target: string | string[]
@@ -348,12 +359,31 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ edges }),
     }),
-  trash: () => request<{ items: TrashItem[]; total: number }>('/api/v1/kb/trash'),
+  trash: (params: { limit?: number; offset?: number; project?: string; q?: string } = {}) =>
+    request<{
+      items: TrashItem[]
+      total: number
+      offset: number
+      total_all: number
+    }>(`/api/v1/kb/trash${queryString({ ...params })}`),
   restore: (trash: string) =>
     request<{ id: string; revision: string; commit: string | null }>(
       '/api/v1/kb/trash/restore',
       { method: 'POST', body: JSON.stringify({ trash }) },
     ),
+  listArchivedProjects: () =>
+    request<{ items: ArchivedProject[]; total: number }>(projectTrashPath),
+  restoreProject: (archiveId: string) =>
+    request<{
+      id: string
+      archive_id: string
+      restored_count: number
+      restored_edges: number
+      commit: string | null
+    }>(`${projectTrashPath}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ archive_id: archiveId }),
+    }),
   audit: (limit = 200) =>
     request<{ issues: Issue[]; total: number; offset: number; limit: number }>(
       `/api/v1/kb/audit${queryString({ limit })}`,
@@ -372,6 +402,19 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+  /** 归档整个知识库，包括库内节点、元数据和受影响的关系。 */
+  deleteProject: (id: string) =>
+    request<{
+      id: string
+      archive_id: string
+      archived_count: number
+      removed_edges: number
+      commit: string | null
+    }>(`/api/v1/kb/projects/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  me: () =>
+    request<{ authenticated: boolean; user: string | null; avatar_url: string | null }>(
+      '/api/v1/kb/me',
+    ),
   /** 上传文档进提炼队列；返回 201 只代表「已入队」，抽取由 worker 异步完成。 */
   uploadDocuments: (project: string, files: File[]) => {
     const body = new FormData()

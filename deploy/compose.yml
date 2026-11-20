@@ -160,6 +160,10 @@ services:
       # 500 `You need at least read:org scope`（线上已踩）。
       # rd 校验需要白名单，否则 https://memhub.work/ 被判非法、登录后只能回到 /。
       - --whitelist-domain=memhub.work
+      # 把登录身份回传给 nginx（X-Auth-Request-User/Email/Preferred-Username），
+      # 由 nginx auth_request_set 转成 X-Memhub-User 传给 kb-api（管理台左下角
+      # 显示 GitHub 用户名/头像用）。不开启时 kb-api 拿不到用户名，只能显示占位。
+      - --set-xauthrequest=true
     restart: unless-stopped
     mem_limit: 128m
     memswap_limit: 128m
