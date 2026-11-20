@@ -53,7 +53,8 @@ async def test_create_kb_validates_id_and_duplicates(store: KnowledgeStore) -> N
     with pytest.raises(manage.InvalidError):
         await catalog.create_kb(store, kb_id="Bad Id")
     await catalog.create_kb(store, kb_id="sdp-tag")
-    with pytest.raises(manage.InvalidError):
+    # 已存在是冲突（409/1010）；InvalidError（422/1012）只留给 id 不合法。
+    with pytest.raises(manage.ConflictError):
         await catalog.create_kb(store, kb_id="sdp-tag")
 
 
