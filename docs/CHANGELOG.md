@@ -10,6 +10,7 @@
 - `fix(worker)`：手动 `--once` 与守护进程同时处理同一文件时，后者在 `_mark_processed` 的 `AsyncPath.replace` 上 `FileNotFoundError` 打崩整轮（实测重启 1 次，同一会话被提炼两遍）。移动失败按「已被其他进程处理」跳过，不再中断一轮。
 - `fix(kb)`：`KnowledgeStore.list_ids` 遍历整个 `knowledge/` 时没有跳过 `_trash/`，管理台删掉的节点会以 `_trash/<时间戳>/<原 id>` 伪节点身份重新出现在投影和图谱里（实测 8 个归档节点让投影多出 8 个 `_trash` 节点）。`TRASH_DIR` 常量收敛到 `kb/store.py`，`list_ids` 跳过它。
 - `fix(ingest)`：`POST /ingest/projects` 拒绝 `id=auto`（400/1003）——`auto` 是推送侧「按源 id 归档」的保留值，建成真库会得到一个谁都没法引用的目录名。
+- `fix(kb)`：`POST /api/v1/kb/projects` 重复创建原本返回 `422/1012`（被当成参数非法），与契约的 `409/1010` 不一致，桌面端因此无法区分「id 不合法」和「已存在，可直接选用」。改抛 `ConflictError`。
 - 线上数据订正：`claude-session-ccfcacf9` 的「63 个重复节点」实为陈旧投影（kg.json 在 worker 第二次写入前 7 秒重建，少了 63 个节点），重建后 149 个节点、641 全局、0 悬空边。逐对比较正文后只有 8 对语义重复，已按「保留更完整/连边更多的一份」把另一份归档到 `_trash`（可恢复），现存 141 个节点。
 - 测试：`test_ingest_api`（project 落盘/非法值/代理端点/业务码透传/auto 保留值）、`test_daemon`（选库落盘、auto 回退、越界防护、窗口时区）、`test_kb_manage`（归档节点不进投影）、`test_rawstore`、`test_models`。
 

@@ -178,6 +178,12 @@ def test_projects_and_scoped_graph(client: TestClient) -> None:
     assert made.status_code == 201
     assert made.json()["name"] == "SDP 标签"
 
+    # 重复创建是冲突（1010），客户端据此提示「已存在，可直接选用」；
+    # 1012 只表示 id 不合法，两者的 UI 处理不同。
+    duplicate = client.post("/api/v1/kb/projects", json={"id": "sdp-tag"})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == 1010
+
     renamed = client.patch("/api/v1/kb/projects/sdp-tag", json={"description": "改过"})
     assert renamed.json()["description"] == "改过"
 

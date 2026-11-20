@@ -23,7 +23,7 @@ from anyio import Path as AsyncPath
 
 from memhub.contract import KB_ID_RE
 from memhub.kb import query
-from memhub.kb.manage import InvalidError, NotFoundError, write_lock
+from memhub.kb.manage import ConflictError, InvalidError, NotFoundError, write_lock
 from memhub.kb.store import KnowledgeStore
 
 REGISTRY_NAME = ".kbs.json"
@@ -137,7 +137,9 @@ async def create_kb(
     if not KB_ID_RE.match(kb_id):
         raise InvalidError("知识库 id 只能用小写字母/数字/./_/-，且以字母或数字开头", {"id": kb_id})
     if await AsyncPath(store.root / kb_id).is_dir():
-        raise InvalidError(f"知识库已存在: {kb_id}", {"id": kb_id})
+        # 已存在是冲突（409/1010），不是参数非法：桌面端按「已存在，可直接选用」
+        # 提示并允许继续选它，和 1012「id 不合法」的处理完全不同。
+        raise ConflictError(f"知识库已存在: {kb_id}", {"id": kb_id})
     async with write_lock(store.root):
         kbs = await _load(store)
         await AsyncPath(store.root / kb_id).mkdir(parents=True, exist_ok=True)
