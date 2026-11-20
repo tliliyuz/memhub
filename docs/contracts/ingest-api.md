@@ -194,7 +194,7 @@ Authorization: Bearer <device_token>
 ```
 
 - `id` 即真源目录名，规则同上（`^[a-z0-9][a-z0-9._-]{0,63}$`）；`name`/`description` 进 `.kbs.json`。
-- `auto` 是推送侧的保留值（表示「按源 id 归档」），不是可新建的库：`id=auto` 直接 `400 {code:1003}`。
+- `auto` 是推送侧的保留值（表示「按源 id 归档」），不是可新建的库：`id=auto` 直接 `400 {code:1003}`，`data.reason="reserved"`；其余非法 id 同样 400/1003，但 `data.reason="invalid"`——客户端按 reason 区分文案，别解析 message。
 - 业务码透传：重名 `409 {code:1010}`、参数非法 `400/422 {code:1012}`、kb 不可达 `500 {code:2001}`，`data.upstream` 带上游 HTTP 状态码。
 - 也可以不显式新建：首次推送写入时 worker 自动建目录，但管理台列表里显示名就是 id、描述为空。推荐「先建库再推送」。
 

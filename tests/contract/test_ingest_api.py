@@ -264,7 +264,9 @@ def test_project_create_rejects_reserved_auto(client: TestClient) -> None:
         json={"device_id": DEVICE, "id": "auto"},
     )
     assert response.status_code == 400
-    assert response.json()["code"] == 1003
+    body = response.json()
+    assert body["code"] == 1003
+    assert body["data"]["reason"] == "reserved"
 
 
 def test_project_create_rejects_bad_id(client: TestClient) -> None:
@@ -274,7 +276,9 @@ def test_project_create_rejects_bad_id(client: TestClient) -> None:
         json={"device_id": DEVICE, "id": "New KB/../x"},
     )
     assert response.status_code == 400
-    assert response.json()["code"] == 1003
+    body = response.json()
+    assert body["code"] == 1003
+    assert body["data"]["reason"] == "invalid"
 
 
 class _FakeKbResponse:

@@ -349,11 +349,19 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         await auth(authorization, body.device_id)
         # auto 是推送侧的保留值（回退按 source_id 归档），不是真正可以建的库；
         # 放行会建出一个名叫 auto 的目录，之后谁也没法引用它。
-        if body.id == PROJECT_AUTO or not KB_ID_RE.fullmatch(body.id):
+        # 「格式非法」和「用了保留值」分开报：客户端要靠 reason 区分提示文案，
+        # 别让前端去解析 message。
+        if body.id == PROJECT_AUTO:
             raise ApiError(
                 ErrorCode.BAD_REQUEST,
-                "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位；auto 是保留值",
-                {"id": body.id},
+                "auto 是推送侧的保留值（表示按源 id 归档），不能用作知识库 id",
+                {"id": body.id, "reason": "reserved"},
+            )
+        if not KB_ID_RE.fullmatch(body.id):
+            raise ApiError(
+                ErrorCode.BAD_REQUEST,
+                "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位",
+                {"id": body.id, "reason": "invalid"},
             )
         created = await _kb_api_request(
             kb_api_url,
