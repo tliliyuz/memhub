@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import frontmatter
@@ -61,6 +62,14 @@ class KnowledgeStore:
                 continue
             ids.append(relative.with_suffix("").as_posix())
         return sorted(ids)
+
+    resolve_short_aliases = True
+
+    async def edge_lines(self) -> AsyncIterator[str]:
+        paths = [path async for path in AsyncPath(self.root).rglob("_edges.jsonl")]
+        for path in sorted(paths, key=str):
+            for line in (await path.read_text(encoding="utf-8")).splitlines():
+                yield line
 
     def edges_path(self, project: str) -> Path:
         return self.root / project / "_edges.jsonl"

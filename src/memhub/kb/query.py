@@ -9,14 +9,23 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
-
-from anyio import Path as AsyncPath
+from typing import Any, Protocol
 
 from memhub.contract import Kind, NodeFrontmatter, Predicate, Tier
-from memhub.kb.store import KnowledgeStore
+
+
+class KnowledgeReader(Protocol):
+    @property
+    def resolve_short_aliases(self) -> bool: ...
+
+    async def list_ids(self, project: str | None = None) -> list[str]: ...
+    async def exists(self, node_id: str) -> bool: ...
+    async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]: ...
+    def edge_lines(self) -> AsyncIterator[str]: ...
+
 
 MAX_RESULTS = 50
 SNIPPET_CHARS = 160
@@ -39,7 +48,7 @@ class NotFound(QueryError):
     code = 3001
 
 
-async def records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
+async def records(store: KnowledgeReader, project: str | None = None) -> list[NodeRecord]:
     """读全部节点；管理端列表复用同一套解析（坏 frontmatter 跳过）。"""
     return await _records(store, project)
 
@@ -68,7 +77,7 @@ class EdgeIndex:
     incident: dict[str, int]
 
 
-async def _records(store: KnowledgeStore, project: str | None = None) -> list[NodeRecord]:
+async def _records(store: KnowledgeReader, project: str | None = None) -> list[NodeRecord]:
     records: list[NodeRecord] = []
     for node_id in await store.list_ids(project):
         try:
@@ -135,7 +144,7 @@ def _validate_kinds(kinds: list[str] | None) -> set[str] | None:
 
 
 async def search(
-    store: KnowledgeStore,
+    store: KnowledgeReader,
     query: str,
     *,
     project: str | None = None,
@@ -187,7 +196,7 @@ async def search(
 
 
 async def _empty_hint(
-    store: KnowledgeStore,
+    store: KnowledgeReader,
     project: str | None,
     kinds: set[str] | None,
     tier: str,
@@ -215,7 +224,7 @@ def _check_id(node_id: str) -> None:
         raise NotFound(f"节点 id 不合法: {node_id!r}")
 
 
-async def edge_index(store: KnowledgeStore) -> EdgeIndex:
+async def edge_index(store: KnowledgeReader) -> EdgeIndex:
     """解析 `_edges.jsonl`。规则与投影一致：完整 id 优先，其次唯一 slug。"""
     ids = set(await store.list_ids())
     slug_index: dict[str, list[str]] = {}
@@ -225,39 +234,36 @@ async def edge_index(store: KnowledgeStore) -> EdgeIndex:
     def resolve(reference: str) -> str | None:
         if reference in ids:
             return reference
-        candidates = slug_index.get(reference, [])
+        candidates = slug_index.get(reference, []) if store.resolve_short_aliases else []
         return candidates[0] if len(candidates) == 1 else None
 
     edges: list[dict[str, str]] = []
     unresolved: list[dict[str, str]] = []
     incident: dict[str, int] = {}
-    paths = [path async for path in AsyncPath(store.root).rglob("_edges.jsonl")]
-    for path in sorted(paths, key=str):
-        text = await path.read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if not line.strip():
+    async for line in store.edge_lines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        source = resolve(str(record["source"]))
+        target = resolve(str(record["target"]))
+        if source is None or target is None:
+            if not store.resolve_short_aliases:
                 continue
-            record = json.loads(line)
-            source = resolve(str(record["source"]))
-            target = resolve(str(record["target"]))
-            if source is None or target is None:
-                unresolved.append(
-                    {
-                        "source": str(record["source"]),
-                        "predicate": str(record["predicate"]),
-                        "target": str(record["target"]),
-                    }
-                )
-                continue
-            edges.append(
-                {"source": source, "predicate": str(record["predicate"]), "target": target}
+            unresolved.append(
+                {
+                    "source": str(record["source"]),
+                    "predicate": str(record["predicate"]),
+                    "target": str(record["target"]),
+                }
             )
-            incident[source] = incident.get(source, 0) + 1
-            incident[target] = incident.get(target, 0) + 1
+            continue
+        edges.append({"source": source, "predicate": str(record["predicate"]), "target": target})
+        incident[source] = incident.get(source, 0) + 1
+        incident[target] = incident.get(target, 0) + 1
     return EdgeIndex(edges=edges, unresolved=unresolved, incident=incident)
 
 
-async def read_node(store: KnowledgeStore, node_id: str) -> dict[str, Any]:
+async def read_node(store: KnowledgeReader, node_id: str) -> dict[str, Any]:
     """真源全文 + frontmatter + 出/入边（各限 20 条）。"""
     _check_id(node_id)
     if not await store.exists(node_id):
@@ -296,7 +302,7 @@ def _validate_predicates(predicates: list[str] | None) -> set[str] | None:
 
 
 async def related(
-    store: KnowledgeStore,
+    store: KnowledgeReader,
     node_id: str,
     *,
     depth: int = 1,
@@ -360,7 +366,7 @@ async def related(
 
 
 async def audit_list(
-    store: KnowledgeStore,
+    store: KnowledgeReader,
     *,
     limit: int = 50,
     offset: int = 0,

@@ -1,0 +1,39 @@
+"""MCP 首版工具的参数契约，供工具列表与服务端校验共用。"""
+
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from memhub.contract.models import KB_ID_PATTERN, Kind, Predicate
+
+SLUG_PATTERN = r"[a-z0-9][a-z0-9-]{0,127}"
+_KINDS = "|".join(kind.value for kind in Kind)
+NODE_ID_PATTERN = rf"^{KB_ID_PATTERN[1:-1]}/({_KINDS})/{SLUG_PATTERN}$"
+ResultLimit = Annotated[int, Field(ge=1, le=50)]
+
+
+class ToolInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class SearchInput(ToolInput):
+    query: str = Field(max_length=512)
+    project: str | None = Field(default=None, pattern=KB_ID_PATTERN)
+    kinds: list[Kind] | None = Field(default=None, max_length=len(Kind))
+    tier: Literal["canonical", "candidate", "all"] = "canonical"
+    limit: ResultLimit = 8
+
+
+class ReadInput(ToolInput):
+    id: str = Field(pattern=NODE_ID_PATTERN)
+
+
+class RelatedInput(ReadInput):
+    depth: int = Field(default=1, ge=1, le=2)
+    predicates: list[Predicate] | None = Field(default=None, max_length=len(Predicate))
+    limit: ResultLimit = 30
+
+
+class AuditInput(ToolInput):
+    limit: ResultLimit = 50
+    offset: int = Field(default=0, ge=0)
