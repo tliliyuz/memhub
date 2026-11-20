@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-20（worker：过滤 isMeta 注入，不再把技能文档当会话知识）
+
+- `fix(worker)`：会话渲染跳过 `isMeta` 为真的事件，避免以 `user` 角色注入的技能文档混入提炼输入。只按显式标记过滤，不声称能识别所有未标记的跨会话消息或通知；工具调用标记、普通对话与输入长度策略保持不变。
+- `fix(worker)`：`render_jsonl` 拆出 `render_jsonl_events(text) -> (文本, 解析事件数)`；`_document_text` 的「渲染为空退回原文」兜底改为只在解析事件数为 0（增量从事件中间切出）时生效。解析到事件但过滤后为空（整份只有注入/工具结果）时保持空文本，否则兜底会把整份 JSONL 原文连同技能手册一起喂给模型，绕过过滤。
+- 本地只读复验：两份会话渲染结果均不再包含技能文档标记，未调用模型、未上传会话、未重跑或修改线上知识节点。
+- 测试：`test_split_render`（isMeta 注入不混入对话）、`test_daemon`（只有注入的会话不调用模型）；全量 `185 passed, 9 skipped`。未发布，随下一次 worker 镜像生效。
+
 ## 2026-11-20（采集归属：知识库由用户在客户端选；窗口时区；并发竞态）
 
 - `feat(contract)`：`project` 从「协议里有、实现丢弃」变成端到端生效。规则收敛到一个地方：`KB_ID_PATTERN`（`^[a-z0-9][a-z0-9._-]{0,63}$`，真源里就是一级目录名）、`valid_project`、`sanitize_kb_id`、`resolve_project`。`sources.json` 的 `sources[].project` 在桌面端写配置时就按同一规则校验。

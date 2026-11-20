@@ -194,6 +194,26 @@ async def test_round_extracts_and_marks_processed(tmp_path: Path) -> None:
     assert len(processed) == 1
 
 
+async def test_meta_only_session_is_not_sent_to_the_model(tmp_path: Path) -> None:
+    """只有 isMeta 注入时保持空文本，不能以原文兜底绕过过滤。"""
+    line = json.dumps(
+        {
+            "type": "user",
+            "isMeta": True,
+            "message": {"role": "user", "content": "Base directory for this skill: ..."},
+        },
+        ensure_ascii=False,
+    )
+    await _push(tmp_path, line)
+    config = await _config(tmp_path)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert report.processed == 1
+    assert client.calls == 0, "没有真实对话就不该调用模型"
+
+
 async def test_round_passes_configured_max_tokens(tmp_path: Path) -> None:
     """输出预算必须从 WorkerConfig 透传到 LLM 调用（MEMHUB_LLM_MAX_TOKENS 的落点）。"""
     await _push(tmp_path, _session_line("用户说：网络重试需要退避。"))

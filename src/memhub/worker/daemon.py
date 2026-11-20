@@ -37,7 +37,7 @@ from memhub.worker.extract import ExtractionFailed, extract_document
 from memhub.worker.llm import LLMClient, LLMError
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
-from memhub.worker.render import render_jsonl
+from memhub.worker.render import render_jsonl_events
 
 PROFILE_BY_SOURCE = {"sessions": "sessions", "wiki": "wiki", "docs": "wiki"}
 
@@ -302,10 +302,11 @@ def _document_text(payload: dict[str, object]) -> str:
     content = str(payload.get("content", ""))
     path = str(payload.get("path", ""))
     if path.endswith(".jsonl"):
-        rendered = render_jsonl(content)
-        # 增量可能从事件中间切出来，整段都不是合法 JSON 行时退回原文：
-        # 静默丢掉一段真实增量比抽到噪音更糟。
-        return rendered or content
+        rendered, events = render_jsonl_events(content)
+        # 一行事件都没解析出来：增量可能从事件中间切出来，退回原文，不静默丢增量。
+        # 解析到事件但渲染为空（只有 isMeta 注入 / 工具结果）则保持为空——退回原文
+        # 会把技能手册整段喂给模型，比抽到噪音更糟。
+        return rendered if events else content
     return content
 
 

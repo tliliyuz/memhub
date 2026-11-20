@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
-from memhub.worker.render import render_jsonl
+import pytest
+
+from memhub.worker.render import render_jsonl, render_jsonl_events
 from memhub.worker.split import split_markdown
 
 
@@ -24,6 +26,37 @@ def test_split_hard_cuts_oversize_section() -> None:
     chunks = split_markdown("## big\n\n" + "y" * 2500, max_chars=1000)
     assert all(len(chunk) <= 1000 for chunk in chunks)
     assert sum(len(chunk) for chunk in chunks) >= 2500
+
+
+@pytest.mark.parametrize("block_content", [False, True])
+def test_render_jsonl_skips_meta_injections(block_content: bool) -> None:
+    """合成样本：同为 user 角色，带 isMeta 的注入不能冒充实际对话。"""
+    injection = "合成技能文档：内部注入，不是实际对话。" * 500
+    events = [
+        {"type": "user", "isMeta": False, "message": {"role": "user", "content": "hi"}},
+        {
+            "type": "user",
+            "isMeta": True,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": injection}] if block_content else injection,
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "收到"}]},
+        },
+    ]
+    text = render_jsonl("\n".join(json.dumps(event) for event in events))
+    assert "[user] hi" in text
+    assert "收到" in text
+    assert "合成技能文档" not in text
+
+
+def test_render_jsonl_distinguishes_filtered_events_from_unparseable_input() -> None:
+    event = {"type": "user", "isMeta": True, "message": {"content": "合成注入"}}
+    assert render_jsonl_events(json.dumps(event)) == ("", 1)
+    assert render_jsonl_events("invalid fragment") == ("", 0)
 
 
 def test_render_jsonl_keeps_dialogue_and_skips_tool_results() -> None:
