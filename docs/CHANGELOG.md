@@ -6,7 +6,8 @@
 - `feat(mcp)`：kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP（JSON 响应、16 KiB 请求体上限、同进程单 POST 串行、仅接受机器客户端）。协议解析交给官方 `mcp==2.3.0`；新增可选 extra `mcp-http`，基础安装、stdio 与管理台不引入该 SDK。未配置凭据时 `/mcp` 及其子路径一律 404，不落到管理台 SPA。
 - `feat(mcp)`：`MEMHUB_MCP_GRANTS` 只保存令牌 SHA-256 摘要、`mcp:read` 作用域、UTC 有效期与库名单；每个请求重算范围，授权上下文缺失时按空权限处理。浏览器 Cookie 与 `/ingest/*` 的 device token 不授予 `/mcp` 权限（ADR-0003）。吊销 = 删除摘要并重启，无在线发放接口、不改数据库。
 - `docs`：同步 MCP 契约 §4、架构中的承载进程、环境键集、开发指南（安装与验证矩阵）和部署端口说明。
-- 验证（装 `mcp-http` 的环境）：`pytest -q` 全量 `229 passed, 10 skipped`，含官方 SDK 客户端经 ASGI 传输的握手、四工具发现、跨凭据库隔离与越权拒绝、参数一致性、并发 429、过期与吊销；基础环境同组 HTTP 用例跳过。Ruff check/format、装与未装 SDK 两种环境的 `mypy src`、异步 IO 检查、`git diff --check` 通过。仅本地回环验证：未接 nginx、未做公网与目标客户端联调、未测容器内存，也未发布。
+- 状态（2026-11-21 更新）：已合入 `main`（提交 `07d7bc8`），已随生产发布，公网 `/mcp` 已开通（据云主机运维会话报告）。目标客户端联调与容器内存预算仍未验收，见开发指南 §10.1。
+- 验证（装 `mcp-http` 的环境）：`pytest -q` 全量 `229 passed, 10 skipped`，含官方 SDK 客户端经 ASGI 传输的握手、四工具发现、跨凭据库隔离与越权拒绝、参数一致性、并发 429、过期与吊销；基础环境同组 HTTP 用例跳过。Ruff check/format、装与未装 SDK 两种环境的 `mypy src`、异步 IO 检查、`git diff --check` 通过。以上验证仅在本地回环完成，不含 nginx、公网、目标客户端联调与容器内存。
 
 ## 2026-11-20（管理台：知识库归档删除、回收站分页与 GitHub 身份）
 

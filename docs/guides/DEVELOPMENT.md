@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-19 |
+| 最后更新 | 2026-11-21 |
 | 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
 | 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../architecture.md) 与 [contracts](../contracts/README.md)） |
 
@@ -182,8 +182,15 @@ MEMHUB_MCP_GRANTS='[{"sha256":"<令牌的 SHA-256>","scope":"mcp:read",
 - 依赖：`mcp==2.3.0`（MIT，`modelcontextprotocol/python-sdk`；一并拉入 mcp-types、httpx2、
   sse-starlette、pyjwt[crypto] 等）。用它换掉自写协议层：Streamable HTTP 的会话、协商与错误语义
   由参考实现维护。未安装时只有启用 HTTP 才会报错，基础安装与 stdio 不受影响。
-- 契约见 [`mcp-tools.md`](../contracts/mcp-tools.md) §4。公网接入、nginx 路由、目标客户端联调
-  与容器内存预算尚未验收。
+- 契约见 [`mcp-tools.md`](../contracts/mcp-tools.md) §4。
+
+验收状态（2026-11-21）：
+
+- 已验证：本地回环下，官方 SDK 客户端经 ASGI 传输完成握手、四工具发现、跨凭据库隔离、越权拒绝、
+  并发 429、过期与吊销（见 CHANGELOG 2026-11-20）。该版本（`07d7bc8`）已合入 `main`。
+- 已发布但未由开发侧复核：生产已部署该版本、公网 `/mcp` 已开通，依据是云主机运维会话的报告；
+  nginx 路由属运维侧，本仓库测试不覆盖。
+- 未验收：目标客户端经公网 `/mcp` 的端到端联调；容器内存预算。
 
 stdio 编码固定 UTF-8（`serve()` 会 `reconfigure` 两个流）：Windows 管道默认 cp936，
 不固定的话中文 JSON 到 agent 那边就是乱码。冒烟：
