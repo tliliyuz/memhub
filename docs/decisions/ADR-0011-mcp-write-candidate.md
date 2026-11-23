@@ -20,6 +20,7 @@ MCP 契约 0.1 设计过治理组（写候选、提案、合并、废弃、关�
 - **slug 冲突**：写工具绝不覆盖 canonical。slug 命中 `tier=canonical` 或 `deprecated` 节点时一律拒绝，`data.reason=slug_conflict_canonical`；slug 命中已有 `tier=candidate` 节点时同样拒绝，`data.reason=slug_conflict_candidate`，不更新已有候选。更新已有候选留到批准流落地后再放开。
 - **去重**：第一阶段用 slug 冲突，加归一化正文哈希精确去重（NFKC、折叠空白、小写后取 sha256）；正文哈希命中已存在候选时拒绝，`data.reason=content_duplicate`。向量相似度去重等 pgvector 落地后再加。
 - **证据必填**：`evidence` 直接复用现有 `SourceRef` 形状（`type` / `ref` / `device` / `captured_at`，与 frontmatter 的 `source` 同形，定义见 `src/memhub/contract/models.py`），不新造简写字符串格式。缺失或校验失败返回 `400/1003`，`data.reason` 细分为 `evidence_missing` / `evidence_invalid`。
+- **证据的校验边界**：第一阶段只做两层校验，不承诺服务端能解析原文。一是结构校验：非空数组，每项按 `SourceRef` 校验，`type` 属枚举、`ref` 非空、`captured_at` 带时区。二是归属校验：`ref` 拒绝绝对路径与 `../` 穿越，拒绝指向凭据授权范围之外的库；写入前对 `ref` 做敏感串扫描（token/密钥形态）直接拒绝，避免把凭据带进真源。**不做**可解析性校验：session 类来源的原文在客户端，服务端只有上传过的片段，`raw_store` 还会按保留期清理，要求 ref 在服务端存在会误杀正常写入。因此 evidence 在第一阶段的定位是「可追溯的声明」——能回答谁、哪台设备、什么时间、哪份文件，供人复核，但不保证服务端能重放原文。
 - **内容门槛**：同一凭据加每日写入上限；入口复用 `prompts/sessions.md` 的「明确忽略」判定（寒暄、进度汇报、重复确认、原始日志、只对当前任务成立的临时状态、未验证猜测）直接拒绝，而不是写进去再清理。
 - **提交与审计**：每次写成功自动 git commit，message 含工具名与调用者；调用者标识取自凭据登记本身，不取请求体里自报的字段。审计只记凭据摘要、库、节点 id、工具、结果与时间，不含正文与 token。
 - **可见性**：候选默认不进 `kb_search` 的 canonical 结果（维持现有默认 `tier=canonical`），需要显式传 `candidate` 或 `all` 才能看到。
@@ -32,6 +33,7 @@ canonical 修改（`kb_propose_change`）、合并（`kb_merge`）、废弃（`k
 - 先上向量去重再开写候选：依赖暂停中的 pgvector 方案，会把写工具和向量检索绑在同一条关键路径上。
 - 只靠「最坏只是候选区多几条」不设限：候选区会被灌满，治理成本转嫁给后续清理。
 - 复用草案里的 `"session:...#L420-L455"` 简写作为 evidence：会形成第二套来源格式，与真源 frontmatter 的 `source` 不一致。
+- 第一阶段就要求引用级证据（在正文里挂固定格式的摘录）：session 原文在客户端，服务端只有上传过的片段；raw 按保留期清理，强行要求可解析会误杀正常写入。引用级证据要等批准流落地后，作为第二阶段的一部分，与正文哈希去重一起重新设计。
 
 ## 后果
 
@@ -39,3 +41,4 @@ canonical 修改（`kb_propose_change`）、合并（`kb_merge`）、废弃（`k
 - 候选区可能积累低质条目，但有 slug 冲突、正文哈希去重、每日上限和入口内容门槛四道限制。
 - 写候选成功即产生 git commit，回滚粒度是单个节点；canonical 不受影响。
 - 待办：批准流落点（管理台或 CLI）、向量去重、`mcp:write` 凭据签发方式，需在放开治理组前确定。
+- 第一阶段的 evidence 不能保证原文可追溯：session 类来源的原文在客户端，`raw_store` 按保留期清理。如果需要引用级证据（能核到具体段落），要等批准流落地后作为第二阶段的一部分，与正文哈希去重一起重新设计。
