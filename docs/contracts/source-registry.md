@@ -1,6 +1,6 @@
 # 本地源注册表 `sources.json`
 
-> 版本: 0.2
+> 版本: 0.3
 > 由桌面端（agent-console）写入，采集器只读。位置：Windows `%APPDATA%\memhub\sources.json`，macOS `~/Library/Application Support/memhub/sources.json`，Linux `~/.config/memhub/sources.json`。
 > 适用范围：`sources.json` 的结构、字段、写入约定与采集器行为。
 > 不负责：采集传输协议（见 [ingest-api.md](ingest-api.md)）、知识节点枚举（见 [node-schema.md](node-schema.md)）。
@@ -25,7 +25,7 @@
       "path": "C:\\Users\\Applesay024\\.claude\\projects",
       "file_glob": "**/*.jsonl",
       "enabled": true,
-      "project": "auto",
+      "project": "example-kb",
       "exclude": ["**/subagents/**"],
       "scan_interval_sec": 300
     },
@@ -36,7 +36,7 @@
       "path": "D:\\workplace\\export_memhub\\me\\wiki",
       "file_glob": "**/*.md",
       "enabled": true,
-      "project": "auto"
+      "project": "example-kb"
     }
   ]
 }
@@ -57,7 +57,7 @@
 | `sources[].path` | ✓ | 绝对路径；manifest 外路径由桌面端在 UI 里让用户选 |
 | `sources[].file_glob` | | 默认按 type：sessions→`**/*.jsonl`，wiki/docs→`**/*.md` |
 | `sources[].enabled` | | 默认 true |
-| `sources[].project` | | 该目录的内容沉淀到哪个知识库（真源一级目录名）。**由桌面端 UI 让用户选**：从 `GET /api/v1/ingest/projects` 拉已有知识库，或 `POST /api/v1/ingest/projects` 新建；写配置时即按知识库 id 规则校验。`auto`（默认）表示不指定，服务端回退到 `source_id`（每个源一个库） |
+| `sources[].project` | ✓ | 用户明确选择的目标知识库 ID。桌面端从带 `writable_only:true` 的 `GET /api/v1/ingest/projects` 选用已授权目标，或通过 `POST /api/v1/ingest/projects` 新建已预授权的库。按知识库 ID 规则校验，禁止缺失、空白与 `auto`；采集器原样上报，不推断、不回退。 |
 | `sources[].exclude` | | glob 排除列表 |
 | `sources[].scan_interval_sec` | | 覆盖全局 |
 
@@ -71,7 +71,7 @@
 
 ## 4. 采集器行为
 
-1. 读取 `sources.json`；对每个 enabled 源，按 `file_glob` 扫目录。
+1. 读取 `sources.json`；仅扫描保存且启用的源。旧配置缺失目标或使用 `auto` 时仅暂停该源，提示用户选库，不影响其他源；选库列表缺少 `writable_only:true` 时不将其视为授权列表。
 2. 与云端对齐游标：`GET /ingest/cursor?device_id=..&source_id=..`（带 Bearer）。
 3. 对本机 `state/<source_id>.json` 与云端游标取**较新者**（换机/重装后以云端为准，避免重推）。
 4. 增量提取按文件追加语义：sessions 用 `(path, byte_offset)`，wiki 用 `(path, mtime, sha256)`。

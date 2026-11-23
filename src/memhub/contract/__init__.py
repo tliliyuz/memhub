@@ -23,8 +23,7 @@ from memhub.contract.models import (
     SourceRef,
     SourcesConfig,
     Tier,
-    resolve_project,
-    sanitize_kb_id,
+    explicit_project,
     valid_project,
 )
 
@@ -51,7 +50,6 @@ __all__ = [
     "SourceRef",
     "SourcesConfig",
     "Tier",
-    "resolve_project",
-    "sanitize_kb_id",
+    "explicit_project",
     "valid_project",
 ]

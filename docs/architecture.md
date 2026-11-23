@@ -55,7 +55,7 @@
 - 崩溃恢复：state 文件原子写；未确认批次重推（服务端按 batch_id 幂等）。
 
 ### ingest-api（服务端）
-- 鉴权、游标、幂等、限流、落 raw_store、入队。
+- 先验证设备凭据，再检查显式目标的登记、活动状态和设备授权；通过后才可能落 raw_store 或推进游标。
 - 只做校验，不做 LLM 调用，响应 <200ms。
 
 ### queue（跨模块落盘与配额，非独立进程）
@@ -64,14 +64,8 @@
 - 放在 `queue/` 而不是 `ingest/`：上传入口不该依赖采集协议层（鉴权、游标、<200ms 约束）；鉴权、游标校验与错误码映射留在各自路由层，这里只做与协议无关的落盘与计量。
 
 ### worker（服务端，单机串行 + 少量并发）
-```
-raw 片段 ──► value_filter ──► extract ──► merge ──► git commit ──► rebuild
-              cheap model     per-type      id/slug/向量合并
-              (丢弃无价值)     prompt       冲突 → contradicts 待治理
-```
-- value_filter 与 extract 用不同模型/不同 prompt profile（sessions / wiki / docs）。
-- 抽取按文档分节，单次输出 ≤6000 字符（实测截断阈值）。
-- merge 幂等：同一来源片段重复提炼不产生重复节点。
+- 先确认队列来源和目标授权，再按类型抽取；写入锁内再次确认。明确不合规的队列项隔离，暂不能核验时留队。管理台凭据不与设备授权混用。
+- 会话只从有出处的对话提炼候选，允许零结果；文档和 wiki 继续走文档提炼管线。实际合并后 Markdown 为真源，投影可重建。
 
 ### kb-api
 - 检索：FTS + 向量 + 图邻接，三路融合；默认 `tier=canonical`。

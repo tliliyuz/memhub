@@ -21,6 +21,7 @@ import pytest_asyncio
 
 from memhub.contract import BatchFile, Cursor, IngestRequest
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
+from memhub.queue.rawstore import BatchTargetConflict
 
 NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
 DEVICE = str(uuid.uuid4())
@@ -39,6 +40,7 @@ def _batch(
         device_id=DEVICE,
         source_id="cc-sessions",
         source_type="sessions",
+        project="example-kb",
         source_rev=source_rev,
         files=[
             BatchFile(
@@ -110,6 +112,19 @@ async def test_same_batch_is_replay_within_window(store: StateStore) -> None:
     assert first.replayed is False
     assert second.replayed is True
     assert (second.accepted, second.duplicates) == (first.accepted, first.duplicates)
+
+
+async def test_replay_cannot_retarget_batch(store: StateStore) -> None:
+    request = _batch()
+    await store.apply(request)
+    redirected = request.model_copy(update={"project": "other-kb", "files": []})
+    with pytest.raises(BatchTargetConflict):
+        await store.check_replay_target(redirected)
+    with pytest.raises(BatchTargetConflict):
+        await store.apply(redirected)
+    replay = await store.check_replay_target(request)
+    assert replay is not None and replay.replayed
+    assert "_project" not in replay.model_dump()
 
 
 async def test_offset_rollback_is_conflict(store: StateStore) -> None:

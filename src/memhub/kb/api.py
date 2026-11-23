@@ -43,6 +43,7 @@ from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, Questi
 from memhub.kb import archive, catalog, manage, proc, query
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
+from memhub.kb.target_access import TargetUnavailable, registered_active
 from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
 from memhub.mcp.auth import load_grants
 from memhub.mcp.http import McpEndpoint
@@ -596,11 +597,14 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any] | JSONResponse:
         if uploads is None:
             return _uploads_unavailable()
-        return await uploads.accept(
-            project,
-            files,
-            project_exists=lambda kb_id: catalog.exists(api.store, kb_id),
-        )
+        try:
+            return await uploads.accept(
+                project,
+                files,
+                project_exists=lambda kb_id: registered_active(api.store, kb_id),
+            )
+        except TargetUnavailable as exc:
+            raise UploadInvalid("暂无法验证知识库目标，请稍后重试", status=503) from exc
 
     @app.get("/api/v1/kb/uploads/{batch_id}", response_model=None)
     async def upload_status(batch_id: str) -> dict[str, Any] | JSONResponse:

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from memhub.contract import Cursor, FileCursor, IngestRequest, IngestResult
+from memhub.queue.rawstore import BatchTargetConflict
 
 REPLAY_WINDOW = timedelta(hours=24)
 
@@ -42,6 +43,10 @@ class StateStore(Protocol):
 
     async def cursor_summary(self, device_id: str, source_id: str) -> Cursor: ...
 
+    async def check_replay_target(self, request: IngestRequest) -> IngestResult | None:
+        """验证已接收批次的目标，并返回仍在重放窗口内的结果。"""
+        ...
+
     async def apply(self, request: IngestRequest) -> IngestResult:
         """落一批增量：幂等重放、游标冲突、去重、更新游标，一次事务完成。"""
         ...
@@ -59,6 +64,7 @@ class SourceState:
 class ReplayedBatch:
     at: datetime
     result: IngestResult
+    project: str | None = None
 
 
 class MemoryStore:
@@ -91,6 +97,14 @@ class MemoryStore:
         return Cursor(files=len(state.files), bytes=state.total_bytes, last_at=state.last_at)
 
     # -- ingest ----------------------------------------------------------
+    async def check_replay_target(self, request: IngestRequest) -> IngestResult | None:
+        previous = self.batches.get((request.device_id, request.batch_id))
+        if previous is None or datetime.now(UTC) - previous.at >= REPLAY_WINDOW:
+            return None
+        if previous.project is None or previous.project != request.project:
+            raise BatchTargetConflict()
+        return previous.result.model_copy(update={"replayed": True})
+
     async def apply(
         self,
         request: IngestRequest,
@@ -99,9 +113,9 @@ class MemoryStore:
     ) -> IngestResult:
         key = (request.device_id, request.batch_id)
         now = datetime.now(UTC)
-        previous = self.batches.get(key)
-        if previous is not None and now - previous.at < REPLAY_WINDOW:
-            return previous.result.model_copy(update={"replayed": True})
+        previous = await self.check_replay_target(request)
+        if previous is not None:
+            return previous
 
         state = self.sources.setdefault((request.device_id, request.source_id), SourceState())
         reset_allowed = request.source_rev > state.source_rev
@@ -149,7 +163,7 @@ class MemoryStore:
             duplicates=duplicates,
             cursor=await self.cursor_summary(request.device_id, request.source_id),
         )
-        self.batches[key] = ReplayedBatch(at=now, result=result)
+        self.batches[key] = ReplayedBatch(at=now, result=result, project=request.project)
         return result
 
 

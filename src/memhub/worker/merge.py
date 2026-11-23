@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from memhub.contract import (
     Edge,
@@ -22,6 +25,7 @@ from memhub.contract import (
 )
 from memhub.kb.manage import guard_project_write, write_lock
 from memhub.kb.store import KnowledgeStore
+from memhub.kb.target_access import TargetUnavailable
 from memhub.worker.schema import ExtractedNode, Extraction
 
 
@@ -37,6 +41,17 @@ class MergeReport:
         return len(self.created) + len(self.updated)
 
 
+@asynccontextmanager
+async def target_write_lock(root: Path, *, timeout: float) -> AsyncIterator[None]:
+    """读不到锁或事务标记时暂缓处理，不把输入当成坏记录。"""
+    async with AsyncExitStack() as stack:
+        try:
+            await stack.enter_async_context(write_lock(root, timeout=timeout))
+        except OSError as exc:
+            raise TargetUnavailable("write_lock_unavailable") from exc
+        yield
+
+
 async def merge(
     store: KnowledgeStore,
     extraction: Extraction,
@@ -45,13 +60,18 @@ async def merge(
     source: SourceRef,
     now: datetime | None = None,
     lock_timeout: float = 10.0,
+    check_target: Callable[[], Awaitable[None]] | None = None,
 ) -> MergeReport:
     moment = now or datetime.now(UTC)
     report = MergeReport()
     slug_to_id: dict[str, str] = {}
 
-    async with write_lock(store.root, timeout=lock_timeout):
-        await guard_project_write(store.root, project)
+    lock = target_write_lock if check_target is not None else write_lock
+    async with lock(store.root, timeout=lock_timeout):
+        if check_target is None:
+            await guard_project_write(store.root, project)
+        else:
+            await check_target()
         for node in extraction.nodes:
             node_id = f"{project}/{node.kind.value}/{node.slug}"
             slug_to_id[node.slug] = node_id

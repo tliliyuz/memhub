@@ -36,9 +36,8 @@ from memhub.ingest.models import (
 from memhub.ingest.models import (
     FileCursor as FileCursorRow,
 )
-from memhub.ingest.store import CursorConflict
-
-REPLAY_WINDOW = timedelta(hours=24)
+from memhub.ingest.store import REPLAY_WINDOW, CursorConflict
+from memhub.queue.rawstore import BatchTargetConflict
 
 
 def _async_dsn(dsn: str) -> str:
@@ -166,6 +165,28 @@ class PostgresStore:
         return Cursor(files=int(row[0]), bytes=int(row[1]), last_at=last_at)
 
     # -- ingest ----------------------------------------------------------
+    async def _check_replay_target(
+        self, session: AsyncSession, request: IngestRequest, now: datetime
+    ) -> IngestResult | None:
+        previous = (
+            await session.execute(
+                select(Batch.received_at, Batch.result).where(
+                    Batch.device_id == request.device_id, Batch.batch_id == request.batch_id
+                )
+            )
+        ).first()
+        if previous is None or now - previous.received_at >= REPLAY_WINDOW:
+            return None
+        payload = dict(previous.result)
+        project = payload.pop("_project", None)
+        if project is None or project != request.project:
+            raise BatchTargetConflict()
+        return IngestResult.model_validate(payload).model_copy(update={"replayed": True})
+
+    async def check_replay_target(self, request: IngestRequest) -> IngestResult | None:
+        async with self.sessions() as session:
+            return await self._check_replay_target(session, request, datetime.now(UTC))
+
     async def apply(self, request: IngestRequest) -> IngestResult:
         now = datetime.now(UTC)
         async with self.sessions() as session, session.begin():
@@ -176,17 +197,9 @@ class PostgresStore:
                     )
                 )
             )
-            previous = (
-                await session.execute(
-                    select(Batch.received_at, Batch.result).where(
-                        Batch.device_id == request.device_id,
-                        Batch.batch_id == request.batch_id,
-                    )
-                )
-            ).first()
-            if previous is not None and now - previous.received_at < REPLAY_WINDOW:
-                replayed = IngestResult.model_validate(previous.result)
-                return replayed.model_copy(update={"replayed": True})
+            previous = await self._check_replay_target(session, request, now)
+            if previous is not None:
+                return previous
 
             await session.execute(
                 pg_insert(Source)
@@ -279,7 +292,8 @@ class PostgresStore:
                 duplicates=duplicates,
                 cursor=await self._cursor_summary(session, request.device_id, request.source_id),
             )
-            payload = result.model_dump(mode="json")
+            # 内部目标绑定保存在现有 JSONB 列，不改变公开结果或数据库结构。
+            payload = result.model_dump(mode="json") | {"_project": request.project}
             await session.execute(
                 pg_insert(Batch)
                 .values(

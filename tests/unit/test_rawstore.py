@@ -12,6 +12,7 @@ from anyio import Path as AsyncPath
 
 from memhub.contract import BatchFile, IngestRequest
 from memhub.queue.rawstore import (
+    BatchTargetConflict,
     QuotaExceeded,
     RawStoreQuota,
     batch_dir,
@@ -24,7 +25,11 @@ NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
 
 
 def _request(
-    content: str, *, path: str = "sessions/a.jsonl", device: str = "dev-1", project: str = "auto"
+    content: str,
+    *,
+    path: str = "sessions/a.jsonl",
+    device: str = "dev-1",
+    project: str = "example-kb",
 ) -> IngestRequest:
     return IngestRequest(
         batch_id="b-1",
@@ -55,7 +60,8 @@ async def test_writes_content_addressed_file(tmp_path: Path) -> None:
     assert payload["content"] == "hello"
     assert payload["path"] == "sessions/a.jsonl"
     assert payload["mtime"] == NOW.isoformat()
-    assert payload["project"] == "auto"
+    assert payload["project"] == "example-kb"
+    assert payload["producer"] == "collector"
 
 
 async def test_project_travels_with_the_payload(tmp_path: Path) -> None:
@@ -73,11 +79,39 @@ async def test_second_push_of_same_content_is_noop(tmp_path: Path) -> None:
     assert await save_batch(tmp_path, _request("hello", path="sessions/copy.jsonl")) == 0
 
 
+async def test_target_change_does_not_adopt_old_content(tmp_path: Path) -> None:
+    before = _request("hello", project="first")
+    after = _request("hello", project="second").model_copy(update={"batch_id": "b-2"})
+    await save_batch(tmp_path, before)
+    with pytest.raises(BatchTargetConflict):
+        await save_batch(tmp_path, after)
+
+
+async def test_processed_hash_cannot_be_sent_to_another_target(tmp_path: Path) -> None:
+    request = _request("hello", project="first")
+    await save_batch(tmp_path, request)
+    raw = next((tmp_path / "raw_store").rglob("*.json"))
+    processed = tmp_path / "processed_raw" / raw.relative_to(tmp_path / "raw_store")
+    processed.parent.mkdir(parents=True)
+    raw.replace(processed)
+    with pytest.raises(BatchTargetConflict):
+        await save_batch(tmp_path, _request("hello", project="second"))
+    assert await save_batch(tmp_path, request) == 0
+
+
 async def test_unsafe_ids_cannot_escape_the_data_dir(tmp_path: Path) -> None:
     await save_batch(tmp_path, _request("hello", device="../../etc"))
     root = (tmp_path / "raw_store").resolve()
     async for item in AsyncPath(root).rglob("*.json"):
         assert root in Path(item).resolve().parents
+
+
+@pytest.mark.parametrize("source_id", ["", ".", ".."])
+async def test_invalid_queue_component_is_not_written(tmp_path: Path, source_id: str) -> None:
+    request = _request("synthetic").model_copy(update={"source_id": source_id})
+    with pytest.raises(BatchTargetConflict):
+        await save_batch(tmp_path, request)
+    assert not (tmp_path / "raw_store").exists()
 
 
 async def test_failed_write_leaves_no_tmp_files(tmp_path: Path) -> None:

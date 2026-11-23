@@ -17,11 +17,16 @@ from memhub.kb import archive, manage, proc
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
-from memhub.worker.extract import ExtractionFailed, extract_document
+from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
 from memhub.worker.llm import AnthropicClient, LLMError
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
-from memhub.worker.render import render_jsonl
+from memhub.worker.render import (
+    render_jsonl,
+    render_plaintext_blocks,
+    render_session_blocks,
+    truncate_blocks,
+)
 
 SKELETON_PAGES = {"schema.md", "log.md", "purpose.md"}
 DEVICE_ID_RE = re.compile(
@@ -205,21 +210,44 @@ async def _ingest(args: argparse.Namespace) -> int:
     try:
         for path in files:
             raw = await AsyncPath(path).read_text(encoding="utf-8", errors="replace")
-            text = render_jsonl(raw) if path.suffix == ".jsonl" else raw
-            if args.max_input_chars:
-                text = text[: args.max_input_chars]
-            if not text.strip():
-                print(f"  skip {path.name}: 无可抽取文本")
-                continue
             try:
-                extraction = await extract_document(
-                    client,
-                    template=template,
-                    path=path.name,
-                    text=text,
-                    model=model,
-                    max_chars=args.max_chars,
-                )
+                if args.profile == "sessions":
+                    blocks = (
+                        render_session_blocks(raw)
+                        if path.suffix.lower() == ".jsonl"
+                        else render_plaintext_blocks(raw)
+                    )
+                    if args.max_input_chars:
+                        blocks = truncate_blocks(blocks, args.max_input_chars)
+                    if not blocks:
+                        print(f"  skip {path.name}: 无可抽取文本")
+                        continue
+                    extraction = await extract_session(
+                        client,
+                        template=template,
+                        path=path.name,
+                        blocks=blocks,
+                        model=model,
+                        max_chars=args.max_chars,
+                    )
+                    if not extraction.nodes:
+                        print(f"  skip {path.name}: 无可合并的会话证据")
+                        continue
+                else:
+                    text = render_jsonl(raw) if path.suffix == ".jsonl" else raw
+                    if args.max_input_chars:
+                        text = text[: args.max_input_chars]
+                    if not text.strip():
+                        print(f"  skip {path.name}: 无可抽取文本")
+                        continue
+                    extraction = await extract_document(
+                        client,
+                        template=template,
+                        path=path.name,
+                        text=text,
+                        model=model,
+                        max_chars=args.max_chars,
+                    )
             except (ExtractionFailed, LLMError) as exc:
                 failed += 1
                 print(f"  FAIL {path.name}: {exc}", file=sys.stderr)
@@ -425,6 +453,13 @@ async def _worker(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    # 数据库迁移由 ingest 负责；worker 只查设备登记。
+    # 独立进程的内存状态无法感知 ingest 登记的设备。
+    state = None
+    if os.environ.get("MEMHUB_DB_URL"):
+        from memhub.ingest.app import build_store
+
+        state = build_store()
     client, model = _llm_client()
     config = WorkerConfig(
         data_dir=Path(data_dir),
@@ -435,6 +470,7 @@ async def _worker(args: argparse.Namespace) -> int:
         window_tz=window_tz,
         interval=args.interval,
         limit=args.limit,
+        is_registered=state.is_registered if state is not None else None,
     )
     try:
         if args.once:
@@ -442,7 +478,12 @@ async def _worker(args: argparse.Namespace) -> int:
             return 1 if report.failed else 0
         return await run_forever(client, config)
     finally:
-        await client.aclose()
+        try:
+            await client.aclose()
+        finally:
+            close = getattr(state, "close", None)
+            if close is not None:
+                await close()
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}

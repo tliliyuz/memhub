@@ -15,8 +15,11 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import BatchFile, IngestRequest
-from memhub.kb import manage
-from memhub.queue.rawstore import save_batch
+from memhub.ingest.store import MemoryStore
+from memhub.kb import catalog, manage
+from memhub.kb.store import KnowledgeStore
+from memhub.kb.target_access import TargetPolicy
+from memhub.queue.rawstore import batch_dir, save_batch
 from memhub.worker.daemon import (
     RoundReport,
     WorkerConfig,
@@ -33,6 +36,7 @@ from memhub.worker.daemon import (
 from memhub.worker.llm import LLMError
 
 NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
+EVIDENCE = "网络重试需要指数退避。"
 
 LLM_REPLY = json.dumps(
     {
@@ -42,6 +46,7 @@ LLM_REPLY = json.dumps(
                 "slug": "retry-backoff",
                 "title": "重试需要退避",
                 "body": "失败后指数退避，避免打爆下游。",
+                "evidence": [{"block": "b0001", "quote": EVIDENCE}],
             }
         ],
         "edges": [],
@@ -73,24 +78,42 @@ def _session_line(text: str) -> str:
 
 
 async def _config(tmp_path: Path, **kwargs: object) -> WorkerConfig:
-    await AsyncPath(tmp_path / "knowledge").mkdir(exist_ok=True)
+    knowledge_dir = tmp_path / "knowledge"
+    projects = ["cc-sessions", "sdp-tag", "archived", "active", "demo"]
+    for project in projects:
+        await catalog.create_kb(KnowledgeStore(knowledge_dir), kb_id=project)
+    state = MemoryStore()
+    await state.register_device("dev-1")
+    grants_path = tmp_path / "config" / "ingest-grants.json"
+    await AsyncPath(grants_path.parent).mkdir()
+    await AsyncPath(grants_path).write_text(json.dumps({"devices": {"dev-1": projects}}))
+    kwargs.setdefault("is_registered", state.is_registered)
+    kwargs.setdefault("target_policy", TargetPolicy(knowledge_dir, grants_path))
     return WorkerConfig(
         data_dir=tmp_path,
-        knowledge_dir=tmp_path / "knowledge",
+        knowledge_dir=knowledge_dir,
         model="test-model",
         **kwargs,  # type: ignore[arg-type]
     )
 
 
 async def _push(
-    tmp_path: Path, content: str, *, path: str = "sessions/a.jsonl", project: str = "auto"
-) -> None:
+    tmp_path: Path,
+    content: str,
+    *,
+    path: str = "sessions/a.txt",
+    project: str = "cc-sessions",
+    device_id: str = "dev-1",
+    source_id: str = "cc-sessions",
+    source_type: str = "sessions",
+    legacy: bool = False,
+) -> Path:
     sha = hashlib.sha256(content.encode()).hexdigest()
     request = IngestRequest(
         batch_id=f"b-{sha[:6]}",
-        device_id="dev-1",
-        source_id="cc-sessions",
-        source_type="sessions",
+        device_id=device_id,
+        source_id=source_id,
+        source_type=source_type,
         project=project,
         files=[
             BatchFile(
@@ -103,7 +126,23 @@ async def _push(
             )
         ],
     )
-    await save_batch(tmp_path, request)
+    target = batch_dir(tmp_path, device_id, source_id) / sha[:2] / f"{sha}.json"
+    if legacy:
+        # Seed the former raw envelope directly: the current producer rejects old ambiguous inputs.
+        await AsyncPath(target.parent).mkdir(parents=True, exist_ok=True)
+        payload = {
+            **request.model_dump(
+                mode="json",
+                include={"batch_id", "device_id", "source_id", "source_type", "project"},
+            ),
+            **request.files[0].model_dump(mode="json"),
+        }
+        await AsyncPath(target).write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        await save_batch(
+            tmp_path, request, producer="console" if device_id == "kb-console" else "collector"
+        )
+    return target
 
 
 def _sleeper(sleeps: list[float]) -> Callable[[float], Awaitable[None]]:
@@ -181,7 +220,7 @@ async def test_iter_pending_skips_processed(tmp_path: Path) -> None:
 
 
 async def test_round_extracts_and_marks_processed(tmp_path: Path) -> None:
-    await _push(tmp_path, _session_line("用户说：网络重试需要退避。"))
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
     config = await _config(tmp_path)
     client = FakeClient()
     report = await run_round(client, config)
@@ -205,7 +244,7 @@ async def test_meta_only_session_is_not_sent_to_the_model(tmp_path: Path) -> Non
         },
         ensure_ascii=False,
     )
-    await _push(tmp_path, line)
+    await _push(tmp_path, line, path="sessions/a.jsonl")
     config = await _config(tmp_path)
     client = FakeClient()
 
@@ -215,17 +254,16 @@ async def test_meta_only_session_is_not_sent_to_the_model(tmp_path: Path) -> Non
     assert client.calls == 0, "没有真实对话就不该调用模型"
 
 
-async def test_archived_inputs_stay_queued_without_starving_active_projects(tmp_path: Path) -> None:
+async def test_archived_inputs_quarantined_without_starving_active_projects(tmp_path: Path) -> None:
     await _push(tmp_path, "blocked", project="archived")
     config = await _config(tmp_path, limit=1, max_attempts=2)
     [blocked] = await iter_pending(config.raw_root, config.processed_root)
     original = await AsyncPath(blocked).read_bytes()
-    # 已有一次抽取失败：归档推迟不能把这条记录推进隔离区。
     attempts = {str(blocked.relative_to(config.raw_root)): 1}
     await AsyncPath(config.failures_path.parent).mkdir(parents=True, exist_ok=True)
     await AsyncPath(config.failures_path).write_text(json.dumps(attempts), encoding="utf-8")
     await _set_mtime(blocked, 1)
-    await _push(tmp_path, "healthy", project="active")
+    await _push(tmp_path, EVIDENCE, project="active")
     marker = AsyncPath(config.knowledge_dir / "_kb_archives" / "blocked" / "archived")
     await marker.parent.mkdir(parents=True)
     await marker.touch()
@@ -235,15 +273,12 @@ async def test_archived_inputs_stay_queued_without_starving_active_projects(tmp_
 
     assert (report.processed, report.failed, report.created) == (1, 0, 1)
     assert client.calls == 1
-    assert await iter_pending(config.raw_root, config.processed_root) == [blocked]
-    assert await AsyncPath(blocked).read_bytes() == original
-    assert not await AsyncPath(config.pending_root).exists()
-    assert json.loads(await AsyncPath(config.failures_path).read_text(encoding="utf-8")) == attempts
-    assert not await AsyncPath(config.knowledge_dir / "archived").exists()
-
-    await marker.unlink()
-    assert (await run_round(client, config)).processed == 1
+    assert report.quarantined == 1
+    assert report.errors == ["target_inactive"]
     assert await iter_pending(config.raw_root, config.processed_root) == []
+    assert (config.pending_root / blocked.relative_to(config.raw_root)).read_bytes() == original
+    assert json.loads(config.failures_path.read_text(encoding="utf-8")) == {}
+    assert not list((config.knowledge_dir / "archived").iterdir())
 
 
 @pytest.mark.parametrize(
@@ -252,7 +287,8 @@ async def test_archived_inputs_stay_queued_without_starving_active_projects(tmp_
 async def test_archive_started_during_extraction_blocks_worker_merge(
     tmp_path: Path, archive_state: str
 ) -> None:
-    await _push(tmp_path, "input", project="demo")
+    raw = await _push(tmp_path, EVIDENCE, project="demo")
+    original = raw.read_bytes()
     config = await _config(tmp_path, max_attempts=1)
     marker = AsyncPath(config.knowledge_dir / archive_state)
 
@@ -268,10 +304,16 @@ async def test_archive_started_during_extraction_blocks_worker_merge(
 
     assert client.calls == 1
     assert (report.processed, report.failed, report.created) == (0, 0, 0)
-    assert len(await iter_pending(config.raw_root, config.processed_root)) == 1
-    assert not await AsyncPath(config.knowledge_dir / "demo").exists()
-    assert not await AsyncPath(config.failures_path).exists()
-    assert not await AsyncPath(config.pending_root).exists()
+    assert not list((config.knowledge_dir / "demo").iterdir())
+    assert not config.failures_path.exists()
+    if archive_state.endswith("pending.json"):
+        assert not config.pending_root.exists()
+        assert raw.read_bytes() == original
+        assert report.quarantined == 0
+    else:
+        assert not raw.exists()
+        assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
+        assert report.errors == ["target_inactive"]
     # 已知日志或标记存在时不应再次付费抽取。
     assert (await run_round(client, config)).processed == 0
     assert client.calls == 1
@@ -294,7 +336,7 @@ async def test_busy_writer_defers_worker_before_extraction(tmp_path: Path) -> No
 
 async def test_round_passes_configured_max_tokens(tmp_path: Path) -> None:
     """输出预算必须从 WorkerConfig 透传到 LLM 调用（MEMHUB_LLM_MAX_TOKENS 的落点）。"""
-    await _push(tmp_path, _session_line("用户说：网络重试需要退避。"))
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
     config = await _config(tmp_path, max_tokens=12345)
     client = FakeClient()
 
@@ -304,7 +346,7 @@ async def test_round_passes_configured_max_tokens(tmp_path: Path) -> None:
 
 async def test_round_writes_into_the_project_chosen_by_the_client(tmp_path: Path) -> None:
     """桌面端按目录选了知识库，worker 必须写进 knowledge/<project>/。"""
-    await _push(tmp_path, _session_line("用户说：sdp-tag 用标签页拖拽。"), project="sdp-tag")
+    await _push(tmp_path, EVIDENCE, project="sdp-tag", legacy=True)
     config = await _config(tmp_path)
 
     assert (await run_round(FakeClient(), config)).processed == 1
@@ -314,28 +356,213 @@ async def test_round_writes_into_the_project_chosen_by_the_client(tmp_path: Path
     assert parts[0] == "sdp-tag", "选了库就不能再写到 source_id 目录下"
 
 
-async def test_auto_project_falls_back_to_source_id(tmp_path: Path) -> None:
-    """旧批次/没选库时保持原行为：knowledge/<source_id>/。"""
-    await _push(tmp_path, _session_line("用户说：网络重试需要退避。"))
+@pytest.mark.parametrize("project", ["auto", "../../etc"])
+async def test_legacy_ambiguous_or_invalid_target_is_quarantined(
+    tmp_path: Path, project: str
+) -> None:
+    await _push(tmp_path, _session_line("private session material"), project=project, legacy=True)
     config = await _config(tmp_path)
+    [raw] = await iter_pending(config.raw_root, config.processed_root)
+    original = raw.read_bytes()
+    client = FakeClient()
 
-    assert (await run_round(FakeClient(), config)).processed == 1
-    files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
-    parts = Path(files[0]).relative_to(config.knowledge_dir).parts
-    assert parts[0] == "cc-sessions"
+    report = await run_round(client, config)
+
+    assert client.calls == 0
+    assert (report.processed, report.created) == (0, 0)
+    assert not raw.exists()
+    assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
+    assert not config.processed_root.exists()
+    assert not list((config.knowledge_dir / "cc-sessions").iterdir())
+    assert report.errors == ["project_required"]
+    assert not config.failures_path.exists()
 
 
-async def test_bad_project_cannot_escape_knowledge_dir(tmp_path: Path) -> None:
-    """project 直接做目录名；旧批次/恶意值不能把文件写到真源之外。"""
-    await _push(tmp_path, _session_line("用户说：越界测试。"), project="../../etc")
+async def test_unapproved_target_even_with_no_session_text_is_not_processed(tmp_path: Path) -> None:
+    await _push(tmp_path, "", project="auto", legacy=True)
     config = await _config(tmp_path)
+    client = FakeClient()
 
-    assert (await run_round(FakeClient(), config)).processed == 1
-    root = config.knowledge_dir.resolve()
-    files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
-    assert files
-    for item in files:
-        assert root in Path(item).resolve().parents
+    assert (await run_round(client, config)).processed == 0
+    assert client.calls == 0
+    assert len(list(config.pending_root.rglob("*.json"))) == 1
+    assert not config.processed_root.exists()
+
+
+async def test_legacy_unknown_device_is_not_authorized_by_explicit_project(tmp_path: Path) -> None:
+    await _push(tmp_path, "private session material", device_id="unknown", legacy=True)
+    config = await _config(tmp_path)
+    client = FakeClient()
+
+    assert (await run_round(client, config)).processed == 0
+    assert client.calls == 0
+    assert len(list(config.pending_root.rglob("*.json"))) == 1
+    assert not (config.knowledge_dir / "unapproved").exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_console_is_independent_of_device_registry_and_grants(
+    tmp_path: Path, legacy: bool
+) -> None:
+    await _push(tmp_path, EVIDENCE, device_id="kb-console", source_type="docs", legacy=legacy)
+    config = await _config(tmp_path, is_registered=None)
+    (tmp_path / "config" / "ingest-grants.json").unlink()
+    # Wiki extraction is deliberately unchanged and does not require session evidence.
+    reply = json.loads(LLM_REPLY)
+    del reply["nodes"][0]["evidence"]
+    client = FakeClient(reply=json.dumps(reply))
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.created, client.calls) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("marker", ["rogue", None, {}])
+async def test_present_unknown_producer_is_not_legacy(tmp_path: Path, marker: object) -> None:
+    raw = await _push(tmp_path, EVIDENCE, device_id="kb-console", source_type="docs")
+    payload = json.loads(raw.read_text(encoding="utf-8"))
+    payload["producer"] = marker
+    raw.write_text(json.dumps(payload), encoding="utf-8")
+    config = await _config(tmp_path)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.quarantined, client.calls) == (0, 1, 0)
+    assert report.errors == ["producer_unrecognized"]
+
+
+async def test_legacy_console_identity_requires_source_equal_to_project(tmp_path: Path) -> None:
+    await _push(
+        tmp_path, EVIDENCE, project="demo", device_id="kb-console", source_type="docs", legacy=True
+    )
+    config = await _config(tmp_path)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.quarantined, client.calls) == (0, 1, 0)
+    assert report.errors == ["console_identity_invalid"]
+
+
+async def test_queue_path_identity_mismatch_is_permanent_denial(tmp_path: Path) -> None:
+    raw = await _push(tmp_path, EVIDENCE)
+    payload = json.loads(raw.read_text(encoding="utf-8"))
+    payload["source_id"] = "different-source"
+    raw.write_text(json.dumps(payload), encoding="utf-8")
+    config = await _config(tmp_path)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.quarantined, client.calls) == (0, 1, 0)
+    assert report.errors == ["queue_identity_mismatch"]
+
+
+@pytest.mark.parametrize("invalid_bytes", [b'{"content": "private', b"\xffprivate"])
+async def test_invalid_raw_encoding_or_json_is_quarantined_once(
+    tmp_path: Path, invalid_bytes: bytes
+) -> None:
+    raw = await _push(tmp_path, EVIDENCE)
+    raw.write_bytes(invalid_bytes)
+    config = await _config(tmp_path)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.failed, report.quarantined, client.calls) == (0, 0, 1, 0)
+    assert report.errors == ["queue_payload_invalid"]
+    assert not raw.exists()
+    assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == invalid_bytes
+    assert not config.failures_path.exists()
+
+
+@pytest.mark.parametrize(
+    "problem", ["missing_grants", "invalid_grants", "registry", "registration"]
+)
+async def test_policy_unavailability_preserves_raw_and_existing_failures(
+    tmp_path: Path, problem: str
+) -> None:
+    async def unavailable(_device: str) -> bool:
+        raise RuntimeError("private DB error")
+
+    raw = await _push(tmp_path, EVIDENCE)
+    original = raw.read_bytes()
+    kwargs = {"is_registered": unavailable} if problem == "registration" else {}
+    config = await _config(tmp_path, max_attempts=1, **kwargs)
+    grants = tmp_path / "config" / "ingest-grants.json"
+    if problem == "missing_grants":
+        grants.unlink()
+    elif problem == "invalid_grants":
+        grants.write_text('{"devices": {"dev-1": ["*"]}}', encoding="utf-8")
+    elif problem == "registry":
+        (config.knowledge_dir / ".kbs.json").write_text("broken JSON", encoding="utf-8")
+    config.failures_path.parent.mkdir()
+    failures = json.dumps({str(raw.relative_to(config.raw_root)): 1}).encode()
+    config.failures_path.write_bytes(failures)
+    client = FakeClient()
+
+    assert await run_round(client, config) == RoundReport()
+    assert client.calls == 0
+    assert raw.read_bytes() == original
+    assert config.failures_path.read_bytes() == failures
+    assert not config.pending_root.exists()
+    assert not config.processed_root.exists()
+
+
+async def test_registered_directory_without_catalog_entry_is_denied(tmp_path: Path) -> None:
+    raw = await _push(tmp_path, EVIDENCE, project="orphan")
+    config = await _config(tmp_path)
+    orphan = config.knowledge_dir / "orphan"
+    orphan.mkdir()
+    (tmp_path / "config" / "ingest-grants.json").write_text(
+        '{"devices": {"dev-1": ["orphan"]}}', encoding="utf-8"
+    )
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.failed, report.quarantined, client.calls) == (0, 0, 1, 0)
+    assert report.errors == ["target_inactive"]
+    assert not raw.exists()
+    assert not list(orphan.iterdir())
+
+
+async def test_grant_revoked_during_model_call_is_quarantined_without_merge(tmp_path: Path) -> None:
+    raw = await _push(tmp_path, EVIDENCE)
+    original = raw.read_bytes()
+    config = await _config(tmp_path)
+    grants = tmp_path / "config" / "ingest-grants.json"
+
+    class RevokingClient(FakeClient):
+        async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
+            async with manage.write_lock(config.knowledge_dir, timeout=0):
+                grants.write_text('{"devices": {"dev-1": []}}', encoding="utf-8")
+            return await super().complete(prompt, model=model, max_tokens=max_tokens)
+
+    client = RevokingClient()
+    report = await run_round(client, config)
+
+    assert (report.processed, report.failed, report.quarantined, client.calls) == (0, 0, 1, 1)
+    assert report.errors == ["target_not_granted"]
+    assert not list((config.knowledge_dir / "cc-sessions").iterdir())
+    assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
+    assert not config.processed_root.exists()
+    assert not config.failures_path.exists()
+
+
+async def test_unparseable_jsonl_and_unevidenced_output_do_not_merge(tmp_path: Path) -> None:
+    await _push(tmp_path, '"tail of an event', path="broken.JSONL")
+    await _push(tmp_path, EVIDENCE)
+    config = await _config(tmp_path)
+    reply = json.loads(LLM_REPLY)
+    del reply["nodes"][0]["evidence"]
+    client = FakeClient(reply=json.dumps(reply))
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.created, client.calls) == (2, 0, 1)
+    assert not list((config.knowledge_dir / "cc-sessions").iterdir())
 
 
 async def test_round_keeps_failed_file_for_retry(tmp_path: Path) -> None:
@@ -417,7 +644,7 @@ async def test_repeated_failure_quarantines_file(tmp_path: Path) -> None:
 
 
 async def test_failure_counter_resets_after_success(tmp_path: Path) -> None:
-    await _push(tmp_path, _session_line("用户说：重试要退避。"))
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
     config = await _config(tmp_path, max_attempts=2)
 
     assert (await run_round(FakeClient(error=LLMError("boom")), config)).failed == 1

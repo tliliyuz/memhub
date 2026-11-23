@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from memhub.worker import render
 from memhub.worker.render import render_jsonl, render_jsonl_events
 from memhub.worker.split import split_markdown
 
@@ -87,3 +88,57 @@ def test_render_jsonl_keeps_dialogue_and_skips_tool_results() -> None:
     assert "[tool Bash]" in text
     assert "noise" not in text
     assert "[summary] 定位 Proxy 502" in text
+
+
+def test_session_blocks_filter_noise_and_keep_stable_dialogue_ids() -> None:
+    lines = [
+        json.dumps({"type": "summary", "summary": "synthetic summary"}),
+        'truncated {"type": "user", "content": "synthetic fragment"}',
+        json.dumps({"type": "user", "isMeta": True, "message": {"content": "synthetic meta"}}),
+        json.dumps(
+            {
+                "type": "user",
+                "isCompactSummary": True,
+                "message": {"content": "synthetic compact"},
+            }
+        ),
+        json.dumps({"type": "user", "message": {"content": "   Synthetic decision.  "}}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "name": "synthetic tool", "input": {"a": 2}},
+                        {"type": "text", "text": "Verified the synthetic fixture."},
+                        {"type": "thinking", "thinking": "synthetic thinking"},
+                        {"type": "text", "text": "Kept configuration A."},
+                        {"type": "tool_result", "content": "synthetic tool result"},
+                    ]
+                },
+            }
+        ),
+        json.dumps({"type": "user", "message": {"role": "tool", "content": "wrong role"}}),
+        json.dumps({"type": ["user"], "message": {"content": "malformed type"}}),
+    ]
+    blocks = render.render_session_blocks("\n".join(lines))
+    assert [(block.id, block.role, block.text) for block in blocks] == [
+        ("b0001", "user", "Synthetic decision."),
+        ("b0002", "assistant", "Verified the synthetic fixture."),
+        ("b0003", "assistant", "Kept configuration A."),
+    ]
+    assert render.render_session_blocks("\n".join(lines[3:])) == blocks
+    assert render.render_session_blocks(lines[1]) == []
+
+
+def test_plaintext_session_blocks_keep_paragraphs_and_truncate_by_content() -> None:
+    blocks = render.render_plaintext_blocks("  First\r\nline.\r\n \r\nSecond item. \n")
+    assert [(block.id, block.role, block.text) for block in blocks] == [
+        ("b0001", "text", "First\r\nline."),
+        ("b0002", "text", "Second item."),
+    ]
+    clipped = render.truncate_blocks(blocks, len(blocks[0].text) + 6)
+    assert [(block.id, block.text) for block in clipped] == [
+        ("b0001", "First\r\nline."),
+        ("b0002", "Second"),
+    ]
+    assert render.truncate_blocks(blocks, 0) == []

@@ -9,6 +9,35 @@
 - `knowledge/`（markdown 真源）与 `data/`（raw_store）从本地同步到 `/var/lib/memhub/`，由 worker 继续提炼。
 - collector 仍在客户端（e4 负责），本版发布后联调 session 采集。
 
+### 采集目标授权：待发布分支的切换要求
+
+此节是发布前检查清单，不表示该修复已部署。
+
+1. 先只读盘点旧队列：按生产者、显式项目、登记和授权能否确认汇总计数，不导出正文、不补填 `project`、不重跑。已归档库不恢复；需要保留的隔离记录应在现有清理周期内单独处理。
+2. 核实 ingest、worker 和 kb-api 共享同一个 `/var/lib/memhub` 卷及相同真源目录，ingest 与 worker 指向同一个 PostgreSQL 设备登记库（不新增数据库迁移）。用管理台与 `.kbs.json` 核对已登记的目标；裸目录不等于登记。
+3. 由运维在 `MEMHUB_INGEST_GRANTS_PATH` 配置授权，默认 `<DATA_DIR>/config/ingest-grants.json`。格式例：`{"devices":{"fixture-device":["fixture-left","fixture-right"]}}`。设备和库 ID 精确匹配，不支持通配符。文件不是凭据，但只允许可信运维写入；用同目录临时文件校验后原子替换，不原地截断。显式空策略用 `{"devices":{}}`。和真源不同卷时，挂载父目录而非单独文件，以便容器看到替换。
+4. 暂停旧版入口及 worker，再协调切换 ingest、worker、kb-api，避免混跑。先检查可写列表标记与拒绝信封，再以授权的合成来源核对队列、游标和归属。不能在仍可能接收批次的情况下恢复会自动回退建库的旧 worker。
+5. 回滚前先暂停采集入口和 worker。旧 ingest 可能无法解析新版本写入批次结果 JSONB 的内部 `_project`；不要假定可在线混滚。先在隔离环境验证回滚兼容性，或保持入口暂停直到新结果均退出 24 小时重放窗口；不开启旧的猜库链路，不删除状态或迁移旧记录作为快速回退。
+
+### 客户端回环联调（只用合成数据）
+
+在同一台隔离 Windows VM／测试账户中运行客户端与服务端夹具。不要使用日常账户的计划任务、配置或凭据库，也不要把服务绑定到非回环地址。在修复分支根目录用已安装仓库开发依赖的虚拟环境运行（PowerShell）：
+
+```powershell
+$env:PYTHONPATH = 'src'
+python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4> --port 8780
+```
+
+- 客户端 API 基址为 `http://127.0.0.1:8780/api/v1`。夹具使用临时目录、内存登记与 Fake worker；不使用继承的 `MEMHUB_*` 配置，不访问数据库或外部模型。使用同一测试设备 ID 完成本地注册，凭据只通过客户端正常流程进入隔离账户的凭据库，不复制到聊天、命令行或配置文件。
+- 可写列表应只有 `fixture-left`、`fixture-right`，且 `total:2`、`writable_only:true`。在两个不同的测试目录中各放一份合成 `.jsonl` 文件，分别在界面保存两个库。每份文件包含下列一行、以换行结尾；为避免两份文件内容哈希完全相同，第二份另追加一条不同的合成对话。夹具只对下面这句固定测试文本产生候选。
+
+```json
+{"type":"user","message":{"content":"Use ceramic spacers to keep test boards separated during drying."}}
+```
+
+- 用隔离账户的实际计划任务触发 collector `--once`。对照界面保存值、该次请求的 `project` 和 `GET /api/v1/kb/stats` 的 `by_project`：应各落一条候选，不出现 `fixture-denied` 或按来源名新建的库。单独用已登记但未授权的 `fixture-denied` 做控制：应得 `400/1003`、`data.reason=target_unavailable`，该源游标不动，另一个合法源仍可推送。只记录目标 ID、计数和错误码，不记录请求凭据或正文。
+- `GET /api/v1/kb/nodes?project=fixture-right&tier=candidate` 只读核对归属，`GET /api/v1/kb/trash/projects` 只读核对整库归档清单（全新夹具预期为空，不须归档或恢复）。用 Ctrl+C 关闭服务，临时目录随进程正常退出清理。直接调用 API 或手动跑 `--once`，均不能代替实际计划任务触发验收。
+
 ## 1. 主机
 
 | 项 | 值 |

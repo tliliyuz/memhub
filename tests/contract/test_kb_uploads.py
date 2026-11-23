@@ -17,6 +17,7 @@ from memhub.kb.api import create_app
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, Path]]:
     knowledge = tmp_path / "knowledge"
     (knowledge / "memory-hub").mkdir(parents=True)
+    (knowledge / ".kbs.json").write_text('{"kbs":[{"id":"memory-hub"}]}', encoding="utf-8")
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
 
@@ -69,6 +70,7 @@ def test_upload_lands_in_raw_store_and_reports_queued(env: tuple[TestClient, Pat
     landed = data_dir / "raw_store" / "kb-console" / "memory-hub" / sha[:2] / f"{sha}.json"
     assert landed.is_file()
     payload = json.loads(landed.read_text(encoding="utf-8"))
+    assert payload["producer"] == "console"
     assert payload["source_type"] == "docs"
     assert payload["path"] == "note.md"
     assert payload["batch_id"] == batch_id
@@ -156,6 +158,18 @@ def test_rejects_invalid_project_and_too_many_files(env: tuple[TestClient, Path]
     assert too_many.json()["code"] == 1012
 
 
+def test_unregistered_directory_is_not_upload_target(env: tuple[TestClient, Path]) -> None:
+    client, data_dir = env
+    (data_dir.parent / "knowledge" / "unregistered").mkdir()
+    response = client.post(
+        "/api/v1/kb/uploads",
+        data={"project": "unregistered"},
+        files=[("files", ("a.md", b"# a", "text/plain"))],
+    )
+    assert response.status_code == 404
+    assert not list((data_dir / "raw_store").rglob("*.json"))
+
+
 def test_unknown_project_is_rejected(env: tuple[TestClient, Path]) -> None:
     client, data_dir = env
     response = client.post(
@@ -171,6 +185,7 @@ def test_unknown_project_is_rejected(env: tuple[TestClient, Path]) -> None:
 def test_queue_full_returns_1013(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     knowledge = tmp_path / "knowledge"
     (knowledge / "memory-hub").mkdir(parents=True)
+    (knowledge / ".kbs.json").write_text('{"kbs":[{"id":"memory-hub"}]}', encoding="utf-8")
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
     monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))

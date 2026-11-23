@@ -1,0 +1,128 @@
+"""用合成会话验证 HTTP → 队列 → worker → 指定知识库，不联网调用模型。"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+
+from memhub.ingest.app import create_app
+from memhub.ingest.store import MemoryStore
+from memhub.kb.store import KnowledgeStore
+from memhub.worker.daemon import WorkerConfig, run_round
+
+
+class Fake:
+    calls = 0
+
+    async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
+        self.calls += 1
+        assert "[b0001 user new]" in prompt
+        assert "ScratchPad" not in prompt
+        quote = "Use ceramic spacers to keep test boards separated during drying."
+        assert quote in prompt
+        return json.dumps(
+            {
+                "nodes": [
+                    {
+                        "kind": "procedure",
+                        "title": "Separate boards during drying",
+                        "slug": "separate-boards-during-drying",
+                        "body": quote,
+                        "evidence": [{"block": "b0001", "quote": quote}],
+                    }
+                ],
+                "edges": [],
+            }
+        )
+
+
+async def test_selected_target_is_the_only_landing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "knowledge"
+    for name in ("fixture-left", "fixture-right", "fixture-denied"):
+        (root / name).mkdir(parents=True)
+    (root / ".kbs.json").write_text(
+        json.dumps(
+            {"kbs": [{"id": name} for name in ("fixture-left", "fixture-right", "fixture-denied")]}
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    grants = data / "config" / "ingest-grants.json"
+    grants.parent.mkdir(parents=True)
+    device = str(uuid.uuid4())
+    grants.write_text(
+        json.dumps({"devices": {device: ["fixture-left", "fixture-right"]}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("MEMHUB_ENV", "dev")
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(data))
+    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(root))
+    monkeypatch.setenv("MEMHUB_INGEST_GRANTS_PATH", str(grants))
+    # 随机测试凭据仅留在本地进程内；不用任何操作系统已保存凭据。
+    token = uuid.uuid4().hex
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", token)
+    state = MemoryStore()
+    await state.register_device(device)
+    content = (
+        "\n".join(
+            json.dumps(item)
+            for item in [
+                {"type": "user", "isMeta": True, "message": {"content": "ScratchPad"}},
+                {
+                    "type": "user",
+                    "message": {
+                        "content": "Use ceramic spacers to keep test boards separated during drying."
+                    },
+                },
+            ]
+        )
+        + "\n"
+    )
+    sha = hashlib.sha256(content.encode()).hexdigest()
+    body = {
+        "batch_id": str(uuid.uuid4()),
+        "device_id": device,
+        "source_id": "fixture-source",
+        "project": "fixture-denied",
+        "source_type": "sessions",
+        "files": [
+            {
+                "path": "fixture.jsonl",
+                "sha256": sha,
+                "content": content,
+                "from_offset": 0,
+                "to_offset": len(content.encode()),
+                "mtime": "2026-01-01T00:00:00Z",
+            }
+        ],
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(state)),
+        base_url="http://127.0.0.1",
+        headers={"Authorization": f"Bearer {token}"},
+        trust_env=False,
+    ) as client:
+        denied = await client.post("/ingest/raw", json=body)
+        assert denied.status_code == 400
+        assert denied.json()["data"] == {"reason": "target_unavailable"}
+        assert not (data / "raw_store").exists()
+        assert (await state.get_cursor(device, "fixture-source"))[1] == []
+        accepted = await client.post("/ingest/raw", json=body | {"project": "fixture-right"})
+        assert accepted.status_code == 200
+    fake = Fake()
+    report = await run_round(
+        fake, WorkerConfig(data, root, "fake", is_registered=state.is_registered)
+    )
+    assert (report.processed, report.created, report.failed, fake.calls) == (1, 1, 0, 1)
+    store = KnowledgeStore(root)
+    assert await store.list_ids() == ["fixture-right/procedure/separate-boards-during-drying"]
+    node, _ = await store.read("fixture-right/procedure/separate-boards-during-drying")
+    assert node.tier == "candidate"
+    assert [(source.device, source.ref) for source in node.source] == [(device, "fixture.jsonl")]
+    assert len(list((data / "processed_raw").rglob("*.json"))) == 1

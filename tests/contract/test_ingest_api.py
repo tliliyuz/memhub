@@ -19,9 +19,50 @@ TOKEN = "devtoken"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+def _configure_targets(monkeypatch: pytest.MonkeyPatch, root: Path) -> tuple[Path, Path]:
+    knowledge = root / "knowledge"
+    grants = root / "config" / "ingest-grants.json"
+    for project in ("sdp-tag", "other-kb", "dir-only", "not-granted"):
+        (knowledge / project).mkdir(parents=True)
+    registry = knowledge / ".kbs.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "kbs": [
+                    {"id": project}
+                    for project in ("sdp-tag", "other-kb", "not-granted", "registered-only")
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    grants.parent.mkdir()
+    grants.write_text(
+        json.dumps(
+            {
+                "devices": {
+                    DEVICE: [
+                        "sdp-tag",
+                        "other-kb",
+                        "dir-only",
+                        "registered-only",
+                        "new-kb",
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
+    monkeypatch.setenv("MEMHUB_INGEST_GRANTS_PATH", str(grants))
+    return registry, grants
+
+
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
+    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
     with TestClient(create_app()) as test_client:
         response = test_client.post(
             "/devices/register",
@@ -43,28 +84,37 @@ def _file(path: str, content: str, from_offset: int = 0) -> dict[str, object]:
     }
 
 
+_MISSING = object()
+
+
 def _push(
     client: TestClient,
     files: list[dict[str, object]],
     *,
     source_rev: int = 0,
     batch_id: str | None = None,
-    project: str = "auto",
+    project: object = "sdp-tag",
+    device_id: str = DEVICE,
+    headers: dict[str, str] | None = AUTH,
 ) -> tuple[int, dict[str, object]]:
-    response = client.post(
-        "/ingest/raw",
-        headers=AUTH,
-        json={
-            "batch_id": batch_id or str(uuid.uuid4()),
-            "device_id": DEVICE,
-            "source_id": "cc-sessions",
-            "source_type": "sessions",
-            "project": project,
-            "source_rev": source_rev,
-            "files": files,
-        },
-    )
+    payload = {
+        "batch_id": batch_id or str(uuid.uuid4()),
+        "device_id": device_id,
+        "source_id": "cc-sessions",
+        "source_type": "sessions",
+        "source_rev": source_rev,
+        "files": files,
+    }
+    if project is not _MISSING:
+        payload["project"] = project
+    response = client.post("/ingest/raw", headers=headers, json=payload)
     return response.status_code, response.json()
+
+
+def _assert_target_denied(status: int, body: dict[str, object]) -> None:
+    assert status == 400
+    assert body["code"] == 1003
+    assert body["data"] == {"reason": "target_unavailable"}
 
 
 def test_cursor_is_empty_before_first_push(client: TestClient) -> None:
@@ -157,7 +207,9 @@ def test_register_is_idempotent_for_same_device(client: TestClient) -> None:
 def test_raw_bytes_are_persisted_when_data_dir_is_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """采集器推上来的字节必须落盘——这是 worker 的唯一输入。"""
+    """未配置授权文件路径时使用 DATA_DIR 的默认路径，原始字节必须落盘。"""
+    _configure_targets(monkeypatch, tmp_path)
+    monkeypatch.delenv("MEMHUB_INGEST_GRANTS_PATH")
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     with TestClient(create_app()) as fresh:
@@ -172,10 +224,78 @@ def test_raw_bytes_are_persisted_when_data_dir_is_set(
     assert __import__("json").loads(stored[0].read_text(encoding="utf-8"))["content"] == "hello"
 
 
-def test_auto_project_is_the_default_and_persisted(
+@pytest.mark.parametrize("project", ["ghost", "dir-only", "registered-only", "not-granted"])
+def test_unavailable_project_never_reaches_quota_or_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    project: str,
+) -> None:
+    _configure_targets(monkeypatch, tmp_path)
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    # 配额先于目标检查会让拒绝类型泄露，而且同一批修正目标后必须能正常提交。
+    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "1000")
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        _assert_target_denied(
+            *_push(
+                fresh,
+                [_file("a.jsonl", "x" * 2000)],
+                batch_id="b1",
+                project=project,
+            )
+        )
+        assert not (tmp_path / "raw_store").exists()
+        cursor = fresh.get(
+            "/ingest/cursor",
+            params={"device_id": DEVICE, "source_id": "cc-sessions"},
+            headers=AUTH,
+        )
+        assert cursor.json()["data"]["files"] == []
+        status, body = _push(fresh, [_file("a.jsonl", "hello")], batch_id="b1", project="sdp-tag")
+        assert status == 200 and body["data"]["replayed"] is False
+
+
+@pytest.mark.parametrize("empty_first", [False, True])
+def test_replay_cannot_change_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    empty_first: bool,
+) -> None:
+    _configure_targets(monkeypatch, tmp_path)
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    first = [] if empty_first else [_file("a.jsonl", "hello")]
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        assert _push(fresh, first, batch_id="b1", project="sdp-tag")[0] == 200
+        _assert_target_denied(
+            *_push(
+                fresh,
+                [_file("b.jsonl", "other content")],
+                batch_id="b1",
+                project="other-kb",
+            )
+        )
+        # 同目标重放也不得把不同内容追加到已接受的批次。
+        status, body = _push(
+            fresh, [_file("b.jsonl", "replayed content")], batch_id="b1", project="sdp-tag"
+        )
+        assert status == 200 and body["data"]["replayed"] is True
+        assert body["data"]["accepted"] == len(first)
+    assert len(list((tmp_path / "raw_store").rglob("*.json"))) == len(first)
+
+
+def test_revoking_grant_denies_existing_replay(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """不指定 project 时落盘为 auto；worker 见到 auto 回退 source_id（旧行为）。"""
+    _, grants = _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     with TestClient(create_app()) as fresh:
@@ -183,16 +303,41 @@ def test_auto_project_is_the_default_and_persisted(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
         )
-        status, _ = _push(fresh, [_file("a.jsonl", "hello")])
-        assert status == 200
-    stored = list((tmp_path / "raw_store").rglob("*.json"))
-    assert json.loads(stored[0].read_text(encoding="utf-8"))["project"] == "auto"
+        files = [_file("a.jsonl", "hello")]
+        assert _push(fresh, files, batch_id="b1")[0] == 200
+        grants.write_text(json.dumps({"devices": {DEVICE: []}}), encoding="utf-8")
+        _assert_target_denied(*_push(fresh, files, batch_id="b1"))
+
+
+@pytest.mark.parametrize("broken_path", ["registry", "grants"])
+def test_target_lookup_failure_is_generic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    broken_path: str,
+) -> None:
+    registry, grants = _configure_targets(monkeypatch, tmp_path)
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    with TestClient(create_app()) as fresh:
+        fresh.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+        )
+        (registry if broken_path == "registry" else grants).write_text("invalid", encoding="utf-8")
+        status, body = _push(fresh, [_file("a.jsonl", "hello")], project="sdp-tag")
+        assert status == 500
+        assert body["code"] == 2001
+        assert body["data"] == {}
+        assert "sdp-tag" not in body["message"]
+        assert str(tmp_path) not in body["message"]
+        assert not (tmp_path / "raw_store").exists()
 
 
 def test_chosen_project_is_persisted_for_the_worker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """桌面端按目录选的知识库要随批次落盘，worker 才能写进对应 markdown 目录。"""
+    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     with TestClient(create_app()) as fresh:
@@ -206,29 +351,92 @@ def test_chosen_project_is_persisted_for_the_worker(
     assert json.loads(stored[0].read_text(encoding="utf-8"))["project"] == "sdp-tag"
 
 
-@pytest.mark.parametrize("project", ["../etc", "Sdp-Tag", "", "a/b", "auto?"])
-def test_invalid_project_is_rejected(client: TestClient, project: str) -> None:
-    """project 直接变成真源目录名；非法值必须 400，不能静默兜底到别的库。"""
-    status, body = _push(client, [_file("a.jsonl", "hello")], project=project)
-    assert status == 400
-    assert body["code"] == 1003
+@pytest.mark.parametrize(
+    "project",
+    [_MISSING, None, "auto", "", " ", 123, ["sdp-tag"], {"id": "sdp-tag"}, "../etc", "Sdp-Tag"],
+)
+def test_invalid_project_is_rejected(client: TestClient, project: object) -> None:
+    """目标不合规统一报错，不回显客户端传来的项目值。"""
+    _assert_target_denied(*_push(client, [_file("a.jsonl", "hello")], project=project))
 
 
-def test_project_list_is_proxied_to_kb_api(
+def test_target_validation_follows_device_auth(client: TestClient) -> None:
+    status, body = _push(client, [], project={"id": "sdp-tag"}, headers=None)
+    assert (status, body["code"]) == (401, 1001)
+    status, body = _push(client, [], project=None, device_id="unregistered-device")
+    assert (status, body["code"]) == (403, 1002)
+
+
+def test_reserved_collector_device_is_denied(client: TestClient) -> None:
+    """即使 dev 的设备状态里出现这个身份，也不能用它冒充管理台生产者。"""
+    assert client.portal is not None
+    client.portal.call(client.app.state.store.register_device, "kb-console")
+    status, body = _push(client, [], project="sdp-tag", device_id="kb-console")
+    assert (status, body["code"]) == (403, 1009)
+
+
+def test_unconfigured_ingest_target_is_default_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    for key in ("MEMHUB_DATA_DIR", "MEMHUB_KNOWLEDGE_DIR", "MEMHUB_INGEST_GRANTS_PATH"):
+        monkeypatch.delenv(key, raising=False)
+    with TestClient(create_app()) as fresh:
+        assert (
+            fresh.post(
+                "/devices/register",
+                json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+            ).status_code
+            == 200
+        )
+        _assert_target_denied(*_push(fresh, [], project="sdp-tag"))
+
+
+def test_project_list_only_exposes_granted_active_projects(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """桌面端选知识库的下拉框数据来自 kb-api（真源唯一写者），不直接读盘。"""
+    """保留 kb-api 的项目元数据和顺序，但只返回本设备可写的目标。"""
     calls: list[tuple[str, str]] = []
+    visible = {"id": "sdp-tag", "name": "SDP Tag", "nodes": 3}
 
     async def fake(base_url: str, method: str, path: str, payload=None):  # type: ignore[no-untyped-def]
         calls.append((method, path))
-        return {"items": [{"id": "sdp-tag", "name": "SDP Tag"}], "total": 1}
+        return {
+            "items": [
+                {"id": "not-granted"},
+                visible,
+                {"id": "dir-only"},
+                {"id": "registered-only"},
+            ],
+            "total": 4,
+        }
 
     monkeypatch.setattr("memhub.ingest.app._kb_api_request", fake)
-    response = client.get("/ingest/projects", params={"device_id": DEVICE}, headers=AUTH)
+    response = client.get(
+        "/ingest/projects",
+        params={"device_id": DEVICE, "limit": 1, "offset": 1},
+        headers=AUTH,
+    )
     assert response.status_code == 200
-    assert response.json()["data"]["items"][0]["id"] == "sdp-tag"
+    assert response.json()["data"] == {"items": [visible], "total": 1, "writable_only": True}
     assert calls == [("GET", "/api/v1/kb/projects")]
+
+
+def test_project_create_requires_pregrant(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    async def fake(base_url: str, method: str, path: str, payload=None):  # type: ignore[no-untyped-def]
+        calls.append(method)
+        return {"id": "unknown-project"}
+
+    monkeypatch.setattr("memhub.ingest.app._kb_api_request", fake)
+    response = client.post(
+        "/ingest/projects",
+        headers=AUTH,
+        json={"device_id": DEVICE, "id": "unknown-project"},
+    )
+    _assert_target_denied(response.status_code, response.json())
+    assert calls == []
 
 
 def test_project_list_requires_device_token(client: TestClient) -> None:
@@ -257,7 +465,6 @@ def test_project_create_is_validated_and_proxied(
 
 
 def test_project_create_rejects_reserved_auto(client: TestClient) -> None:
-    """auto 是推送侧的保留值；建成真库会得到一个谁都无法引用的目录名。"""
     response = client.post(
         "/ingest/projects",
         headers=AUTH,
@@ -471,6 +678,7 @@ def test_raw_store_quota_returns_1008_before_writing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """raw_store 满了返回 1008 而不是写满磁盘；被拒批次一个字节都不落。"""
+    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "600")
@@ -490,6 +698,7 @@ def test_quota_rejects_only_new_content_not_replays(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """配额按新增字节算：重放已收下的批次仍成功，新内容才被拒。"""
+    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "2000")
@@ -507,7 +716,7 @@ def test_quota_rejects_only_new_content_not_replays(
         assert status == 503
         assert body["code"] == 1008
 
-        # 同一批次重放（estimate=0）在配额已满时仍放行；否则客户端重试会被永久卡死。
+        # 已接收批次重放不执行配额检查；否则客户端重试会被永久卡死。
         status, body = _push(fresh, [first], batch_id="b-1")
         assert status == 200
         assert body["code"] == 0

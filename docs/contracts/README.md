@@ -1,4 +1,4 @@
-# 跨端契约（v0.4）
+# 跨端契约（v0.5）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -16,13 +16,14 @@
 ## 待定（阻塞项）
 
 1. ~~设备注册流程~~ — 已定（0.2）：桌面端用已有凭据调 `POST /devices/register` 换 `device_token`，存 OS 凭据库；采集器只持 `device_token`，作用域仅 `/ingest/*`。不复用 PKCE，也不复用面板 `user_key`（无设备作用域、每用户 20 把、最后一把不可吊销）。
-2. **sessions 源的项目归属**：Claude Code 的 `projects/<encoded-path>` 能否可靠映射到知识库 `project`。当前按 `auto` 留给云端推断。
+2. ~~sessions 源的项目归属~~ — 已定（0.5）：必须由用户在客户端明确选择并保存显式目标；服务端不从路径、source_id 或会话内容推断，不允许 `auto`。
 3. **portal 去留**：`memhub.work/portal` 目前是一个静态页；重写 vhost 时若占用 `/`，需确认 portal 保留为 `/portal/` 还是撤掉。→ 责任人：用户
 4. ~~MCP 接入形态~~ — 已定（0.4）：本地 `memhub mcp` 保留 stdio；远端由 kb-api 在 `/mcp` 提供无状态 Streamable HTTP，使用独立只读凭据与库范围（[mcp-tools.md](mcp-tools.md) §4）。不保留本地轻代理。
 5. ~~同 device_id 重复注册~~ — 已定（0.3）：未吊销时幂等返回同一有效 token、不旋转；吊销后重新注册签发新 token 并解除吊销；自动轮换只由 `/devices/refresh` 触发。
 
 ## 变更记录
 
+- 0.5 — 采集目标必须显式、已登记且按设备授权；列表只返回可写目标并标记 `writable_only`；会话证据门禁与队列复核规则收紧。
 - 0.4 — MCP 首版定为四个只读工具；新增远端 `/mcp` 传输、独立只读凭据与库范围（`mcp-tools.md` 0.2）。
 - 0.3 — 注册段补充：生产必须带 `user_key` 鉴权、`device_id` 生产必填（400/1002）、同 device_id 重复注册幂等、吊销后重注册签发新 token；`source-registry` 明确 `base_url` 必须与签发 token 的服务器一致；示例中的 `device_id` 统一改为 UUID v4。
 - 0.2 — 按客户端评审修订：device token 作用域与注册流程、游标加 `size/mtime/source_rev`、`code` 非 HTTP 状态、batch 幂等 24h + 200 重放、退避抖动与不丢数据、令牌不落盘、Windows reparse/offline 跳过。

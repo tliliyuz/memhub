@@ -20,10 +20,11 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
+from anyio import Lock
 from anyio import Path as AsyncPath
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from memhub.contract import (
     KB_ID_RE,
@@ -34,13 +35,17 @@ from memhub.contract import (
     IngestRequest,
     IngestResult,
     SourcesConfig,
-    valid_project,
+    explicit_project,
 )
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
+from memhub.kb.target_access import TargetPolicy, TargetUnavailable
 from memhub.queue.rawstore import (
+    BatchTargetConflict,
     QuotaExceeded,
     RawStoreQuota,
+    collector_device_reserved,
     estimate_new_bytes,
+    queue_write_lock,
     save_batch,
 )
 
@@ -106,6 +111,15 @@ class CursorData(BaseModel):
     files: list[FileCursor]
 
 
+def _as_optional_project(value: object) -> str | None:
+    # 不让 Pydantic 在鉴权前用 422 回显非字符串目标；路由统一处理目标不可用。
+    return value if isinstance(value, str) else None
+
+
+class RawIngestRequest(IngestRequest):
+    project: Annotated[str | None, BeforeValidator(_as_optional_project)] = None
+
+
 class ProjectCreate(BaseModel):
     """桌面端「新建知识库」：id 即真源一级目录名，名称/描述进 `.kbs.json`。"""
 
@@ -126,18 +140,20 @@ async def _kb_api_request(
     """把知识库列表/新建转发给 kb-api。
 
     知识真源只有 kb-api 一个写者（`.kbs.json` 是读改写），采集端不直接碰盘；
-    host 网络下 127.0.0.1:8701 可达，kb 未起时这里返回 500，桌面端可回退手填 id。
+    host 网络下 127.0.0.1:8701 可达，kb 未起时这里返回通用 500。
     """
     url = base_url.rstrip("/") + path
     try:
         async with httpx.AsyncClient(timeout=5.0, trust_env=False) as http:
             response = await http.request(method, url, json=payload)
     except httpx.HTTPError as exc:
-        raise ApiError(ErrorCode.INTERNAL, f"知识库服务不可达：{exc}") from exc
+        raise _target_lookup_failed() from exc
     try:
         body = response.json()
     except ValueError:
         body = {"message": response.text[:200]}
+    if response.status_code >= 500:
+        raise _target_lookup_failed()
     if response.status_code >= 400:
         upstream_code = body.get("code") if isinstance(body, dict) else None
         message = body.get("message") if isinstance(body, dict) else None
@@ -148,13 +164,20 @@ async def _kb_api_request(
             parsed = ErrorCode(int(upstream_code))  # type: ignore[arg-type]
         except (TypeError, ValueError, KeyError):
             parsed = None
-        if parsed is not None and parsed is not ErrorCode.OK:
-            code = parsed
-        else:
-            # 不认识的响应（网关/异常页）：5xx 算上游故障，其余算请求问题。
-            code = ErrorCode.INTERNAL if response.status_code >= 500 else ErrorCode.BAD_REQUEST
+        if parsed is ErrorCode.INTERNAL:
+            raise _target_lookup_failed()
+        # 其余未识别的响应按请求问题处理。
+        code = parsed if parsed and parsed is not ErrorCode.OK else ErrorCode.BAD_REQUEST
         raise ApiError(code, str(message or "知识库请求失败"), {"upstream": response.status_code})
     return body
+
+
+def _target_unavailable() -> ApiError:
+    return ApiError(ErrorCode.BAD_REQUEST, "target unavailable", {"reason": "target_unavailable"})
+
+
+def _target_lookup_failed() -> ApiError:
+    return ApiError(ErrorCode.INTERNAL, "project service unavailable")
 
 
 def _ok(data: object) -> dict[str, object]:
@@ -234,6 +257,16 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         # 用户体系还没做，先用 provision token 把口子关上。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
     raw_root = Path(data_dir) if data_dir else None
+    knowledge_dir = os.environ.get("MEMHUB_KNOWLEDGE_DIR", "").strip()
+    grants_value = os.environ.get("MEMHUB_INGEST_GRANTS_PATH", "").strip()
+    grants_path = Path(grants_value) if grants_value else None
+    if grants_path is None and raw_root is not None:
+        grants_path = raw_root / "config" / "ingest-grants.json"
+    policy = (
+        TargetPolicy(Path(knowledge_dir), grants_path) if knowledge_dir and grants_path else None
+    )
+    # 同一进程内串行校验批次绑定和配额、写盘、记账；跨进程绑定由 rawstore 保证。
+    queue_lock = Lock()
     # 即便当前没配 DATA_DIR 也要校验：配错的值应该在启动时就炸，而不是等哪天补上
     # DATA_DIR 后突然把某个上限换成另一个数。
     queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
@@ -242,6 +275,30 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     kb_api_url = os.environ.get("MEMHUB_KB_API_URL", DEFAULT_KB_API_URL)
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
+
+    async def granted_projects(device_id: str) -> frozenset[str]:
+        if policy is None:
+            return frozenset()
+        try:
+            return await policy.granted(device_id)
+        except TargetUnavailable as exc:
+            raise _target_lookup_failed() from exc
+
+    async def active_project(project: str) -> bool:
+        if policy is None:
+            return False
+        try:
+            return await policy.active(project)
+        except TargetUnavailable as exc:
+            raise _target_lookup_failed() from exc
+
+    async def check_target(device_id: str, value: object, *, require_active: bool = True) -> str:
+        project = explicit_project(value)
+        if project is None or project not in await granted_projects(device_id):
+            raise _target_unavailable()
+        if require_active and not await active_project(project):
+            raise _target_unavailable()
+        return project
 
     async def auth(authorization: str | None, device_id: str) -> None:
         """校验 token 与 device 绑定。
@@ -260,6 +317,12 @@ def create_app(store: StateStore | None = None) -> FastAPI:
             raise ApiError(ErrorCode.TOKEN_INVALID, "invalid device token")
         if not await state.is_registered(device_id):
             raise ApiError(ErrorCode.DEVICE_REVOKED, "device not registered")
+
+    async def auth_collector(authorization: str | None, device_id: str) -> None:
+        await auth(authorization, device_id)
+        # 管理台生产者身份不能从采集接口使用；兼顾 Windows 不区分大小写的路径。
+        if collector_device_reserved(device_id):
+            raise ApiError(ErrorCode.SCOPE_DENIED, "collector scope denied")
 
     @app.exception_handler(ApiError)
     async def on_api_error(_: Request, exc: Exception) -> JSONResponse:
@@ -336,9 +399,21 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         device_id: Annotated[str, Query()],
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        """桌面端选知识库用的列表（已有知识库），转发 kb-api 的同一份数据。"""
-        await auth(authorization, device_id)
-        return _ok(await _kb_api_request(kb_api_url, "GET", "/api/v1/kb/projects"))
+        """转发 kb-api 的项目元数据，但只显示本设备可写的活动项目。"""
+        await auth_collector(authorization, device_id)
+        granted = await granted_projects(device_id)
+        items: list[dict[str, Any]] = []
+        if granted:
+            upstream = await _kb_api_request(kb_api_url, "GET", "/api/v1/kb/projects")
+            if not isinstance(upstream, dict) or not isinstance(upstream.get("items"), list):
+                raise _target_lookup_failed()
+            for item in upstream["items"]:
+                if not isinstance(item, dict):
+                    raise _target_lookup_failed()
+                project = explicit_project(item.get("id"))
+                if project is not None and project in granted and await active_project(project):
+                    items.append(item)
+        return _ok({"items": items, "total": len(items), "writable_only": True})
 
     @app.post("/ingest/projects", status_code=201)
     async def create_project(
@@ -346,9 +421,8 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
         """桌面端「新建知识库」；之后采集端用同一个 id 作为 project 推送。"""
-        await auth(authorization, body.device_id)
-        # auto 是推送侧的保留值（回退按 source_id 归档），不是真正可以建的库；
-        # 放行会建出一个名叫 auto 的目录，之后谁也没法引用它。
+        await auth_collector(authorization, body.device_id)
+        # auto 是旧推送协议的保留值，不能注册成知识库。
         # 「格式非法」和「用了保留值」分开报：客户端要靠 reason 区分提示文案，
         # 别让前端去解析 message。
         if body.id == PROJECT_AUTO:
@@ -363,6 +437,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                 "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位",
                 {"id": body.id, "reason": "invalid"},
             )
+        await check_target(body.device_id, body.id, require_active=False)
         created = await _kb_api_request(
             kb_api_url,
             "POST",
@@ -373,18 +448,12 @@ def create_app(store: StateStore | None = None) -> FastAPI:
 
     @app.post("/ingest/raw")
     async def raw(
-        body: IngestRequest,
+        body: RawIngestRequest,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        await auth(authorization, body.device_id)
-        if not valid_project(body.project):
-            # project 直接变成真源目录名：白名单之外的串一律拒绝，不做静默兜底，
-            # 否则采集端以为写进了某个库、实际落到了别处。
-            raise ApiError(
-                ErrorCode.BAD_REQUEST,
-                "project 必须是 auto 或知识库 id（小写字母/数字/./_/-，以字母或数字开头，≤64 位）",
-                {"project": body.project},
-            )
+        await auth_collector(authorization, body.device_id)
+        project = await check_target(body.device_id, body.project)
+        body.project = project
         for batch_file in body.files:
             if "\x00" in batch_file.content:
                 raise ApiError(
@@ -392,32 +461,41 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                     "binary content is not accepted",
                     {"path": batch_file.path},
                 )
-        if raw_root is not None and quota is not None:
-            # 配额在落盘前判断：满了就 1008 让采集端降级，绝不把磁盘写满。
-            # 估算只算新 sha——重放已收下的批次不受影响，否则客户端会永久卡死。
-            incoming = await estimate_new_bytes(raw_root, body)
-            try:
-                await quota.check(incoming)
-            except QuotaExceeded as exc:
-                raise ApiError(
-                    ErrorCode.QUEUE_BACKPRESSURE,
-                    "raw_store quota exceeded",
-                    {
-                        "used_bytes": exc.used,
-                        "limit_bytes": exc.limit,
-                        "incoming_bytes": exc.incoming,
-                    },
-                ) from exc
-            # 先落盘再 apply：apply 的后续校验失败只会留下无害的内容寻址孤儿文件，
-            # 而反过来（先 apply 后落盘）一旦落盘失败，重放就再也补不回落盘的字节。
-            try:
-                await save_batch(raw_root, body)
-            except OSError:
-                # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
+        try:
+            async with queue_lock:
+                if raw_root is not None and quota is not None:
+                    # 跨进程也要串行处理：批次目标检查与状态落库之间不能插入另一笔写入。
+                    async with queue_write_lock(raw_root):
+                        replay = await state.check_replay_target(body)
+                        if replay is not None:
+                            return _ok(replay.model_dump(mode="json"))
+                        # 配额先于落盘，只算新增内容；重放不应被视为新增数据。
+                        incoming = await estimate_new_bytes(raw_root, body, producer="collector")
+                        await quota.check(incoming)
+                        # 先落盘再推进游标；即使是空批，也要绑定其目标。
+                        await save_batch(raw_root, body, producer="collector")
+                        await quota.record(incoming)
+                        result: IngestResult = await state.apply(body)
+                else:
+                    replay = await state.check_replay_target(body)
+                    result = replay if replay is not None else await state.apply(body)
+        except BatchTargetConflict as exc:
+            raise _target_unavailable() from exc
+        except QuotaExceeded as exc:
+            raise ApiError(
+                ErrorCode.QUEUE_BACKPRESSURE,
+                "raw_store quota exceeded",
+                {
+                    "used_bytes": exc.used,
+                    "limit_bytes": exc.limit,
+                    "incoming_bytes": exc.incoming,
+                },
+            ) from exc
+        except OSError as exc:
+            # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
+            if quota is not None:
                 await quota.invalidate()
-                raise
-            await quota.record(incoming)
-        result: IngestResult = await state.apply(body)
+            raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
         return _ok(result.model_dump(mode="json"))
 
     @app.post("/ingest/heartbeat")

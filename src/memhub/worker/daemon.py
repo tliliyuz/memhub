@@ -9,7 +9,8 @@
 
 失败语义：
 - 单文件抽取失败 → 留在 raw_store，下一轮重试，本轮继续处理其他文件；
-- 真源写入推迟 → 保留原始文件和失败次数；单库归档不阻塞其他库；
+- 授权明确拒绝 → 原始字节直接移入 pending_review，不消耗失败重试次数；
+- 授权无法核实或真源写入推迟 → 保留原始文件和失败次数；
 - LLM 端点启动自检失败 → exit 2（配置错误，别进循环空转把日志写满）；
 - 运行期连续失败按指数退避，日志只打摘要，不打 traceback。
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -32,16 +34,36 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import anyio
 from anyio import Path as AsyncPath
 
-from memhub.contract import SourceKind, SourceRef, resolve_project
-from memhub.kb.manage import WriteDeferred, guard_project_write, write_lock
+from memhub.contract import SourceKind, SourceRef, explicit_project
+from memhub.kb.manage import WriteDeferred, guard_project_write
 from memhub.kb.store import KnowledgeStore
-from memhub.worker.extract import ExtractionFailed, extract_document
+from memhub.kb.target_access import TargetPolicy, TargetUnavailable
+from memhub.queue.rawstore import (
+    CONSOLE_DEVICE,
+    BatchTargetConflict,
+    batch_dir,
+    collector_device_reserved,
+)
+from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
 from memhub.worker.llm import LLMClient, LLMError
-from memhub.worker.merge import merge
+from memhub.worker.merge import merge, target_write_lock
 from memhub.worker.prompts import load_profile
-from memhub.worker.render import render_jsonl_events
+from memhub.worker.render import (
+    render_jsonl_events,
+    render_plaintext_blocks,
+    render_session_blocks,
+    truncate_blocks,
+)
 
 PROFILE_BY_SOURCE = {"sessions": "sessions", "wiki": "wiki", "docs": "wiki"}
+
+
+class AuthorizationDenied(ValueError):
+    """仅携带固定原因码的永久拒绝，不含原始正文。"""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass
@@ -61,6 +83,17 @@ class WorkerConfig:
     interval: float = 300.0
     limit: int = 20
     max_attempts: int = 3
+    target_policy: TargetPolicy | None = None
+    is_registered: Callable[[str], Awaitable[bool]] | None = None
+
+    def policy(self) -> TargetPolicy:
+        if self.target_policy is not None:
+            return self.target_policy
+        path = os.environ.get("MEMHUB_INGEST_GRANTS_PATH", "").strip()
+        return TargetPolicy(
+            self.knowledge_dir,
+            Path(path) if path else self.data_dir / "config" / "ingest-grants.json",
+        )
 
     @property
     def raw_root(self) -> Path:
@@ -87,6 +120,7 @@ class RoundReport:
     updated: int = 0
     edges: int = 0
     errors: list[str] = field(default_factory=list)
+    quarantined: int = 0
 
 
 def parse_window(spec: str) -> tuple[dt_time, dt_time]:
@@ -228,7 +262,7 @@ async def purge_pending_review(
 ) -> tuple[int, int]:
     """清理 `pending_review/` 里超过保留期的文件，返回（文件数, 字节数）。
 
-    隔离区只放「连续失败 3 次」的毒文件：人工排查完它就是纯占盘。没有清理策略时
+    隔离区保留授权拒绝和重试耗尽的原始文件供人工检查。没有清理策略时，
     它会和 raw_store 一起把磁盘预算吃穿（raw_store 有配额，隔离区没有），因此
     由 purge-expired timer 每天顺手收一次。
     """
@@ -300,16 +334,88 @@ async def prune_processed_raw(
     return removed, removed_bytes
 
 
-def _document_text(payload: dict[str, object]) -> str:
-    content = str(payload.get("content", ""))
-    path = str(payload.get("path", ""))
+def _document_text(content: str, path: str) -> str:
     if path.endswith(".jsonl"):
         rendered, events = render_jsonl_events(content)
-        # 一行事件都没解析出来：增量可能从事件中间切出来，退回原文，不静默丢增量。
-        # 解析到事件但渲染为空（只有 isMeta 注入 / 工具结果）则保持为空——退回原文
-        # 会把技能手册整段喂给模型，比抽到噪音更糟。
         return rendered if events else content
     return content
+
+
+@dataclass(frozen=True)
+class QueueTarget:
+    project: str
+    device_id: str
+    source_type: str
+    console: bool
+
+
+def _queue_target(config: WorkerConfig, payload: dict[str, object], path: Path) -> QueueTarget:
+    project = explicit_project(payload.get("project"))
+    if project is None:
+        raise AuthorizationDenied("project_required")
+    producer = payload.get("producer")
+    if "producer" in payload and producer not in ("collector", "console"):
+        raise AuthorizationDenied("producer_unrecognized")
+    device_id, source_id, source_type = (
+        payload.get("device_id"),
+        payload.get("source_id"),
+        payload.get("source_type"),
+    )
+    if (
+        not isinstance(device_id, str)
+        or not device_id
+        or not isinstance(source_id, str)
+        or not source_id
+        or not isinstance(source_type, str)
+        or source_type not in PROFILE_BY_SOURCE
+    ):
+        raise AuthorizationDenied("queue_identity_invalid")
+    sha = payload.get("sha256")
+    if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None:
+        raise AuthorizationDenied("queue_identity_invalid")
+    try:
+        directory = batch_dir(config.data_dir, device_id, source_id)
+    except BatchTargetConflict:
+        raise AuthorizationDenied("queue_identity_invalid") from None
+    expected = directory / sha[:2] / f"{sha}.json"
+    if expected.relative_to(config.raw_root).parts != path.relative_to(config.raw_root).parts:
+        raise AuthorizationDenied("queue_identity_mismatch")
+
+    # 即使带管理台标记，也必须符合保留的生产者身份。
+    exact_console = device_id == CONSOLE_DEVICE and source_type == "docs" and source_id == project
+    if producer == "console" or (producer is None and exact_console):
+        if not exact_console:
+            raise AuthorizationDenied("console_identity_invalid")
+        return QueueTarget(project, device_id, source_type, console=True)
+    if collector_device_reserved(device_id):
+        raise AuthorizationDenied("console_identity_invalid")
+    return QueueTarget(project, device_id, source_type, console=False)
+
+
+async def _authorize(config: WorkerConfig, policy: TargetPolicy, target: QueueTarget) -> None:
+    """在真源写锁内复查当前策略。"""
+    if not target.console:
+        if config.is_registered is None:
+            raise TargetUnavailable("registration_unavailable")
+        try:
+            registered = await config.is_registered(target.device_id)
+        except Exception as exc:
+            # 不同 StateStore 实现可能抛出不同类型的数据库异常。
+            raise TargetUnavailable("registration_unavailable") from exc
+        if not registered:
+            raise AuthorizationDenied("device_not_registered")
+        if target.project not in await policy.granted(target.device_id):
+            raise AuthorizationDenied("target_not_granted")
+    if not await policy.active(target.project):
+        raise AuthorizationDenied("target_inactive")
+    try:
+        await guard_project_write(config.knowledge_dir, target.project)
+    except WriteDeferred as exc:
+        if exc.reason == "archived":
+            raise AuthorizationDenied("target_inactive") from None
+        raise
+    except OSError as exc:
+        raise TargetUnavailable("archive_state_unavailable") from exc
 
 
 async def process_file(
@@ -320,46 +426,76 @@ async def process_file(
     templates: dict[str, str] | None = None,
 ) -> tuple[int, int, int]:
     """处理一个 raw 文件；返回 (created, updated, edges)。失败抛异常，由调用方隔离。"""
-    payload = json.loads(await AsyncPath(path).read_text(encoding="utf-8"))
-    source_id = str(payload.get("source_id", "unknown"))
-    source_type = str(payload.get("source_type", "sessions"))
-    device_id = str(payload.get("device_id", "unknown"))
-    file_path = str(payload.get("path", path.name))
-    # 未指定合法知识库时用 source_id 兼容旧批次。
-    project = resolve_project(payload.get("project"), source_id)
-    # 预检避免已知阻塞时调用模型；不持锁等待模型，merge 会加锁复检。
-    async with write_lock(config.knowledge_dir, timeout=0):
-        await guard_project_write(config.knowledge_dir, project)
+    try:
+        payload = json.loads(await AsyncPath(path).read_text(encoding="utf-8"))
+    except (ValueError, RecursionError):
+        raise AuthorizationDenied("queue_payload_invalid") from None
+    if not isinstance(payload, dict):
+        raise AuthorizationDenied("queue_payload_invalid")
+    target = _queue_target(config, payload, path)
+    policy = config.policy()
 
-    text = _document_text(payload)[: config.max_input_chars]
-    # 日志里要能区分「渲染后为空」和「模型拒抽」：两者在 `+0 new` 上完全同形，
-    # 排查时只能靠这一行字符数判断问题出在渲染还是提示词。
-    print(f"[worker] text {path.name}: {len(text)} chars", flush=True)
-    if not text.strip():
-        return 0, 0, 0
+    async def check_target() -> None:
+        await _authorize(config, policy, target)
 
-    profile = PROFILE_BY_SOURCE.get(source_type, "sessions")
-    if templates is None or profile not in templates:
-        templates = dict(templates or {})
+    # 空输入也要授权；等待模型时不持写真源的锁。
+    async with target_write_lock(config.knowledge_dir, timeout=0):
+        await check_target()
+
+    file_path = payload.get("path")
+    content = payload.get("content")
+    if not isinstance(file_path, str) or not isinstance(content, str):
+        raise AuthorizationDenied("queue_payload_invalid")
+    profile = PROFILE_BY_SOURCE[target.source_type]
+    is_session = profile == "sessions"
+    if is_session:
+        blocks = (
+            render_session_blocks(content)
+            if Path(file_path).suffix.lower() == ".jsonl"
+            else render_plaintext_blocks(content)
+        )
+        blocks = truncate_blocks(blocks, config.max_input_chars)
+        if not blocks:
+            return 0, 0, 0
+    else:
+        text = _document_text(content, file_path)[: config.max_input_chars]
+        if not text.strip():
+            return 0, 0, 0
+
+    if templates is None:
+        templates = {}
+    if profile not in templates:
         templates[profile] = await load_profile(profile)
-
-    extraction = await extract_document(
-        client,
-        template=templates[profile],
-        path=file_path,
-        text=text,
-        model=config.model,
-        max_chars=config.max_chars,
-        max_tokens=config.max_tokens,
-    )
-    store = KnowledgeStore(config.knowledge_dir)
-    kind = SourceKind.SESSION if source_type == "sessions" else SourceKind.WIKI
+    if is_session:
+        extraction = await extract_session(
+            client,
+            template=templates[profile],
+            path=file_path,
+            blocks=blocks,
+            model=config.model,
+            max_chars=config.max_chars,
+            max_tokens=config.max_tokens,
+        )
+        if not extraction.nodes:
+            return 0, 0, 0
+    else:
+        extraction = await extract_document(
+            client,
+            template=templates[profile],
+            path=file_path,
+            text=text,
+            model=config.model,
+            max_chars=config.max_chars,
+            max_tokens=config.max_tokens,
+        )
+    kind = SourceKind.SESSION if is_session else SourceKind.WIKI
     report = await merge(
-        store,
+        KnowledgeStore(config.knowledge_dir),
         extraction,
-        project=project,
-        source=SourceRef(type=kind, ref=file_path, device=device_id),
+        project=target.project,
+        source=SourceRef(type=kind, ref=file_path, device=target.device_id),
         lock_timeout=0,
+        check_target=check_target,
     )
     return len(report.created), len(report.updated), report.edges_added
 
@@ -383,9 +519,26 @@ async def run_round(
         relative = str(path.relative_to(config.raw_root))
         try:
             created, updated, edges = await process_file(client, config, path, templates=templates)
+        except AuthorizationDenied as exc:
+            try:
+                await _move_to(config, path, config.pending_root)
+            except FileNotFoundError:
+                pass  # 另一个 worker 已移走原始文件。
+            except OSError:
+                print("[worker] defer: quarantine_unavailable", file=sys.stderr)
+                continue
+            if failures.pop(relative, None) is not None:
+                dirty = True
+            current.quarantined += 1
+            current.errors.append(exc.reason)
+            print(f"[worker] quarantine: {exc.reason}", file=sys.stderr)
+            continue
+        except TargetUnavailable:
+            # 读不到登记/策略不是原始文件失败，保留原字节与已有失败次数。
+            print("[worker] defer: target_unavailable", flush=True)
+            continue
         except WriteDeferred as exc:
-            # 不动文件或失败计数；单库推迟不占用本轮配额。
-            print(f"[worker] defer {path.name}: {exc}", flush=True)
+            print(f"[worker] defer: {exc.reason or 'write_unavailable'}", flush=True)
             if exc.reason in {"busy", "pending"}:
                 break  # 全局阻塞，下一轮再试，不逐个重复预检。
             continue
@@ -455,10 +608,10 @@ async def run_forever(
             await sleep(config.interval)
             continue
         report = await run_round(client, config)
-        if report.processed or report.failed:
+        if report.processed or report.failed or report.quarantined:
             print(
                 f"[worker] round: {report.processed} ok / {report.failed} fail "
-                f"/ +{report.created} new / {report.updated} updated",
+                f"/ {report.quarantined} denied / +{report.created} new / {report.updated} updated",
                 flush=True,
             )
         if report.failed:

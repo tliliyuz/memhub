@@ -30,8 +30,10 @@ from typing import Any
 from anyio import Path as AsyncPath
 from starlette.datastructures import UploadFile
 
-from memhub.contract import KB_ID_RE, BatchFile, IngestRequest
+from memhub.contract import BatchFile, IngestRequest, explicit_project
 from memhub.queue.rawstore import (
+    CONSOLE_DEVICE,
+    BatchTargetConflict,
     QuotaExceeded,
     RawStoreQuota,
     batch_dir,
@@ -39,7 +41,7 @@ from memhub.queue.rawstore import (
     save_batch,
 )
 
-DEVICE_ID = "kb-console"
+DEVICE_ID = CONSOLE_DEVICE
 SOURCE_TYPE = "docs"
 MAX_FILES = 20
 MAX_CHARS = 60_000
@@ -95,7 +97,7 @@ class KbUploads:
         *,
         project_exists: Callable[[str], Awaitable[bool]],
     ) -> dict[str, Any]:
-        if not KB_ID_RE.match(project):
+        if explicit_project(project) is None:
             raise UploadInvalid(
                 "知识库 id 只能用小写字母/数字/./_/-，且以字母或数字开头",
                 {"project": project},
@@ -161,13 +163,14 @@ class KbUploads:
             project=project,
             files=accepted,
         )
-        incoming = await estimate_new_bytes(self.data_dir, request)
         try:
+            incoming = await estimate_new_bytes(self.data_dir, request, producer="console")
             await self.quota.check(incoming)
+            await save_batch(self.data_dir, request, producer="console")
         except QuotaExceeded as exc:
             raise UploadQueueFull(exc.used, exc.limit, exc.incoming) from exc
-        try:
-            await save_batch(self.data_dir, request)
+        except BatchTargetConflict as exc:
+            raise UploadInvalid("无法确认已有队列记录的目标", status=503) from exc
         except OSError:
             # 可能只写了一半；让下次请求重扫，别让缓存低估真实占用。
             await self.quota.invalidate()

@@ -13,6 +13,7 @@
 | [ADR-0004](ADR-0004-runtime-state-in-postgres.md) | 运行态放云上共享 PostgreSQL 实例 | accepted |
 | [ADR-0005](ADR-0005-async-orm-data-access.md) | 数据访问层改为异步 I/O + SQLAlchemy ORM | accepted |
 | [ADR-0006](ADR-0006-upload-reuse-extraction-pipeline.md) | 管理台上传文档复用现有抽取管线 | accepted |
+| [ADR-0009](ADR-0009-collector-project-write-grants.md) | 采集器按设备授权写入已登记目标 | proposed |
 
 模板：
 

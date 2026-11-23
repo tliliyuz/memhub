@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.4
+> 版本: 0.5
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -64,8 +64,8 @@ Authorization: Bearer <device_token>
 ### 幂等
 
 - 每个推送批次带 `batch_id`（客户端生成 uuid v4）。服务端按 `(device_id, batch_id)` 去重，**去重窗口 24 小时**。
-- 重复的 batch **返回 200 + 上次的结果**（`data.replayed: true`），不使用 409——409 留给游标冲突（1004）。
-- 窗口外重放按新批次处理；幂等由内容 `sha256` 二次兜底。
+- 窗口内重放必须通过当前目标授权，且与原批次绑定同一目标，才返回 `200` 和上次结果（`data.replayed:true`），不会追加新文件。旧结果没有可验证的目标绑定或目标不一致时返回 `400/1003`。游标冲突仍为 `409/1004`。
+- 窗口外按新批次处理；同设备、同源下仍存在于原始、已处理或待复核队列的同哈希记录不得改投。此检查不覆盖已经清理的记录；不承诺永久保留批次与目标的绑定。
 
 ## 1. 游标
 
@@ -106,7 +106,7 @@ Authorization: Bearer <device_token>
   "device_id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
   "source_id": "cc-sessions",
   "source_type": "sessions",
-  "project": "auto",
+  "project": "sdp-tag",
   "source_rev": 0,
   "cursor_before": { "files": 37, "bytes": 10485760 },
   "cursor_after":  { "files": 39, "bytes": 10616832 },
@@ -131,7 +131,9 @@ Authorization: Bearer <device_token>
 | `from_offset/to_offset` | 用于服务端拼接；`from_offset` 必须 ≥ 服务端已知 offset，否则返回 `409 {code:1004, data:{expected_offset}}`，客户端回退。 |
 | `sha256` | 原文片段哈希，服务端用于二次去重。 |
 | `cursor_before` / `cursor_after` | **仅诊断**，服务端不校验，也不据此产生 1004。游标以每条文件的 `from_offset` 为准。 |
-| `project` | 归入哪个知识库（真源一级目录名）。由桌面端按采集目录选择、写进 `sources[].project`。`auto`（默认）= 不指定，worker 回退到 `source_id`（旧行为）；否则必须是合法知识库 id（`^[a-z0-9][a-z0-9._-]{0,63}$`），非法值整批 `400 {code:1003}`，不做静默兜底。目标库不必提前存在——首次写入自动建目录；但要列表里有名字/描述，先调 `POST /ingest/projects`（见下）。 |
+| `project` | 必须是用户选定的显式知识库 ID（`^[a-z0-9][a-z0-9._-]{0,63}$`，不允许 `auto`，不修剪空白）。目标必须已登记、仍活动，且当前设备拥有该 ID 的写授权。不推断目标，不用 `source_id` 兜底，不自动建库。 |
+
+缺失、空值、类型或格式错误、未登记、不活动、无授权的目标统一返回 HTTP `400`、`code:1003`、`data.reason:"target_unavailable"`，不回显目标或披露是否存在；拒绝发生在配额、落盘和游标更新之前，重放也要先通过目标校验。服务暂不能校验时返回通用 `500/2001`，可重试。`target_unavailable` 仅影响该源：保留待发增量，不推进被拒游标，修正配置前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
 
 服务端游标校验只看两处：`source_rev`（是否允许重扫）与每条文件的 `from_offset`（相对已知 offset 是否回退）。
 
@@ -168,7 +170,7 @@ Authorization: Bearer <device_token>
 
 ### `GET /ingest/projects?device_id=<id>`
 
-桌面端「被采集目录 → 已有知识库」下拉框的数据源：返回云端已有的知识库列表（与管理台 `/api/v1/kb/projects` 同一份数据，服务端转发 kb-api；真源目录的唯一写者仍是 kb-api）。
+桌面端「被采集目录 → 已有知识库」下拉框的数据源：只返回当前设备有写授权、已登记且活动的知识库，完整返回已筛选条目，不分页。只有实施此筛选且推送也实施同一规则时才返回 `writable_only: true`。
 
 ```json
 { "code": 0, "message": "ok", "data": {
@@ -176,12 +178,13 @@ Authorization: Bearer <device_token>
       { "id": "sdp-tag", "name": "SDP Tag", "description": "标签系统",
         "nodes": 206, "edges": 131, "updated_at": "2026-11-20T01:38:16Z" }
     ],
-    "total": 1
+    "total": 1,
+    "writable_only": true
   } }
 ```
 
 - 鉴权同 `/ingest/raw`（设备 token）。
-- kb-api 不可达时返回 `500 {code:2001}`。桌面端应回退成「手填 id」，不能把采集流程阻塞在这个查询上。
+- 服务暂无法验证列表时返回 `500 {code:2001}`；缺少 `writable_only:true` 的旧服务响应不能用于授权选库。
 - 用户选中的 `id` 写回 `sources.json` 的 `sources[].project`；采集器原样放进 `/ingest/raw` 的 `project`。
 - 改一个源的 `project` **只影响之后推送的内容**：已提炼的批次按内容寻址落在 `processed_raw/`，不会因为改库名而重跑，也不会搬去新库。
 
@@ -194,9 +197,9 @@ Authorization: Bearer <device_token>
 ```
 
 - `id` 即真源目录名，规则同上（`^[a-z0-9][a-z0-9._-]{0,63}$`）；`name`/`description` 进 `.kbs.json`。
-- `auto` 是推送侧的保留值（表示「按源 id 归档」），不是可新建的库：`id=auto` 直接 `400 {code:1003}`，`data.reason="reserved"`；其余非法 id 同样 400/1003，但 `data.reason="invalid"`——客户端按 reason 区分文案，别解析 message。
-- 业务码透传：重名 `409 {code:1010}`、参数非法 `400/422 {code:1012}`、kb 不可达 `500 {code:2001}`，`data.upstream` 带上游 HTTP 状态码。
-- 也可以不显式新建：首次推送写入时 worker 自动建目录，但管理台列表里显示名就是 id、描述为空。推荐「先建库再推送」。
+- `auto` 始终保留：`id=auto` 返回 `400/1003`，`data.reason="reserved"`；其他格式非法的 ID 返回 `400/1003`，`data.reason="invalid"`。
+- 合法 ID 必须预授权给当前设备，否则在查询库是否存在前返回 `400/1003`、`data.reason="target_unavailable"`。创建不会自动授予任何设备权限。
+- 已获预授权的请求保留上游业务码：重名 `409/1010`、参数非法 `400/422`、kb 不可用 `500/2001`。推送从不自动创建库。
 
 ### `DELETE /ingest/source/{source_id}?device_id=<id>&purge=true`
 
@@ -220,22 +223,9 @@ Authorization: Bearer <device_token>
 
 ## 4. 提炼（服务端内部，客户端无需感知）
 
-```
-raw_store(增量原文)
-  → value_filter   (cheap model，判"是否有沉淀价值"，无价值直接丢弃，只留计数)
-  → extract        (expensive model，按 source_type 选 prompt profile，输出 Node/Edge 候选)
-  → merge          (按 id/slug/向量相似度合并；冲突写入 contradicts 待治理)
-  → markdown 真源  (git commit)
-  → 重建投影       (kg.json / vector / fts)
-```
+原始队列记录包含服务端确定的生产者和显式目标。worker 在调用模型前复查来源和当前目标，实际写入时在真源写锁内再次复查。不为旧记录推断或替换目标。明确不合规的原始记录按原因隔离到 `pending_review`，保留原始字节；配置、登记、事务或锁暂不可用时留在队列，不消耗模型重试次数。管理台上传走独立鉴权，不适用设备授权，但也要求活动且已登记的显式目标。
 
-会话 JSONL 在提炼前先渲染：
-
-- `isMeta` 为真的事件属于注入上下文，必须跳过，不能因角色是 `user` 就当作实际对话。
-- 已解析到事件但过滤后为空时，不调用模型，也不退回原始 JSONL 绕过过滤；只有完全未解析到事件时保留原文兜底（兼容增量边界）。
-- 本规则不改变采集上传范围、普通对话、工具调用简短标记及分段策略；也不保证排除未带 `isMeta` 标记的通知。
-
-失败重试 3 次后进入 `pending_review`，不阻塞后续批次。
+会话 JSONL 只从可引用的非 `isMeta` 对话文字渲染证据块；摘要、工具输出、无法解析的片段不作为证据，不退回原始 JSONL。提炼只保留具有本窗逐字引用的可复用事实、决策、流程或踩坑；可辨识的跨窗重复只留一份。边须有证据，且两端为无歧义的存活候选。引用匹配证明文本出现过，不证明结论正确。无合格候选时成功处理为零，不写真源；畸形响应按失败重试，超限隔离。候选保留来源引用，不改变节点格式；文档和 wiki 提炼规则不变。
 
 ## 5. 大批量（可选）
 
@@ -243,7 +233,7 @@ raw_store(增量原文)
 
 ## 6. 版本与兼容
 
-- 路径版本 `/api/v1`；字段只增不删；新增必填字段视为 v2。
+- 路径仍为 `/api/v1`；0.5 收紧已有 `project` 字段，不再接受缺失或 `auto`。旧客户端可识别既有的 1003，但可能在下一次计划运行时再次发送，需升级并修正保存的目标。
 - 客户端在 `heartbeat` 上报 `collector_version`；服务端可下发 `upgrade` 命令但不强制。
 
 ## 7. 与面板既有接口的边界

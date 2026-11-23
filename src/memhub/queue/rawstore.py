@@ -8,10 +8,8 @@
     <DATA_DIR>/raw_store/<device>/<source>/<sha[:2]>/<sha>.json
 
 单个 JSON 文件包含该文件片段的元数据与正文；同一 sha 只会有一个文件，
-所以在移动端重推同一批时只会覆盖成相同内容，不会膨胀。
-
-为什么按 sha 而不是按设备路径：worker 按内容处理，同一份内容被两个设备/路径
-推上来只该提炼一次；正文本身是 `content` 字段，路径只作溯源信息保留。
+同设备、同源内的重复内容不重写；若现存记录目标不一致，整批拒绝。
+正文是 `content` 字段，路径仅作溯源。
 
 写入用「临时文件 + 原子替换」：worker 只扫描到完整文件，不会读到半截 JSON。
 """
@@ -19,20 +17,32 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
-from pathlib import Path
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path, PureWindowsPath
+from typing import Any, Literal
 
 import anyio
 from anyio import Path as AsyncPath
 
-from memhub.contract import IngestRequest
+from memhub.contract import IngestRequest, explicit_project
+from memhub.kb.manage import WriteDeferred, write_lock
 
 _SAFE = re.compile(r"[^A-Za-z0-9_.-]")
 # 每枚文件除正文外还有元数据外壳（路径、时间戳、sha 等），配额估算按此加项。
 _PAYLOAD_OVERHEAD = 512
+Producer = Literal["collector", "console"]
+_QUEUE_ROOTS = ("raw_store", "processed_raw", "pending_review")
+CONSOLE_DEVICE = "kb-console"
+
+
+class BatchTargetConflict(Exception):
+    def __init__(self) -> None:
+        super().__init__("queue target conflict")
 
 
 class QuotaExceeded(Exception):
@@ -46,13 +56,25 @@ class QuotaExceeded(Exception):
 
 
 def _safe_id(value: str) -> str:
-    """设备/来源 id 直接拼路径前做白名单化；不做路径拼接攻击面。"""
-    cleaned = _SAFE.sub("_", value)
-    return cleaned[:100] or "_"
+    """沿用队列地址映射；Windows 文件系统会忽略分量末尾的点。"""
+    cleaned = _SAFE.sub("_", value)[:100]
+    return cleaned.rstrip(".") if os.name == "nt" else cleaned
+
+
+def _queue_component_valid(part: str) -> bool:
+    if not part or part in {".", ".."}:
+        return False
+    if os.name != "nt":
+        return True
+    isreserved = getattr(os.path, "isreserved", None)
+    return not (isreserved(part) if isreserved is not None else PureWindowsPath(part).is_reserved())
 
 
 def batch_dir(data_dir: Path, device_id: str, source_id: str) -> Path:
-    return data_dir / "raw_store" / _safe_id(device_id) / _safe_id(source_id)
+    parts = (_safe_id(device_id), _safe_id(source_id))
+    if not all(_queue_component_valid(part) for part in parts):
+        raise BatchTargetConflict()
+    return data_dir.joinpath("raw_store", *parts)
 
 
 async def tree_size(root: Path) -> int:
@@ -71,17 +93,71 @@ async def tree_size(root: Path) -> int:
     return total
 
 
-async def estimate_new_bytes(data_dir: Path, request: IngestRequest) -> int:
-    """本批实际会新增的字节数：已落盘的 sha 不会再写，配额不该把它们算进去。
+def collector_device_reserved(device_id: str) -> bool:
+    return _safe_id(device_id).rstrip(".").lower() == CONSOLE_DEVICE
 
-    重放同一批在配额满时仍必须成功——否则采集端会被永久卡死在一条已经收下的数据上。
-    """
+
+@asynccontextmanager
+async def queue_write_lock(data_dir: Path) -> AsyncIterator[None]:
+    """采集器写入与状态更新串行；各进程必须共享同一个 data_dir。"""
+    try:
+        async with write_lock(data_dir / "state" / "collector-queue", timeout=2, recovery=True):
+            yield
+    except WriteDeferred as exc:
+        raise OSError("queue lock unavailable") from exc
+
+
+async def _existing_hashes(data_dir: Path, request: IngestRequest, producer: Producer) -> set[str]:
+    project = explicit_project(request.project)
+    if project is None:
+        raise BatchTargetConflict()
+    if producer == "console":
+        if (request.device_id, request.source_type, request.source_id) != (
+            CONSOLE_DEVICE,
+            "docs",
+            project,
+        ):
+            raise BatchTargetConflict()
+    elif collector_device_reserved(request.device_id):
+        raise BatchTargetConflict()
+
     base = batch_dir(data_dir, request.device_id, request.source_id)
+    relative = base.relative_to(data_dir / "raw_store")
+    existing: set[str] = set()
+    for sha in {entry.sha256 for entry in request.files}:
+        # worker 只向后移动，不重投。先查 raw，再查两个终态。
+        for root in _QUEUE_ROOTS:
+            path = data_dir / root / relative / sha[:2] / f"{sha}.json"
+            try:
+                text = await AsyncPath(path).read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            try:
+                stored = json.loads(text)
+            except ValueError as exc:
+                raise BatchTargetConflict() from exc
+            if not isinstance(stored, dict) or (
+                stored.get("project"),
+                stored.get("device_id"),
+                stored.get("source_id"),
+                stored.get("sha256"),
+                stored.get("producer", producer),
+            ) != (project, request.device_id, request.source_id, sha, producer):
+                raise BatchTargetConflict()
+            existing.add(sha)
+    return existing
+
+
+async def estimate_new_bytes(
+    data_dir: Path, request: IngestRequest, *, producer: Producer = "collector"
+) -> int:
+    """配额只计新增哈希；重放已收内容不占额度。"""
+    existing = await _existing_hashes(data_dir, request, producer)
     total = 0
     for batch_file in request.files:
-        target = base / batch_file.sha256[:2] / f"{batch_file.sha256}.json"
-        if not await AsyncPath(target).is_file():
+        if batch_file.sha256 not in existing:
             total += len(batch_file.content.encode("utf-8")) + _PAYLOAD_OVERHEAD
+            existing.add(batch_file.sha256)
     return total
 
 
@@ -136,26 +212,22 @@ class RawStoreQuota:
             self._used += written_bytes
 
 
-async def save_batch(data_dir: Path, request: IngestRequest) -> int:
-    """落一批原始增量；返回写入（或覆盖）的文件数。
-
-    调用方保证本批已通过 `StateStore.apply()`——这里不判断游标与去重，
-    只保证「已接受批次里的内容确实在盘上」。失败时抛 OSError，由调用方
-    决定是否整批返回错误（当前策略：抛 500，客户端会重推）。
-    """
+async def save_batch(
+    data_dir: Path, request: IngestRequest, *, producer: Producer = "collector"
+) -> int:
+    """先检查整批寻址冲突，再写入新内容。采集入口须持有 queue_write_lock。"""
+    existing = await _existing_hashes(data_dir, request, producer)
     base = batch_dir(data_dir, request.device_id, request.source_id)
     written = 0
     for batch_file in request.files:
-        target = base / batch_file.sha256[:2] / f"{batch_file.sha256}.json"
-        if await AsyncPath(target).is_file():
-            # 完全相同的内容已经落过盘；重放/跨设备重复推送走到这里。
+        if batch_file.sha256 in existing:
             continue
+        target = base / batch_file.sha256[:2] / f"{batch_file.sha256}.json"
         payload: dict[str, Any] = {
+            "producer": producer,
             "device_id": request.device_id,
             "source_id": request.source_id,
             "source_type": request.source_type,
-            # 目标知识库由采集端选（桌面端 UI 里按目录指定）；worker 落到
-            # knowledge/<project>/。"auto" 时 worker 回退 source_id（旧行为）。
             "project": request.project,
             "batch_id": request.batch_id,
             "path": batch_file.path,
@@ -167,6 +239,7 @@ async def save_batch(data_dir: Path, request: IngestRequest) -> int:
         }
         await AsyncPath(target.parent).mkdir(parents=True, exist_ok=True)
         await _atomic_write_json(target, payload)
+        existing.add(batch_file.sha256)
         written += 1
     return written
 
@@ -186,10 +259,14 @@ async def _atomic_write_json(target: Path, payload: dict[str, Any]) -> None:
 
 
 __all__ = [
+    "CONSOLE_DEVICE",
+    "BatchTargetConflict",
     "QuotaExceeded",
     "RawStoreQuota",
     "batch_dir",
+    "collector_device_reserved",
     "estimate_new_bytes",
+    "queue_write_lock",
     "save_batch",
     "tree_size",
 ]

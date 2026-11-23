@@ -169,10 +169,10 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 | POST | `/api/v1/kb/uploads` | `multipart/form-data`：`project`（知识库 id）+ `files`（可多个）；201 返回 `{batch_id, project, accepted:[{name, sha256, chars}], rejected:[{name, reason}], queued:true}` |
 | GET | `/api/v1/kb/uploads/{batch_id}` | `{batch_id, project, created_at, total, counts:{queued,processed,failed,missing}, files:[{name, sha256, status, attempts?}]}` |
 
-- 允许后缀 `.md` / `.txt` / `.jsonl`，UTF-8，单文件 ≤60000 字符，单批 ≤20 个文件；`project` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`，且必须是**已存在的知识库目录**（`<knowledge>/<project>/` 不存在 → 404/`1011`）——否则提炼时会凭空建出一个没有来源的空库。
+- 允许后缀 `.md` / `.txt` / `.jsonl`，UTF-8，单文件 ≤60000 字符，单批 ≤20 个文件；`project` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`，不得为 `auto`，且必须是**已登记的活动知识库**（否则返回 404/`1011`；暂无法核验返回 503/`2001`）。管理台鉴权不变，不使用设备授权。
 - 单个文件不合规进 `rejected`（`unsupported_type` / `not_utf8` / `empty` / `too_large` / `invalid_name`），其余文件照常接收；整批没有可接受的 → 422/`1012`，`data.rejected` 给出原因。
-- 内容按 sha256 内容寻址：同一内容重复上传只落一份，worker 也只提炼一次。
-- 落盘：`<DATA_DIR>/raw_store/kb-console/<project>/<sha[:2]>/<sha>.json`（`source_type=docs`，worker 按 docs profile 提炼到 `<knowledge>/<project>/`）；批次清单在 `<DATA_DIR>/uploads/<batch_id>.json`，`uploads/` 不在 worker 扫描范围内。
+- 内容按库和 sha256 寻址：已有相容的队列记录仍在原始、已处理或待复核目录时，不为重复上传新增原始副本。记录清理后不保证去重。
+- 落盘：`<DATA_DIR>/raw_store/kb-console/<project>/<sha[:2]>/<sha>.json`，由服务端标记 `producer=console`、`source_type=docs`。worker 只接受确切的管理台身份及活动目标，按 docs profile 提炼；采集设备不能使用该保留身份。批次清单在 `<DATA_DIR>/uploads/<batch_id>.json`，`uploads/` 不在 worker 扫描范围内。
 - 状态逐文件推导，与 worker 的搬运动作一致：`processed_raw/<rel>` → `processed`；`pending_review/<rel>` → `failed`；`state/failures.json[rel]` 有计数 → `failed`（带 `attempts`）；仍在 raw_store → `queued`。worker 只在时间窗口内搬运，白天长时间 `queued` 属正常排队，不是故障。
 - 队列总量受 `MEMHUB_QUEUE_MAX_BYTES` 约束，超限 503/`1013`。kb-api 与 ingest-api 是两个进程、各持一份 30 秒刷新的用量缓存，跨进程并发推送/上传可能短暂超出上限（容忍一个刷新窗口）。
 - 批次 id 非法或清单不存在 → 404/`1011`。
