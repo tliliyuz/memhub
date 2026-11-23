@@ -16,11 +16,12 @@ MCP 契约 0.1 设计过治理组（写候选、提案、合并、废弃、关�
 第一阶段只开放 `kb_write_candidate`，其余治理工具继续关闭：
 
 - **作用域与裁剪**：新增 `mcp:write` 作用域，凭据粒度到「库 + 是否可写候选」。`tools/list` 按作用域裁剪，拿不到的工具不可见，而不是调用后再拒绝。凭据仍只存令牌的 SHA-256 摘要，由用户签发，不经过产品会话。
-- **写入范围**：只创建或更新 `tier=candidate` 节点，复用现有跨进程写锁、登记与活动校验，不新增真源写者；不做物理删除。
-- **去重**：第一阶段只用同 slug 冲突，加归一化正文哈希精确去重（NFKC、折叠空白、小写后取 sha256）。向量相似度去重等 pgvector 落地后再加。
+- **写入范围**：第一阶段**只创建、不更新** `tier=candidate` 节点，复用现有跨进程写锁、登记与活动校验，不新增真源写者；不做物理删除。
+- **slug 冲突**：写工具绝不覆盖 canonical。slug 命中 `tier=canonical` 或 `deprecated` 节点时一律拒绝，`data.reason=slug_conflict_canonical`；slug 命中已有 `tier=candidate` 节点时同样拒绝，`data.reason=slug_conflict_candidate`，不更新已有候选。更新已有候选留到批准流落地后再放开。
+- **去重**：第一阶段用 slug 冲突，加归一化正文哈希精确去重（NFKC、折叠空白、小写后取 sha256）；正文哈希命中已存在候选时拒绝，`data.reason=content_duplicate`。向量相似度去重等 pgvector 落地后再加。
 - **证据必填**：`evidence` 直接复用现有 `SourceRef` 形状（`type` / `ref` / `device` / `captured_at`，与 frontmatter 的 `source` 同形，定义见 `src/memhub/contract/models.py`），不新造简写字符串格式。缺失或校验失败返回 `400/1003`，`data.reason` 细分为 `evidence_missing` / `evidence_invalid`。
 - **内容门槛**：同一凭据加每日写入上限；入口复用 `prompts/sessions.md` 的「明确忽略」判定（寒暄、进度汇报、重复确认、原始日志、只对当前任务成立的临时状态、未验证猜测）直接拒绝，而不是写进去再清理。
-- **提交与审计**：每次写成功自动 git commit，message 含工具名与调用者；审计只记凭据摘要、库、节点 id、工具、结果与时间，不含正文与 token。
+- **提交与审计**：每次写成功自动 git commit，message 含工具名与调用者；调用者标识取自凭据登记本身，不取请求体里自报的字段。审计只记凭据摘要、库、节点 id、工具、结果与时间，不含正文与 token。
 - **可见性**：候选默认不进 `kb_search` 的 canonical 结果（维持现有默认 `tier=canonical`），需要显式传 `candidate` 或 `all` 才能看到。
 
 canonical 修改（`kb_propose_change`）、合并（`kb_merge`）、废弃（`kb_deprecate`）、治理组其余工具与批准流，待批准流落点确定后另立决策放开。
