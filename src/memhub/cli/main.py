@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--no-browser", action="store_true")
 
-    mcp = sub.add_parser("mcp", help="以 MCP stdio 服务暴露检索组给 agent")
+    mcp = sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
     mcp.add_argument("--knowledge-dir", default=None)
 
     purge = sub.add_parser(

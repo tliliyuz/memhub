@@ -745,7 +745,12 @@ async def _git(repo: Path, args: list[str], *, timeout: float) -> tuple[int, byt
     return completed.returncode, completed.stdout, completed.stderr
 
 
-async def _git_commit(root: Path, message: str) -> str | None:
+async def commit_source(root: Path, message: str, *, node_path: str) -> str | None:
+    """只提交本次写入的节点，不捎带其他真源改动。"""
+    return await _git_commit(root, message, node_path=node_path)
+
+
+async def _git_commit(root: Path, message: str, *, node_path: str | None = None) -> str | None:
     """真源所在的 git 仓库存在时提交一次；任何失败都不影响写操作本身。"""
     resolved = Path(await AsyncPath(root).resolve())
     repo = await _find_git_root(resolved)
@@ -766,6 +771,8 @@ async def _git_commit(root: Path, message: str) -> str | None:
             f":(exclude,glob){archives}/**/.*.tmp",
             f":(exclude,glob){archives}/*/{journal_name}",
         ]
+        if node_path is not None:
+            pathspec = ["--", f":(literal){(relative / node_path).as_posix()}"]
         code, _, stderr = await _git(repo, ["add", "-A", *pathspec], timeout=30)
         if code != 0:
             raise OSError(stderr.decode("utf-8", "replace").strip() or f"git add exit {code}")
