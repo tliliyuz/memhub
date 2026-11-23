@@ -1,10 +1,9 @@
-"""采集入口与 worker 共用的目标授权；注册设备本身不授予写权限。"""
+"""采集入口与 worker 共用的目标边界：已登记且活动。"""
 
 from __future__ import annotations
 
-import json
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
 from memhub.contract import explicit_project
 from memhub.kb import archive, catalog
@@ -13,22 +12,24 @@ from memhub.kb.store import KnowledgeStore
 
 
 class TargetUnavailable(Exception):
-    """无法确认当前策略或登记状态。不得沿用旧权限。"""
+    """无法确认当前登记状态。不得沿用旧权限。"""
 
 
-def _unique_object(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError("duplicate key")
-        result[key] = value
-    return result
+class TargetStatus(StrEnum):
+    ACTIVE = "active"
+    UNREGISTERED = "unregistered"
+    INACTIVE = "inactive"
+    INVALID = "invalid"
 
 
-async def registered_active(store: KnowledgeStore, project: str) -> bool:
-    """检查严格登记与活动目录，不使用用于展示的目录发现规则。"""
+async def target_status(store: KnowledgeStore, project: str) -> TargetStatus:
+    """目标当前状态：只认严格登记 + 活动普通目录。
+
+    登记文件不可读、归档事务未完成时抛 `TargetUnavailable`，调用方按可重试的
+    服务端错误处理；不能用「猜一个默认值」继续写。
+    """
     if explicit_project(project) is None:
-        return False
+        return TargetStatus.INVALID
     try:
         if await archive.path_kind(store.root) != "dir":
             raise TargetUnavailable("target registry unavailable")
@@ -37,49 +38,32 @@ async def registered_active(store: KnowledgeStore, project: str) -> bool:
             raise TargetUnavailable("target registry unavailable")
         _, registry = await catalog._strict_registry(store)
         if not any(entry["id"] == project for entry in registry["kbs"]):
-            return False
+            return TargetStatus.UNREGISTERED
         blocked = await archive.checked_path(store.root, f"{archive.ARCHIVES}/blocked/{project}")
         if await archive.path_kind(blocked) is not None:
-            return False
+            return TargetStatus.INACTIVE
     except (ConflictError, OSError) as exc:
         raise TargetUnavailable("target registry unavailable") from exc
     # 已登记但指向非普通目录（含符号链接和 Windows 重解析点）的目标绝不活动。
     try:
-        return await archive.path_kind(store.root / project) == "dir"
+        kind = await archive.path_kind(store.root / project)
     except ConflictError:
-        return False
+        return TargetStatus.INACTIVE
     except OSError as exc:
         raise TargetUnavailable("target registry unavailable") from exc
+    return TargetStatus.ACTIVE if kind == "dir" else TargetStatus.INACTIVE
 
 
-class TargetPolicy:
-    def __init__(self, knowledge_dir: Path, grants_path: Path) -> None:
+async def registered_active(store: KnowledgeStore, project: str) -> bool:
+    """检查严格登记与活动目录，不使用用于展示的目录发现规则。"""
+    return await target_status(store, project) is TargetStatus.ACTIVE
+
+
+class TargetRegistry:
+    """只回答「这个库现在能不能写」；不提供设备授权文件。"""
+
+    def __init__(self, knowledge_dir: Path) -> None:
         self.store = KnowledgeStore(knowledge_dir)
-        self.grants_path = grants_path
-
-    async def granted(self, device_id: str) -> frozenset[str]:
-        try:
-            raw = await archive.read_optional(self.grants_path)
-            if raw is None:
-                raise TargetUnavailable("target grants unavailable")
-            obj = json.loads(raw, object_pairs_hook=_unique_object)
-            if not isinstance(obj, dict) or set(obj) != {"devices"}:
-                raise ValueError("grant envelope")
-            devices = obj["devices"]
-            if not isinstance(devices, dict):
-                raise TypeError("grant devices")
-            for device, targets in devices.items():
-                if (
-                    not device
-                    or device == "*"
-                    or not isinstance(targets, list)
-                    or any(explicit_project(target) is None for target in targets)
-                    or len(set(targets)) != len(targets)
-                ):
-                    raise ValueError("grant entry")
-            return frozenset(devices.get(device_id, []))
-        except (ConflictError, OSError, TypeError, ValueError) as exc:
-            raise TargetUnavailable("target grants unavailable") from exc
 
     async def active(self, project: str) -> bool:
         return await registered_active(self.store, project)

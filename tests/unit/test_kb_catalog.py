@@ -20,6 +20,10 @@ async def store(tmp_path: Path) -> KnowledgeStore:
 
 
 async def _node(store: KnowledgeStore, *, project: str, title: str, **overrides: object) -> str:
+    # 存储层不再隐式建库：测试用普通目录模拟「手工放进来的库」。
+    directory = AsyncPath(store.root / project)
+    if not await directory.is_dir():
+        await directory.mkdir()
     draft = manage.NodeDraft(
         kind=Kind.FACT,
         title=title,

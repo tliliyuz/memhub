@@ -57,7 +57,7 @@
 | `sources[].path` | ✓ | 绝对路径；manifest 外路径由桌面端在 UI 里让用户选 |
 | `sources[].file_glob` | | 默认按 type：sessions→`**/*.jsonl`，wiki/docs→`**/*.md` |
 | `sources[].enabled` | | 默认 true |
-| `sources[].project` | ✓ | 用户明确选择的目标知识库 ID。桌面端从带 `writable_only:true` 的 `GET /api/v1/ingest/projects` 选用已授权目标，或通过 `POST /api/v1/ingest/projects` 新建已预授权的库。按知识库 ID 规则校验，禁止缺失、空白与 `auto`；采集器原样上报，不推断、不回退。 |
+| `sources[].project` | ✓ | 用户明确选择的目标知识库 ID。桌面端从带 `writable_only:true` 的 `GET /api/v1/ingest/projects` 选用已登记且活动的目标；建库只在管理台 `POST /api/v1/kb/projects`，采集端不代理建库。按知识库 ID 规则校验，禁止缺失、空白与 `auto`；采集器原样上报，不推断、不回退。 |
 | `sources[].exclude` | | glob 排除列表 |
 | `sources[].scan_interval_sec` | | 覆盖全局 |
 
@@ -71,7 +71,7 @@
 
 ## 4. 采集器行为
 
-1. 读取 `sources.json`；仅扫描保存且启用的源。旧配置缺失目标或使用 `auto` 时仅暂停该源，提示用户选库，不影响其他源；选库列表缺少 `writable_only:true` 时不将其视为授权列表。
+1. 读取 `sources.json`；仅扫描保存且启用的源。旧配置缺失目标或使用 `auto` 时仅暂停该源，提示用户选库，不影响其他源；选库列表缺少 `writable_only:true` 时不将其视为可写目标列表。
 2. 与云端对齐游标：`GET /ingest/cursor?device_id=..&source_id=..`（带 Bearer）。
 3. 对本机 `state/<source_id>.json` 与云端游标取**较新者**（换机/重装后以云端为准，避免重推）。
 4. 增量提取按文件追加语义：sessions 用 `(path, byte_offset)`，wiki 用 `(path, mtime, sha256)`。

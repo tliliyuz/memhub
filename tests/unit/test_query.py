@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from anyio import Path as AsyncPath
 
 from memhub.contract import Edge, Kind, NodeFrontmatter, Predicate, Tier
 from memhub.kb.query import QueryError, audit_list, read_node, related, search
@@ -37,6 +38,8 @@ async def _write(
         created_at=NOW,
         updated_at=updated_at or NOW,
     )
+    # 存储层不再隐式建库：测试里先显式建好库目录。
+    await AsyncPath(store.root / node.project).mkdir(exist_ok=True)
     await store.write(node_id, node, body)
 
 

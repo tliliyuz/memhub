@@ -13,7 +13,7 @@ from anyio import Path as AsyncPath
 
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
-from memhub.kb import archive, manage, proc
+from memhub.kb import archive, catalog, manage, proc, target_access
 from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
@@ -49,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--path", required=True)
     ingest.add_argument("--profile", choices=["sessions", "wiki", "docs"], default="sessions")
     ingest.add_argument("--project", default=None)
+    ingest.add_argument(
+        "--create-project",
+        action="store_true",
+        help="目标知识库未登记时，在本次抽取前显式建库（默认只写已登记且活动的库）",
+    )
     ingest.add_argument("--limit", type=int, default=0)
     ingest.add_argument("--knowledge-dir", default=None)
     ingest.add_argument("--max-chars", type=int, default=12000)
@@ -195,6 +200,25 @@ async def _ingest(args: argparse.Namespace) -> int:
 
     project = args.project or source_path.name
     store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    if args.create_project and not args.dry_run:
+        try:
+            await catalog.create_kb(store, kb_id=project)
+            print(f"已建库: {project}")
+        except manage.InvalidError as exc:
+            print(f"知识库 id 不合法: {exc}", file=sys.stderr)
+            return 2
+        except manage.ConflictError as exc:
+            print(f"无法建库: {exc}", file=sys.stderr)
+            return 2
+    try:
+        writable = await target_access.registered_active(store, project)
+    except target_access.TargetUnavailable as exc:
+        print(f"无法确认知识库登记状态: {exc}", file=sys.stderr)
+        return 2
+    if not writable:
+        hint = "" if args.create_project else "；先在管理台建库，或加 --create-project"
+        print(f"知识库 {project!r} 未登记或不在活动状态{hint}", file=sys.stderr)
+        return 2
     template = await load_profile(args.profile)
     client, model = (None, "") if args.dry_run else _llm_client()
     if client is None:

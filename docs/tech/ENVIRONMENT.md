@@ -30,12 +30,11 @@
 | `MEMHUB_LLM_MODEL_EXTRACT` | 是 | — | worker/extract | 启动失败 |
 | `MEMHUB_LLM_MAX_TOKENS` | 否 | `32000` | worker | 单次调用的输出预算（含 thinking）；非法值或非正数退出 2。8000 会被思考吃光、`stop_reason=max_tokens` 且无 text 块（线上首跑已踩） |
 | `MEMHUB_WINDOW_TZ` | 否 | 空（系统本地） | worker | `--window` 的时区：`UTC` / `+08:00` / IANA 名；非法值退出 2。容器默认 UTC，不设时 `21:00-02:00` 实际跑在 05:00-10:00 CST（线上踩过）；生产用显式偏移 `+08:00`，不依赖镜像 tzdata |
-| `MEMHUB_KB_API_URL` | 否 | `http://127.0.0.1:8701` | ingest | `/ingest/projects` 的同机 kb-api 上游：GET 取列表元数据后按授权和活动登记过滤，无授权时不查上游；POST 先查预授权才转发。上游不可用返回 `500/2001`；raw 的目标校验直接读本地策略和登记，不依赖此 URL |
+| `MEMHUB_KB_API_URL` | 否 | `http://127.0.0.1:8701` | ingest | `/ingest/projects` 只读列表的同机 kb-api 上游：GET 取列表元数据后按已登记且活动过滤；上游不可用返回 `500/2001`。raw 的目标校验直接读本地登记，不依赖此 URL；建库只在管理台 |
 | `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
 | `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；`/devices/register` 必须带 `Authorization: Bearer <provision_token>`，否则 401——用户体系未落地前用它关闭开放注册 |
 | `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的共享 token；`MEMHUB_ENV=prod` 时**被忽略**（代码层不读取） |
 | `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest / kb-api | raw_store 用量上限；ingest 超限返回 `1008`、kb 上传返回 `1013`（只按新增 sha 计，重放不受影响）；非法值启动失败 |
-| `MEMHUB_INGEST_GRANTS_PATH` | 否 | `$MEMHUB_DATA_DIR/config/ingest-grants.json` | ingest / worker | 运维管理的非秘密精确设备→知识库授权；无文件、格式错误、非活动目标默认拒绝或暂不可验证，不支持通配符；真实权限不写入仓库或 token |
 | `MEMHUB_PROCESSED_MAX_BYTES` | 否 | `2147483648` | purge-expired | `processed_raw/` 总量上限，配合 7 天保留期按最旧优先裁剪；非法值退出 2 |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |

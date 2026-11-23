@@ -22,12 +22,32 @@ from memhub.contract import Edge, NodeFrontmatter
 TRASH_DIR = "_trash"
 
 
+class ProjectMissing(FileNotFoundError):
+    """目标知识库目录不存在。
+
+    存储层不隐式建库：只有 `catalog.create_kb` 这样的显式建库路径可以创建
+    一级目录。写节点或边时发现库不存在，一律失败而不是 mkdir 出来。
+    """
+
+
 class KnowledgeStore:
     def __init__(self, root: Path) -> None:
         self.root = root
 
     def path_for(self, node_id: str) -> Path:
         return self.root / f"{node_id}.md"
+
+    async def _require_project(self, project: str) -> None:
+        """确认 `<root>/<project>` 已是普通目录；不创建、不修复。"""
+        if not project:
+            raise ProjectMissing("知识库目录缺失：project 为空")
+        target = AsyncPath(self.root / project)
+        try:
+            ready = await target.is_dir()
+        except OSError as exc:
+            raise ProjectMissing(f"知识库目录不可用：{project}") from exc
+        if not ready:
+            raise ProjectMissing(f"知识库目录不存在：{project}")
 
     async def exists(self, node_id: str) -> bool:
         return await AsyncPath(self.path_for(node_id)).is_file()
@@ -42,7 +62,12 @@ class KnowledgeStore:
 
     async def write(self, node_id: str, node: NodeFrontmatter, body: str) -> Path:
         path = self.path_for(node_id)
-        await AsyncPath(path.parent).mkdir(parents=True, exist_ok=True)
+        project, _, remainder = node_id.partition("/")
+        if not remainder:
+            raise ProjectMissing(f"节点 id 缺少项目段：{node_id}")
+        await self._require_project(project)
+        # 库目录已存在，只需补齐 `<kind>` 一级；不做递归创建。
+        await AsyncPath(path.parent).mkdir(exist_ok=True)
         metadata = node.model_dump(mode="json", exclude_none=True)
         metadata["id"] = node_id
         text = frontmatter.dumps(frontmatter.Post(body.rstrip() + "\n", **metadata))
@@ -75,8 +100,8 @@ class KnowledgeStore:
         return self.root / project / "_edges.jsonl"
 
     async def append_edges(self, project: str, edges: list[Edge], source_doc: str) -> int:
+        await self._require_project(project)
         path = self.edges_path(project)
-        await AsyncPath(path.parent).mkdir(parents=True, exist_ok=True)
         existing: dict[tuple[str, str, str], dict[str, object]] = {}
         if await AsyncPath(path).is_file():
             text = await AsyncPath(path).read_text(encoding="utf-8")

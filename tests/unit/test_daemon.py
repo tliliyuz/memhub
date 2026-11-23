@@ -18,7 +18,7 @@ from memhub.contract import BatchFile, IngestRequest
 from memhub.ingest.store import MemoryStore
 from memhub.kb import catalog, manage
 from memhub.kb.store import KnowledgeStore
-from memhub.kb.target_access import TargetPolicy
+from memhub.kb.target_access import TargetRegistry
 from memhub.queue.rawstore import batch_dir, save_batch
 from memhub.worker.daemon import (
     RoundReport,
@@ -84,11 +84,8 @@ async def _config(tmp_path: Path, **kwargs: object) -> WorkerConfig:
         await catalog.create_kb(KnowledgeStore(knowledge_dir), kb_id=project)
     state = MemoryStore()
     await state.register_device("dev-1")
-    grants_path = tmp_path / "config" / "ingest-grants.json"
-    await AsyncPath(grants_path.parent).mkdir()
-    await AsyncPath(grants_path).write_text(json.dumps({"devices": {"dev-1": projects}}))
     kwargs.setdefault("is_registered", state.is_registered)
-    kwargs.setdefault("target_policy", TargetPolicy(knowledge_dir, grants_path))
+    kwargs.setdefault("target_registry", TargetRegistry(knowledge_dir))
     return WorkerConfig(
         data_dir=tmp_path,
         knowledge_dir=knowledge_dir,
@@ -401,12 +398,9 @@ async def test_legacy_unknown_device_is_not_authorized_by_explicit_project(tmp_p
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-async def test_console_is_independent_of_device_registry_and_grants(
-    tmp_path: Path, legacy: bool
-) -> None:
+async def test_console_is_independent_of_device_registry(tmp_path: Path, legacy: bool) -> None:
     await _push(tmp_path, EVIDENCE, device_id="kb-console", source_type="docs", legacy=legacy)
     config = await _config(tmp_path, is_registered=None)
-    (tmp_path / "config" / "ingest-grants.json").unlink()
     # Wiki extraction is deliberately unchanged and does not require session evidence.
     reply = json.loads(LLM_REPLY)
     del reply["nodes"][0]["evidence"]
@@ -477,10 +471,8 @@ async def test_invalid_raw_encoding_or_json_is_quarantined_once(
     assert not config.failures_path.exists()
 
 
-@pytest.mark.parametrize(
-    "problem", ["missing_grants", "invalid_grants", "registry", "registration"]
-)
-async def test_policy_unavailability_preserves_raw_and_existing_failures(
+@pytest.mark.parametrize("problem", ["registry", "registration"])
+async def test_registry_unavailability_preserves_raw_and_existing_failures(
     tmp_path: Path, problem: str
 ) -> None:
     async def unavailable(_device: str) -> bool:
@@ -490,12 +482,7 @@ async def test_policy_unavailability_preserves_raw_and_existing_failures(
     original = raw.read_bytes()
     kwargs = {"is_registered": unavailable} if problem == "registration" else {}
     config = await _config(tmp_path, max_attempts=1, **kwargs)
-    grants = tmp_path / "config" / "ingest-grants.json"
-    if problem == "missing_grants":
-        grants.unlink()
-    elif problem == "invalid_grants":
-        grants.write_text('{"devices": {"dev-1": ["*"]}}', encoding="utf-8")
-    elif problem == "registry":
+    if problem == "registry":
         (config.knowledge_dir / ".kbs.json").write_text("broken JSON", encoding="utf-8")
     config.failures_path.parent.mkdir()
     failures = json.dumps({str(raw.relative_to(config.raw_root)): 1}).encode()
@@ -515,9 +502,6 @@ async def test_registered_directory_without_catalog_entry_is_denied(tmp_path: Pa
     config = await _config(tmp_path)
     orphan = config.knowledge_dir / "orphan"
     orphan.mkdir()
-    (tmp_path / "config" / "ingest-grants.json").write_text(
-        '{"devices": {"dev-1": ["orphan"]}}', encoding="utf-8"
-    )
     client = FakeClient()
 
     report = await run_round(client, config)
@@ -528,24 +512,25 @@ async def test_registered_directory_without_catalog_entry_is_denied(tmp_path: Pa
     assert not list(orphan.iterdir())
 
 
-async def test_grant_revoked_during_model_call_is_quarantined_without_merge(tmp_path: Path) -> None:
+async def test_target_archived_during_model_call_is_quarantined_without_merge(
+    tmp_path: Path,
+) -> None:
     raw = await _push(tmp_path, EVIDENCE)
     original = raw.read_bytes()
     config = await _config(tmp_path)
-    grants = tmp_path / "config" / "ingest-grants.json"
 
-    class RevokingClient(FakeClient):
+    class ArchivingClient(FakeClient):
         async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
-            async with manage.write_lock(config.knowledge_dir, timeout=0):
-                grants.write_text('{"devices": {"dev-1": []}}', encoding="utf-8")
+            await catalog.delete_kb(KnowledgeStore(config.knowledge_dir), "cc-sessions")
             return await super().complete(prompt, model=model, max_tokens=max_tokens)
 
-    client = RevokingClient()
+    client = ArchivingClient()
     report = await run_round(client, config)
 
     assert (report.processed, report.failed, report.quarantined, client.calls) == (0, 0, 1, 1)
-    assert report.errors == ["target_not_granted"]
-    assert not list((config.knowledge_dir / "cc-sessions").iterdir())
+    assert report.errors == ["target_inactive"]
+    # 库已归档：既不能写进新节点，也不能把目录重建回来。
+    assert not await AsyncPath(config.knowledge_dir / "cc-sessions").exists()
     assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
     assert not config.processed_root.exists()
     assert not config.failures_path.exists()

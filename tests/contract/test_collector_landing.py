@@ -47,23 +47,16 @@ async def test_selected_target_is_the_only_landing(
     root = tmp_path / "knowledge"
     for name in ("fixture-left", "fixture-right", "fixture-denied"):
         (root / name).mkdir(parents=True)
+    # fixture-denied 目录存在但未登记：这正是当初被隐式建库的事故形态。
     (root / ".kbs.json").write_text(
-        json.dumps(
-            {"kbs": [{"id": name} for name in ("fixture-left", "fixture-right", "fixture-denied")]}
-        ),
+        json.dumps({"kbs": [{"id": name} for name in ("fixture-left", "fixture-right")]}),
         encoding="utf-8",
     )
     data = tmp_path / "data"
-    grants = data / "config" / "ingest-grants.json"
-    grants.parent.mkdir(parents=True)
     device = str(uuid.uuid4())
-    grants.write_text(
-        json.dumps({"devices": {device: ["fixture-left", "fixture-right"]}}), encoding="utf-8"
-    )
     monkeypatch.setenv("MEMHUB_ENV", "dev")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data))
     monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(root))
-    monkeypatch.setenv("MEMHUB_INGEST_GRANTS_PATH", str(grants))
     # 随机测试凭据仅留在本地进程内；不用任何操作系统已保存凭据。
     token = uuid.uuid4().hex
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", token)
@@ -110,7 +103,7 @@ async def test_selected_target_is_the_only_landing(
     ) as client:
         denied = await client.post("/ingest/raw", json=body)
         assert denied.status_code == 400
-        assert denied.json()["data"] == {"reason": "target_unavailable"}
+        assert denied.json()["data"] == {"reason": "unregistered"}
         assert not (data / "raw_store").exists()
         assert (await state.get_cursor(device, "fixture-source"))[1] == []
         accepted = await client.post("/ingest/raw", json=body | {"project": "fixture-right"})

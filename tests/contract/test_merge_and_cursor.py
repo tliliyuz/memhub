@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from anyio import Path as AsyncPath
 from fastapi.testclient import TestClient
 
 from memhub.contract import SourceKind, SourceRef
@@ -36,6 +36,8 @@ def _node(slug: str, kind: str, body: str = "内容") -> dict[str, object]:
 
 
 async def test_question_node_defaults_to_open(tmp_path: Path) -> None:
+    # 存储层不再隐式建库：先显式建好 demo 库目录。
+    await AsyncPath(tmp_path / "demo").mkdir()
     store = KnowledgeStore(tmp_path)
     extraction = Extraction(
         nodes=[
@@ -59,12 +61,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     knowledge = tmp_path / "knowledge"
     (knowledge / "example-kb").mkdir(parents=True)
     (knowledge / ".kbs.json").write_text('{"kbs":[{"id":"example-kb"}]}', encoding="utf-8")
-    grants = tmp_path / "grants.json"
-    grants.write_text(json.dumps({"devices": {DEVICE: ["example-kb"]}}), encoding="utf-8")
     monkeypatch.setenv("MEMHUB_ENV", "dev")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
-    monkeypatch.setenv("MEMHUB_INGEST_GRANTS_PATH", str(grants))
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     with TestClient(create_app()) as test_client:
         test_client.post(

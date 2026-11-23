@@ -1,4 +1,4 @@
-# 跨端契约（v0.5）
+# 跨端契约（v0.6）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.6 — 采集目标边界收敛为「显式 + 已登记 + 活动」：移除设备—知识库授权文件与 `POST /ingest/projects` 建库代理；`400/1003` 的 `data.reason` 细分为 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`；存储层不再隐式建库。
 - 0.5 — 采集目标必须显式、已登记且按设备授权；列表只返回可写目标并标记 `writable_only`；会话证据门禁与队列复核规则收紧。
 - 0.4 — MCP 首版定为四个只读工具；新增远端 `/mcp` 传输、独立只读凭据与库范围（`mcp-tools.md` 0.2）。
 - 0.3 — 注册段补充：生产必须带 `user_key` 鉴权、`device_id` 生产必填（400/1002）、同 device_id 重复注册幂等、吊销后重注册签发新 token；`source-registry` 明确 `base_url` 必须与签发 token 的服务器一致；示例中的 `device_id` 统一改为 UUID v4。

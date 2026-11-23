@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +28,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from memhub.contract import (
-    KB_ID_RE,
     PROJECT_AUTO,
     Cursor,
     ErrorCode,
@@ -38,7 +38,12 @@ from memhub.contract import (
     explicit_project,
 )
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
-from memhub.kb.target_access import TargetPolicy, TargetUnavailable
+from memhub.kb.target_access import (
+    TargetRegistry,
+    TargetStatus,
+    TargetUnavailable,
+    target_status,
+)
 from memhub.queue.rawstore import (
     BatchTargetConflict,
     QuotaExceeded,
@@ -48,6 +53,8 @@ from memhub.queue.rawstore import (
     queue_write_lock,
     save_batch,
 )
+
+LOGGER = logging.getLogger("memhub.ingest.audit")
 
 HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.TOKEN_INVALID: 401,
@@ -59,8 +66,7 @@ HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.QUEUE_BACKPRESSURE: 503,
     ErrorCode.SCOPE_DENIED: 403,
-    # 知识库代理（/ingest/projects）透传 kb-api 的业务码，桌面端要能区分
-    # 「id 冲突」「库不存在」「参数非法」。
+    # kb-api 的业务码原样透传给桌面端（列表读取时仍可能出现）。
     ErrorCode.KB_CONFLICT: 409,
     ErrorCode.KB_NOT_FOUND: 404,
     ErrorCode.KB_INVALID: 422,
@@ -120,24 +126,13 @@ class RawIngestRequest(IngestRequest):
     project: Annotated[str | None, BeforeValidator(_as_optional_project)] = None
 
 
-class ProjectCreate(BaseModel):
-    """桌面端「新建知识库」：id 即真源一级目录名，名称/描述进 `.kbs.json`。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    device_id: str
-    id: str = Field(min_length=1, max_length=64)
-    name: str = Field(default="", max_length=200)
-    description: str = Field(default="", max_length=2000)
-
-
 DEFAULT_KB_API_URL = "http://127.0.0.1:8701"
 
 
 async def _kb_api_request(
     base_url: str, method: str, path: str, payload: dict[str, Any] | None = None
 ) -> Any:
-    """把知识库列表/新建转发给 kb-api。
+    """向 kb-api 读取知识库列表（采集端只读，不代理建库）。
 
     知识真源只有 kb-api 一个写者（`.kbs.json` 是读改写），采集端不直接碰盘；
     host 网络下 127.0.0.1:8701 可达，kb 未起时这里返回通用 500。
@@ -172,12 +167,23 @@ async def _kb_api_request(
     return body
 
 
-def _target_unavailable() -> ApiError:
-    return ApiError(ErrorCode.BAD_REQUEST, "target unavailable", {"reason": "target_unavailable"})
+_TARGET_MESSAGES: dict[str, str] = {
+    "missing": "上传必须显式指定目标知识库（project 不能为空）",
+    "reserved": "auto 是旧推送协议的保留值，不能作为知识库 id",
+    "invalid": "知识库 id 只能用小写字母/数字/./_/-，并以字母或数字开头",
+    "unregistered": "目标知识库未登记，请先在管理台建库",
+    "inactive": "目标知识库当前不可写（已归档或被禁用）",
+    "target_conflict": "与已落盘批次的采集目标不一致",
+}
+
+
+def _target_unavailable(reason: str) -> ApiError:
+    message = _TARGET_MESSAGES.get(reason, "target unavailable")
+    return ApiError(ErrorCode.BAD_REQUEST, message, {"reason": reason})
 
 
 def _target_lookup_failed() -> ApiError:
-    return ApiError(ErrorCode.INTERNAL, "project service unavailable")
+    return ApiError(ErrorCode.INTERNAL, "无法确认知识库登记状态，请稍后重试")
 
 
 def _ok(data: object) -> dict[str, object]:
@@ -258,13 +264,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
     raw_root = Path(data_dir) if data_dir else None
     knowledge_dir = os.environ.get("MEMHUB_KNOWLEDGE_DIR", "").strip()
-    grants_value = os.environ.get("MEMHUB_INGEST_GRANTS_PATH", "").strip()
-    grants_path = Path(grants_value) if grants_value else None
-    if grants_path is None and raw_root is not None:
-        grants_path = raw_root / "config" / "ingest-grants.json"
-    policy = (
-        TargetPolicy(Path(knowledge_dir), grants_path) if knowledge_dir and grants_path else None
-    )
+    registry = TargetRegistry(Path(knowledge_dir)) if knowledge_dir else None
     # 同一进程内串行校验批次绑定和配额、写盘、记账；跨进程绑定由 rawstore 保证。
     queue_lock = Lock()
     # 即便当前没配 DATA_DIR 也要校验：配错的值应该在启动时就炸，而不是等哪天补上
@@ -276,28 +276,49 @@ def create_app(store: StateStore | None = None) -> FastAPI:
     app = FastAPI(title="memhub ingest", version="0.1.0")
     app.state.store = state
 
-    async def granted_projects(device_id: str) -> frozenset[str]:
-        if policy is None:
-            return frozenset()
-        try:
-            return await policy.granted(device_id)
-        except TargetUnavailable as exc:
-            raise _target_lookup_failed() from exc
-
     async def active_project(project: str) -> bool:
-        if policy is None:
+        if registry is None:
             return False
         try:
-            return await policy.active(project)
+            return await registry.active(project)
         except TargetUnavailable as exc:
             raise _target_lookup_failed() from exc
 
-    async def check_target(device_id: str, value: object, *, require_active: bool = True) -> str:
+    def _audit(device_id: str, project: object, decision: str, reason: str = "") -> None:
+        """每次采集一条审计：设备、目标、接受/拒绝、理由、时间；不含内容与 token。"""
+        safe = project if isinstance(project, str) and len(project) <= 64 else ""
+        LOGGER.info(
+            "ingest decision=%s device=%r project=%r reason=%s at=%s",
+            decision,
+            device_id,
+            safe,
+            reason or "-",
+            datetime.now(UTC).isoformat(),
+        )
+
+    async def check_target(device_id: str, value: object) -> str:
         project = explicit_project(value)
-        if project is None or project not in await granted_projects(device_id):
-            raise _target_unavailable()
-        if require_active and not await active_project(project):
-            raise _target_unavailable()
+        if project is None:
+            if value == PROJECT_AUTO:
+                reason = "reserved"
+            elif not isinstance(value, str) or not value:
+                reason = "missing"
+            else:
+                reason = "invalid"
+            _audit(device_id, value, "reject", reason)
+            raise _target_unavailable(reason)
+        if registry is None:
+            # 未配置真源目录等于没有可写目标：按「未登记」拒绝，不要暗示可重试。
+            _audit(device_id, project, "reject", "unregistered")
+            raise _target_unavailable("unregistered")
+        try:
+            status = await target_status(registry.store, project)
+        except TargetUnavailable as exc:
+            _audit(device_id, project, "reject", "registry_unavailable")
+            raise _target_lookup_failed() from exc
+        if status is not TargetStatus.ACTIVE:
+            _audit(device_id, project, "reject", status.value)
+            raise _target_unavailable(status.value)
         return project
 
     async def auth(authorization: str | None, device_id: str) -> None:
@@ -399,52 +420,19 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         device_id: Annotated[str, Query()],
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        """转发 kb-api 的项目元数据，但只显示本设备可写的活动项目。"""
+        """转发 kb-api 的项目元数据，但只显示当前已登记且活动的项目。"""
         await auth_collector(authorization, device_id)
-        granted = await granted_projects(device_id)
+        upstream = await _kb_api_request(kb_api_url, "GET", "/api/v1/kb/projects")
+        if not isinstance(upstream, dict) or not isinstance(upstream.get("items"), list):
+            raise _target_lookup_failed()
         items: list[dict[str, Any]] = []
-        if granted:
-            upstream = await _kb_api_request(kb_api_url, "GET", "/api/v1/kb/projects")
-            if not isinstance(upstream, dict) or not isinstance(upstream.get("items"), list):
+        for item in upstream["items"]:
+            if not isinstance(item, dict):
                 raise _target_lookup_failed()
-            for item in upstream["items"]:
-                if not isinstance(item, dict):
-                    raise _target_lookup_failed()
-                project = explicit_project(item.get("id"))
-                if project is not None and project in granted and await active_project(project):
-                    items.append(item)
+            project = explicit_project(item.get("id"))
+            if project is not None and await active_project(project):
+                items.append(item)
         return _ok({"items": items, "total": len(items), "writable_only": True})
-
-    @app.post("/ingest/projects", status_code=201)
-    async def create_project(
-        body: ProjectCreate,
-        authorization: Annotated[str | None, Header()] = None,
-    ) -> dict[str, object]:
-        """桌面端「新建知识库」；之后采集端用同一个 id 作为 project 推送。"""
-        await auth_collector(authorization, body.device_id)
-        # auto 是旧推送协议的保留值，不能注册成知识库。
-        # 「格式非法」和「用了保留值」分开报：客户端要靠 reason 区分提示文案，
-        # 别让前端去解析 message。
-        if body.id == PROJECT_AUTO:
-            raise ApiError(
-                ErrorCode.BAD_REQUEST,
-                "auto 是推送侧的保留值（表示按源 id 归档），不能用作知识库 id",
-                {"id": body.id, "reason": "reserved"},
-            )
-        if not KB_ID_RE.fullmatch(body.id):
-            raise ApiError(
-                ErrorCode.BAD_REQUEST,
-                "知识库 id 只能用小写字母/数字/./_/-，以字母或数字开头，≤64 位",
-                {"id": body.id, "reason": "invalid"},
-            )
-        await check_target(body.device_id, body.id, require_active=False)
-        created = await _kb_api_request(
-            kb_api_url,
-            "POST",
-            "/api/v1/kb/projects",
-            {"id": body.id, "name": body.name or body.id, "description": body.description},
-        )
-        return _ok(created)
 
     @app.post("/ingest/raw")
     async def raw(
@@ -468,6 +456,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                     async with queue_write_lock(raw_root):
                         replay = await state.check_replay_target(body)
                         if replay is not None:
+                            _audit(body.device_id, project, "accept", "replay")
                             return _ok(replay.model_dump(mode="json"))
                         # 配额先于落盘，只算新增内容；重放不应被视为新增数据。
                         incoming = await estimate_new_bytes(raw_root, body, producer="collector")
@@ -480,8 +469,10 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                     replay = await state.check_replay_target(body)
                     result = replay if replay is not None else await state.apply(body)
         except BatchTargetConflict as exc:
-            raise _target_unavailable() from exc
+            _audit(body.device_id, body.project, "reject", "target_conflict")
+            raise _target_unavailable("target_conflict") from exc
         except QuotaExceeded as exc:
+            _audit(body.device_id, project, "reject", "quota_exceeded")
             raise ApiError(
                 ErrorCode.QUEUE_BACKPRESSURE,
                 "raw_store quota exceeded",
@@ -493,9 +484,11 @@ def create_app(store: StateStore | None = None) -> FastAPI:
             ) from exc
         except OSError as exc:
             # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
+            _audit(body.device_id, project, "reject", "raw_store_unavailable")
             if quota is not None:
                 await quota.invalidate()
             raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
+        _audit(body.device_id, project, "accept")
         return _ok(result.model_dump(mode="json"))
 
     @app.post("/ingest/heartbeat")

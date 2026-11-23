@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import sys
 import time
@@ -37,7 +36,7 @@ from anyio import Path as AsyncPath
 from memhub.contract import SourceKind, SourceRef, explicit_project
 from memhub.kb.manage import WriteDeferred, guard_project_write
 from memhub.kb.store import KnowledgeStore
-from memhub.kb.target_access import TargetPolicy, TargetUnavailable
+from memhub.kb.target_access import TargetRegistry, TargetUnavailable
 from memhub.queue.rawstore import (
     CONSOLE_DEVICE,
     BatchTargetConflict,
@@ -83,17 +82,11 @@ class WorkerConfig:
     interval: float = 300.0
     limit: int = 20
     max_attempts: int = 3
-    target_policy: TargetPolicy | None = None
+    target_registry: TargetRegistry | None = None
     is_registered: Callable[[str], Awaitable[bool]] | None = None
 
-    def policy(self) -> TargetPolicy:
-        if self.target_policy is not None:
-            return self.target_policy
-        path = os.environ.get("MEMHUB_INGEST_GRANTS_PATH", "").strip()
-        return TargetPolicy(
-            self.knowledge_dir,
-            Path(path) if path else self.data_dir / "config" / "ingest-grants.json",
-        )
+    def registry(self) -> TargetRegistry:
+        return self.target_registry or TargetRegistry(self.knowledge_dir)
 
     @property
     def raw_root(self) -> Path:
@@ -392,8 +385,8 @@ def _queue_target(config: WorkerConfig, payload: dict[str, object], path: Path) 
     return QueueTarget(project, device_id, source_type, console=False)
 
 
-async def _authorize(config: WorkerConfig, policy: TargetPolicy, target: QueueTarget) -> None:
-    """在真源写锁内复查当前策略。"""
+async def _authorize(config: WorkerConfig, registry: TargetRegistry, target: QueueTarget) -> None:
+    """在真源写锁内复查目标状态（登记设备、已登记且活动、未被归档）。"""
     if not target.console:
         if config.is_registered is None:
             raise TargetUnavailable("registration_unavailable")
@@ -404,9 +397,7 @@ async def _authorize(config: WorkerConfig, policy: TargetPolicy, target: QueueTa
             raise TargetUnavailable("registration_unavailable") from exc
         if not registered:
             raise AuthorizationDenied("device_not_registered")
-        if target.project not in await policy.granted(target.device_id):
-            raise AuthorizationDenied("target_not_granted")
-    if not await policy.active(target.project):
+    if not await registry.active(target.project):
         raise AuthorizationDenied("target_inactive")
     try:
         await guard_project_write(config.knowledge_dir, target.project)
@@ -433,10 +424,10 @@ async def process_file(
     if not isinstance(payload, dict):
         raise AuthorizationDenied("queue_payload_invalid")
     target = _queue_target(config, payload, path)
-    policy = config.policy()
+    registry = config.registry()
 
     async def check_target() -> None:
-        await _authorize(config, policy, target)
+        await _authorize(config, registry, target)
 
     # 空输入也要授权；等待模型时不持写真源的锁。
     async with target_write_lock(config.knowledge_dir, timeout=0):
@@ -534,8 +525,8 @@ async def run_round(
             print(f"[worker] quarantine: {exc.reason}", file=sys.stderr)
             continue
         except TargetUnavailable:
-            # 读不到登记/策略不是原始文件失败，保留原字节与已有失败次数。
-            print("[worker] defer: target_unavailable", flush=True)
+            # 读不到登记不是原始文件失败，保留原字节与已有失败次数。
+            print("[worker] defer: target_registry_unavailable", flush=True)
             continue
         except WriteDeferred as exc:
             print(f"[worker] defer: {exc.reason or 'write_unavailable'}", flush=True)

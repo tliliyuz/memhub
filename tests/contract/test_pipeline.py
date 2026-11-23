@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from anyio import Path as AsyncPath
 
 from memhub.contract import SourceKind, SourceRef, Tier
 from memhub.kb.projection import build_graph
@@ -60,6 +61,12 @@ def _payload() -> dict[str, object]:
     }
 
 
+async def _demo_store(tmp_path: Path) -> KnowledgeStore:
+    """存储层不再隐式建库：先显式建好 demo 库目录。"""
+    await AsyncPath(tmp_path / "demo").mkdir(exist_ok=True)
+    return KnowledgeStore(tmp_path)
+
+
 async def test_extract_normalizes_and_drops_unsourced_edges() -> None:
     client = FakeClient([_payload()])
     extraction = await extract_document(
@@ -77,7 +84,7 @@ async def test_extract_normalizes_and_drops_unsourced_edges() -> None:
 
 
 async def test_merge_creates_updates_and_protects_canonical(tmp_path: Path) -> None:
-    store = KnowledgeStore(tmp_path)
+    store = await _demo_store(tmp_path)
     source = SourceRef(type=SourceKind.SESSION, ref="s1")
     now = datetime(2026, 11, 18, tzinfo=UTC)
 
@@ -103,7 +110,7 @@ async def test_merge_creates_updates_and_protects_canonical(tmp_path: Path) -> N
 
 
 async def test_projection_builds_nodes_and_resolves_edges(tmp_path: Path) -> None:
-    store = KnowledgeStore(tmp_path)
+    store = await _demo_store(tmp_path)
     source = SourceRef(type=SourceKind.WIKI, ref="a.md")
     client = FakeClient([_payload()])
     extraction = await extract_document(
@@ -252,7 +259,7 @@ async def test_session_candidates_require_exact_support_and_live_endpoints(tmp_p
     assert "SYNTHETIC_" not in client.prompts[0]
     assert [node.slug for node in extraction.nodes] == ["read-only", "snapshot"]
     assert [(edge.source, edge.target) for edge in extraction.edges] == [("read-only", "snapshot")]
-    store = KnowledgeStore(tmp_path)
+    store = await _demo_store(tmp_path)
     source = SourceRef(type=SourceKind.SESSION, ref="fixture.jsonl", device="synthetic")
     report = await merge(store, extraction, project="demo", source=source)
     assert report.created == ["demo/decision/read-only", "demo/procedure/snapshot"]
@@ -406,7 +413,7 @@ async def test_session_dedupes_without_appending_paraphrases_or_misrouting_edges
     assert [(edge.source, edge.target) for edge in output.edges] == [
         ("cache-ceiling", "request-limit"),
     ]
-    store = KnowledgeStore(tmp_path)
+    store = await _demo_store(tmp_path)
     report = await merge(
         store,
         output,

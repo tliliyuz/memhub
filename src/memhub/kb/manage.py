@@ -591,7 +591,9 @@ async def restore_node(store: KnowledgeStore, trash: str) -> dict[str, Any]:
         if await store.exists(node_id):
             raise ConflictError(f"节点已重新存在，无法恢复: {node_id}", {"id": node_id})
         target = store.path_for(node_id)
-        await AsyncPath(target.parent).mkdir(parents=True, exist_ok=True)
+        # 库目录缺失时恢复必须失败：存储层不隐式建库，这里也不重建。
+        await store._require_project(parts[1])
+        await AsyncPath(target.parent).mkdir(exist_ok=True)
         await AsyncPath(source).replace(target)
         meta = source.with_suffix(".meta.json")
         if await AsyncPath(meta).is_file():

@@ -30,6 +30,15 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
         yield test_client
 
 
+def _ensure_project(client: TestClient, project: object) -> None:
+    """存储层不再隐式建库：先通过管理接口显式建库（幂等）。"""
+    listed = {item["id"] for item in client.get("/api/v1/kb/projects").json()["items"]}
+    if project in listed:
+        return
+    response = client.post("/api/v1/kb/projects", json={"id": project})
+    assert response.status_code == 201, response.text
+
+
 def _create(client: TestClient, **overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "kind": "fact",
@@ -39,6 +48,7 @@ def _create(client: TestClient, **overrides: object) -> dict[str, object]:
         "tags": ["httpx"],
     }
     payload.update(overrides)
+    _ensure_project(client, payload["project"])
     response = client.post("/api/v1/kb/nodes", json=payload)
     assert response.status_code == 201, response.text
     return response.json()

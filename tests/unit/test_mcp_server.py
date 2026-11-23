@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from anyio import Path as AsyncPath
 
 from memhub.contract import Kind, NodeFrontmatter
 from memhub.kb.store import KnowledgeStore
@@ -26,6 +27,8 @@ NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
 @pytest.fixture
 async def store(tmp_path: Path) -> KnowledgeStore:
     kb = KnowledgeStore(tmp_path)
+    # 存储层不再隐式建库：夹具先显式建库目录。
+    await AsyncPath(tmp_path / "memhub").mkdir()
     node = NodeFrontmatter(
         id="memhub/fact/proxy",
         kind=Kind.FACT,

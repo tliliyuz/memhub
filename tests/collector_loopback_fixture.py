@@ -46,14 +46,13 @@ class Fake:
 async def serve(root: Path, device: str, port: int) -> None:
     knowledge = root / "knowledge"
     data = root / "data"
-    grants = data / "config" / "ingest-grants.json"
-    grants.parent.mkdir(parents=True)
     for project in PROJECTS:
         (knowledge / project).mkdir(parents=True)
+    # 只登记前两个库：fixture-denied 目录存在但未登记，上传必须被拒绝。
+    registered = PROJECTS[:2]
     (knowledge / ".kbs.json").write_text(
-        json.dumps({"kbs": [{"id": project} for project in PROJECTS]}), encoding="utf-8"
+        json.dumps({"kbs": [{"id": project} for project in registered]}), encoding="utf-8"
     )
-    grants.write_text(json.dumps({"devices": {device: list(PROJECTS[:2])}}), encoding="utf-8")
     for key in tuple(os.environ):
         if key.startswith("MEMHUB_"):
             del os.environ[key]

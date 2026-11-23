@@ -2,7 +2,8 @@
 
 | 属性 | 值 |
 |:---|:---|
-| 状态 | proposed |
+| 状态 | superseded |
+| 被替代于 | [ADR-0010](ADR-0010-collector-target-without-grant-file.md) |
 | 日期 | 2026-11-21 |
 
 ## 背景

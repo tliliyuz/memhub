@@ -20,6 +20,9 @@ HIDDEN = "private/fact/secret"
 @pytest.fixture
 async def store(tmp_path: Path) -> KnowledgeStore:
     kb = KnowledgeStore(tmp_path)
+    # 存储层不再隐式建库：夹具先显式建库目录。
+    for project in ("sample", "private"):
+        await AsyncPath(tmp_path / project).mkdir()
     now = datetime.now(UTC)
     for node_id in (VISIBLE, HIDDEN, "sample/fact/second"):
         await kb.write(

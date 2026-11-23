@@ -13,13 +13,15 @@ from anyio import Path as AsyncPath
 
 from memhub.contract import Edge, Kind, Predicate, Tier
 from memhub.kb import manage, proc
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.store import KnowledgeStore, ProjectMissing
 
 
 @pytest.fixture
 async def store(tmp_path: Path) -> KnowledgeStore:
     root = tmp_path / "knowledge"
     await AsyncPath(root).mkdir()
+    # 存储层不再隐式建库：测试里要先显式建好默认知识库目录。
+    await AsyncPath(root / "memhub").mkdir()
     return KnowledgeStore(root)
 
 
@@ -168,6 +170,30 @@ async def test_restore_refuses_when_node_reappeared(store: KnowledgeStore) -> No
     await manage.create_node(store, _draft(slug=str(created["id"]).rsplit("/", 1)[-1]))
     with pytest.raises(manage.ConflictError):
         await manage.restore_node(store, str(deleted["trash"]))
+
+
+async def test_create_node_refuses_missing_project(store: KnowledgeStore) -> None:
+    with pytest.raises(ProjectMissing):
+        await manage.create_node(store, _draft(project="ghost"))
+
+    assert not await AsyncPath(store.root / "ghost").exists()
+
+
+async def test_restore_does_not_recreate_missing_project_directory(
+    store: KnowledgeStore,
+) -> None:
+    await AsyncPath(store.root / "doomed").mkdir()
+    created = await manage.create_node(store, _draft(project="doomed"))
+    deleted = await manage.delete_node(
+        store, str(created["id"]), expected_revision=str(created["revision"])
+    )
+    await AsyncPath(store.root / "doomed" / "fact").rmdir()
+    await AsyncPath(store.root / "doomed").rmdir()
+
+    with pytest.raises(ProjectMissing):
+        await manage.restore_node(store, str(deleted["trash"]))
+
+    assert not await AsyncPath(store.root / "doomed").exists()
 
 
 async def test_replace_out_edges_rewrites_only_source_side(store: KnowledgeStore) -> None:
@@ -448,6 +474,7 @@ async def test_archived_project_cannot_be_recreated_by_node_writes(store: Knowle
     assert not await store.exists(str(created["id"]))
     assert (await manage.list_trash(store))["total"] == 1
 
+    await AsyncPath(store.root / "other").mkdir()
     await manage.create_node(store, _draft(project="other"))
     await marker.unlink()
     await manage.restore_node(store, str(deleted["trash"]))
@@ -455,6 +482,8 @@ async def test_archived_project_cannot_be_recreated_by_node_writes(store: Knowle
 
 
 async def test_list_trash_filters_and_pages(store: KnowledgeStore) -> None:
+    for kb_id in ("alpha", "beta"):
+        await AsyncPath(store.root / kb_id).mkdir()
     ids: list[str] = []
     for project, title, slug in [
         ("alpha", "Alpha 事实", "alpha-fact"),
