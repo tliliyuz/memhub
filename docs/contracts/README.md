@@ -1,4 +1,4 @@
-# 跨端契约（v0.7）
+# 跨端契约（v0.8）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.8 — 候选区闭环：新增 `kb_update_candidate` 与 `kb_deprecate`（[mcp-tools.md](mcp-tools.md) 0.4），都要求 `expected_revision` 且只作用于 `tier=candidate`；`kb_read` 返回 `revision`；`NodeFrontmatter` 新增 `deprecated_reason`，`tier=deprecated` 允许「有替代节点」或「只有原因」（[node-schema.md](node-schema.md)）。canonical 修改与治理组其余工具仍关闭。
 - 0.7 — MCP 开放第一个写工具 `kb_write_candidate`（[mcp-tools.md](mcp-tools.md) 0.3）：新增 `mcp:write` 作用域（隐含读），`tools/list` 按作用域裁剪；只创建 `tier=candidate`，slug 冲突、归一化正文哈希去重、证据必填、内容门槛与每日上限；写成功自动 commit。canonical 修改与治理组其余工具仍关闭。
 - 0.6 — 采集目标边界收敛为「显式 + 已登记 + 活动」：移除设备—知识库授权文件与 `POST /ingest/projects` 建库代理；`400/1003` 的 `data.reason` 细分为 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`；存储层不再隐式建库。
 - 0.5 — 采集目标必须显式、已登记且按设备授权；列表只返回可写目标并标记 `writable_only`；会话证据门禁与队列复核规则收紧。

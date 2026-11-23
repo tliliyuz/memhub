@@ -252,6 +252,8 @@ async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
                     "kb_related",
                     "kb_audit_list",
                     "kb_write_candidate",
+                    "kb_update_candidate",
+                    "kb_deprecate",
                 }
                 result = await client.call_tool(
                     "kb_write_candidate",
@@ -268,8 +270,37 @@ async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
                 payload = json.loads(result.content[0].text)
                 assert payload["id"] == "sample/fact/http-write"
                 assert payload["tier"] == "candidate"
+
+                read = await client.call_tool("kb_read", {"id": payload["id"]})
+                assert not read.is_error
+                assert json.loads(read.content[0].text)["revision"] == payload["revision"]
+
+                updated = await client.call_tool(
+                    "kb_update_candidate",
+                    {
+                        "id": payload["id"],
+                        "expected_revision": payload["revision"],
+                        "title": "HTTP 改过的候选",
+                    },
+                )
+                assert not updated.is_error
+                revised = json.loads(updated.content[0].text)
+                assert revised["revision"] != payload["revision"]
+
+                dropped = await client.call_tool(
+                    "kb_deprecate",
+                    {
+                        "id": payload["id"],
+                        "expected_revision": revised["revision"],
+                        "reason": "HTTP 联调结束后废弃",
+                    },
+                )
+                assert not dropped.is_error
+                assert json.loads(dropped.content[0].text)["tier"] == "deprecated"
     node, _ = await store.read(payload["id"])
     assert node.source[-1].ref == f"mcp:{config['sha256'][:12]}"
+    assert node.tier is Tier.DEPRECATED
+    assert node.deprecated_reason == "HTTP 联调结束后废弃"
 
 
 async def test_http_rejects_overlapping_posts(

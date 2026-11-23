@@ -193,6 +193,9 @@ function NodeDetailPage() {
               取代
             </p>
           )}
+          {!frontmatter.superseded_by && frontmatter.deprecated_reason && (
+            <p className='text-sm'>废弃原因：{frontmatter.deprecated_reason}</p>
+          )}
         </div>
 
         <div className='grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]'>

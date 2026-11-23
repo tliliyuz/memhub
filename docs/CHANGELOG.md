@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 未发布（MCP 候选区闭环）
+
+- `feat(mcp)`：新增 `kb_update_candidate` 与 `kb_deprecate`（ADR-0012），补齐候选区写闭环，仍然不碰 canonical。两者都要求 `mcp:write` 与 `expected_revision`（取自 `kb_read` 新增返回的 `revision`）；检查与写入在同一把跨进程写锁内完成，不符返回 `409/1010` `revision_conflict`，目标不是 `tier=candidate` 返回 `409/1010` `not_candidate` 且不改文件。更新只允许 `title/body/tags/confidence`，并对更新后的标题与正文重跑内容门槛与同项目正文哈希去重；废弃保留文件、`reason` 写入 `deprecated_reason` 并追加 `## 废弃说明`，`superseded_by` 可选（指向自己或不存在分别返回 `superseded_by_invalid` / `superseded_by_unavailable`）。
+- `feat(contract)`：`NodeFrontmatter` 新增可选字段 `deprecated_reason`；`tier=deprecated` 的约束从「必须有 `superseded_by`」放宽为「`superseded_by` 或 `deprecated_reason` 至少一项」。已存在且不含该字段的节点不受影响。
+- `feat(mcp)`：`kb_read` 返回 `revision`，作为两个写工具的前置条件来源；`tools/list` 对 `mcp:write` 由五个工具变为七个（`mcp:read` 仍是四个）。三个写工具的审计日志共用一条记录格式。
+- `docs`：MCP 契约升到 0.4（候选区闭环）；跨端契约索引升到 v0.8；`node-schema` 补 `deprecated_reason`；新增 ADR-0012 并在 ADR 索引登记。
+
 ## 未发布（MCP 写候选）
 
 - `feat(mcp)`：开放第一个写工具 `kb_write_candidate`（ADR-0011）。新增 `mcp:write` 作用域（隐含读），`tools/list` 按作用域裁剪；只创建 `tier=candidate`，slug 命中 canonical/deprecated 返回 `slug_conflict_canonical`、命中已有 candidate 返回 `slug_conflict_candidate`、归一化正文哈希命中返回 `content_duplicate`。证据必填，复用 `SourceRef` 形状，做结构与归属校验（拒绝绝对路径、`..` 穿越、指向未授权库、敏感串形态）；不做可解析性校验。内容门槛覆盖可机械识别的垃圾（过短、寒暄/确认集合、日志倾倒）；每日上限 50 次/凭据/UTC 日，按新节点 `source` 中的 `mcp:<grant_id>` 标记现算。写成功自动 git commit，message 含工具名与调用者。canonical 修改与治理组其余工具仍关闭。
