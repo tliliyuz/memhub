@@ -44,11 +44,15 @@ def test_question_requires_status() -> None:
         NodeFrontmatter(**_base(kind=Kind.QUESTION, entity_kind=None))
 
 
-def test_deprecated_requires_superseded_by() -> None:
+def test_deprecated_requires_superseded_by_or_reason() -> None:
     with pytest.raises(ValidationError):
         NodeFrontmatter(**_base(tier=Tier.DEPRECATED))
     node = NodeFrontmatter(**_base(tier=Tier.DEPRECATED, superseded_by="x/y"))
     assert node.superseded_by == "x/y"
+    # 结论被证伪时没有替代节点可指，只记原因也是合法废弃。
+    reason_only = NodeFrontmatter(**_base(tier=Tier.DEPRECATED, deprecated_reason="已被证伪"))
+    assert reason_only.deprecated_reason == "已被证伪"
+    assert reason_only.superseded_by is None
 
 
 def test_batch_file_rejects_reversed_offsets() -> None:

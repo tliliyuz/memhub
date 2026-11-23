@@ -60,7 +60,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 | POST | `/api/v1/kb/nodes` | 201；body 见 §4.2.1；返回 `{id, revision, commit, node}` |
 | GET | `/api/v1/kb/nodes/{node_id}` | `id` 可含 `/`（`{node_id:path}`）；返回 `{id, revision, frontmatter, body, truncated, edges:{out,in}, source}` |
 | PUT | `/api/v1/kb/nodes/{node_id}` | 部分更新；必填 `expected_revision`，其余字段同创建（`title/body/tags/tier/confidence/status/valid_*/occurred_at/decided_at/superseded_by`） |
-| POST | `/api/v1/kb/nodes/{node_id}/deprecate` | `{superseded_by, reason, actor}`：tier → `deprecated`、写 `superseded_by`、正文追加 `## 废弃说明`；不删文件 |
+| POST | `/api/v1/kb/nodes/{node_id}/deprecate` | `{superseded_by, reason, actor}`：tier → `deprecated`、写 `superseded_by`、正文追加 `## 废弃说明`；不删文件。管理台这条路径仍要求给出替代节点；只记原因的废弃目前只经 MCP 的 `kb_deprecate` 提供 |
 | DELETE | `/api/v1/kb/nodes/{node_id}?revision=&reason=&actor=` | 移入 `_trash/<UTC 时间戳>/<node_id>.md` + `.meta.json`，并移除相连边；返回 `{id, trash, removed_edges, commit}` |
 
 #### 4.2.1 创建 body
@@ -82,7 +82,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 ```
 
 - `kind` 与 `tier` 取 [node-schema.md](node-schema.md) 的枚举；`kind=entity` 必须给 `entity_kind`，否则 `1012`。
-- `tier=deprecated` 必须同时给 `superseded_by`（走 deprecate 接口更合适）。
+- `tier=deprecated` 必须给 `superseded_by` 或 `deprecated_reason` 至少一项（走 deprecate 接口更合适）：有替代节点就指向它，结论被证伪则只记原因。管理台 `PUT` 与 `/deprecate` 目前只写 `superseded_by`，`deprecated_reason` 由 MCP 写工具写入。
 - `slug` 缺省由标题生成 kebab-case；中文标题生成不出 slug 时回退 `n-<随机 4 字节 hex>`。同目录重名 → `1012`。
 - 写入路径：`<knowledge>/<project>/<kind>/<slug>.md`。
 

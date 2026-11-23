@@ -91,6 +91,8 @@ async def test_tools_list_exposes_the_retrieval_group(store: KnowledgeStore) -> 
         "kb_related",
         "kb_audit_list",
         "kb_write_candidate",
+        "kb_update_candidate",
+        "kb_deprecate",
     ]
     assert [tool["name"] for tool in TOOLS] == names
 
