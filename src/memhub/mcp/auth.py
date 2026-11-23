@@ -1,9 +1,10 @@
-"""HTTP 只读凭据：仅载入摘要，不从浏览器或采集请求获取权限。"""
+"""HTTP 凭据：仅载入摘要，不从浏览器或采集请求获取权限。"""
 
 from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
@@ -19,7 +20,7 @@ class Grant(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", repr=False)]
-    scope: Literal["mcp:read"]
+    scope: Literal["mcp:read", "mcp:write"]
     expires_at: datetime
     projects: Annotated[frozenset[Project], Field(min_length=1, max_length=128)]
 
@@ -48,11 +49,25 @@ def load_grants(raw: str) -> dict[str, Grant]:
     return result
 
 
-def authorized_projects(grants: dict[str, Grant], authorization: str) -> frozenset[str] | None:
+@dataclass(frozen=True, slots=True)
+class Credential:
+    """一次 HTTP 请求的鉴权结果：项目范围、是否可写、凭据标识。"""
+
+    projects: frozenset[str]
+    writable: bool
+    grant_id: str
+
+
+def authorize(grants: dict[str, Grant], authorization: str) -> Credential | None:
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not _TOKEN.fullmatch(token):
         return None
-    grant = grants.get(hashlib.sha256(token.encode("ascii")).hexdigest())
+    digest = hashlib.sha256(token.encode("ascii")).hexdigest()
+    grant = grants.get(digest)
     if grant is None or grant.expires_at <= datetime.now(UTC):
         return None
-    return grant.projects
+    return Credential(
+        projects=grant.projects,
+        writable=grant.scope == "mcp:write",
+        grant_id=digest[:12],
+    )

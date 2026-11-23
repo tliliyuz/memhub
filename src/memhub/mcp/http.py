@@ -1,4 +1,4 @@
-"""精确 HTTP 路径与只读授权；协议解析交给官方 MCP SDK。"""
+"""精确 HTTP 路径与请求级授权；协议解析交给官方 MCP SDK。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from memhub.kb.store import KnowledgeStore
-from memhub.mcp.auth import Grant, authorized_projects
+from memhub.mcp.auth import Credential, Grant, authorize
 
-_SCOPE_KEY = "memhub.mcp.projects"
+_SCOPE_KEY = "memhub.mcp.credential"
 
 
 class McpEndpoint:
@@ -44,10 +44,10 @@ class McpEndpoint:
             else:
                 headers = Headers(scope=scope)
                 auth = headers.getlist("authorization")
-                projects = authorized_projects(self.grants, auth[0]) if len(auth) == 1 else None
+                credential = authorize(self.grants, auth[0]) if len(auth) == 1 else None
                 if "origin" in headers:
                     response = Response(status_code=403)
-                elif projects is None:
+                elif credential is None:
                     response = Response(status_code=401, headers={"WWW-Authenticate": "Bearer"})
                 elif scope["method"] != "POST":
                     response = Response(status_code=405, headers={"Allow": "POST"})
@@ -58,7 +58,7 @@ class McpEndpoint:
                         response = Response(status_code=429, headers={"Retry-After": "1"})
                     else:
                         try:
-                            state = {**scope.get("state", {}), _SCOPE_KEY: projects}
+                            state = {**scope.get("state", {}), _SCOPE_KEY: credential}
                             await self.transport({**scope, "state": state}, receive, send)
                         finally:
                             self.limit.release()
@@ -90,19 +90,39 @@ def _build_transport(store: KnowledgeStore) -> Starlette:
         raise RuntimeError("启用 MCP HTTP 需安装 memhub[mcp-http]") from None
 
     from memhub import __version__
-    from memhub.mcp.tools import TOOLS, call_tool
+    from memhub.mcp.tools import call_tool, tools_for
 
-    async def list_tools(_ctx: ServerRequestContext, _params: object) -> ListToolsResult:
-        return ListToolsResult(tools=[Tool.model_validate(tool) for tool in TOOLS])
+    async def list_tools(ctx: ServerRequestContext, _params: object) -> ListToolsResult:
+        request = ctx.request
+        credential = (
+            request.scope.get("state", {}).get(_SCOPE_KEY) if isinstance(request, Request) else None
+        )
+        writable = credential.writable if isinstance(credential, Credential) else False
+        return ListToolsResult(
+            tools=[Tool.model_validate(tool) for tool in tools_for(writable=writable)]
+        )
 
     async def invoke(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
         request = ctx.request
-        projects = (
+        credential = (
             request.scope.get("state", {}).get(_SCOPE_KEY) if isinstance(request, Request) else None
         )
         # 授权信息只能由 ASGI 入口注入；意外缺失时也不得退回本机全库权限。
+        if isinstance(credential, Credential):
+            projects = credential.projects
+            writable = credential.writable
+            grant_id = credential.grant_id
+        else:
+            projects = frozenset()
+            writable = False
+            grant_id = ""
         result = await call_tool(
-            params.name, params.arguments or {}, store, projects=projects or frozenset()
+            params.name,
+            params.arguments or {},
+            store,
+            projects=projects,
+            writable=writable,
+            grant_id=grant_id,
         )
         return CallToolResult.model_validate(result)
 

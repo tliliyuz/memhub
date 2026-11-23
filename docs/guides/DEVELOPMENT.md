@@ -156,13 +156,12 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./kno
 claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
 ```
 
-暴露检索组四个工具（契约见 [`mcp-tools.md`](../contracts/mcp-tools.md)）：
-`kb_search`（默认只给 canonical，候选要显式 `tier="all"`）、`kb_read`（全文 ≤8KB + 出入边）、
-`kb_related`（depth ≤2）、`kb_audit_list`（矛盾/断链/孤立/低置信/陈旧，现算）。
+暴露四个检索工具和一个写候选工具（契约见 [`mcp-tools.md`](../contracts/mcp-tools.md)）：
+`kb_search`、`kb_read`、`kb_related`、`kb_audit_list`、`kb_write_candidate`。
 
 分层：工具定义与入口在 `src/memhub/mcp/`——`tools.py` 共享实现与校验、`server.py` stdio 适配、
-`http.py` HTTP 入口、`auth.py` 只读凭据；检索算法在 `src/memhub/kb/query.py`，受限读取与
-路径校验在 `src/memhub/kb/reader.py`。以后换 FTS/向量只改 `query.py`，工具形状不变。
+`http.py` HTTP 入口、`auth.py` 凭据鉴权；检索算法在 `src/memhub/kb/query.py`，受限读取与
+路径校验在 `src/memhub/kb/reader.py`，候选写入在 `src/memhub/kb/candidates.py`。
 
 ### 10.1 HTTP 入口（可选，默认关闭）
 
@@ -176,7 +175,7 @@ MEMHUB_MCP_GRANTS='[{"sha256":"<令牌的 SHA-256>","scope":"mcp:read",
 
 - 由 kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP（JSON 响应，不开 SSE 监听）。协议协商与
   报文解析交给官方 SDK，不复用 stdio 的 JSON-RPC 解析；未配置凭据时该路径直接 404，不落到 SPA。
-- 每个请求重新计算授权范围：配置只存令牌的 SHA-256 摘要，作用域固定 `mcp:read`，库名单由配置决定；
+- 每个请求重新计算授权范围：配置只存令牌的 SHA-256 摘要；作用域为 `mcp:read` 或 `mcp:write`，库名单由配置决定；
   浏览器 Cookie 与 `/ingest/*` 的 device token 都不授予 `/mcp` 权限。吊销 = 删摘要 + 重启。
 - 同一进程同时只处理一个 POST，其余返回 429（`Retry-After: 1`）；请求体上限 16 KiB；带 `Origin`
   的请求一律 403，供纯机器客户端使用。

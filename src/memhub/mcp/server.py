@@ -66,7 +66,11 @@ async def handle_message(message: dict[str, Any], store: KnowledgeStore) -> dict
         arguments = params.get("arguments", {})
         if not isinstance(arguments, dict):
             return _error(message_id, JSONRPC_INVALID_PARAMS, "arguments must be an object")
-        return _ok(message_id, await call_tool(name, arguments, store))
+        # stdio 是本机全库权限，写工具可用；凭据标识固定为 "stdio"。
+        return _ok(
+            message_id,
+            await call_tool(name, arguments, store, writable=True, grant_id="stdio"),
+        )
     return _error(message_id, JSONRPC_METHOD_NOT_FOUND, f"unknown method: {method}")
 
 

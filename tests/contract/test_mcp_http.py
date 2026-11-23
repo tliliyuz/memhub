@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from memhub.contract import Kind, NodeFrontmatter, Tier
+from memhub.kb import catalog
 from memhub.kb.api import create_app
 from memhub.kb.store import KnowledgeStore
 
@@ -41,13 +42,15 @@ def http_sdk() -> None:
     pytest.importorskip("mcp", reason="HTTP 契约测试需安装 memhub[mcp-http]")
 
 
-def grant(project: str = "sample", *, expired: bool = False) -> tuple[dict, dict[str, str]]:
+def grant(
+    project: str = "sample", *, expired: bool = False, scope: str = "mcp:read"
+) -> tuple[dict, dict[str, str]]:
     token = secrets.token_urlsafe(32)
     expires = datetime.now(UTC) + timedelta(minutes=-5 if expired else 5)
     return (
         {
             "sha256": hashlib.sha256(token.encode()).hexdigest(),
-            "scope": "mcp:read",
+            "scope": scope,
             "expires_at": expires.isoformat(),
             "projects": [project],
         },
@@ -170,6 +173,7 @@ async def test_sdk_round_trip_separates_grant_scopes(
     store = KnowledgeStore(tmp_path)
     now = datetime.now(UTC)
     for project in ("sample", "private"):
+        await catalog.create_kb(store, kb_id=project, name=project)
         node_id = f"{project}/fact/example"
         await store.write(
             node_id,
@@ -221,6 +225,51 @@ async def test_sdk_round_trip_separates_grant_scopes(
                         )
                         assert invalid.is_error
                         assert json.loads(invalid.content[0].text)["code"] == 3004
+
+
+async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from httpx2 import ASGITransport, AsyncClient
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
+
+    config, headers = grant(scope="mcp:write")
+    monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([config]))
+    store = KnowledgeStore(tmp_path)
+    await catalog.create_kb(store, kb_id="sample", name="sample")
+    app = create_app()
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), headers=headers) as http,
+    ):
+        transport = streamable_http_client("http://localhost/mcp", http_client=http)
+        with anyio.fail_after(10):
+            async with Client(transport) as client:
+                assert {tool.name for tool in (await client.list_tools()).tools} == {
+                    "kb_search",
+                    "kb_read",
+                    "kb_related",
+                    "kb_audit_list",
+                    "kb_write_candidate",
+                }
+                result = await client.call_tool(
+                    "kb_write_candidate",
+                    {
+                        "project": "sample",
+                        "kind": "fact",
+                        "slug": "http-write",
+                        "title": "HTTP 写候选",
+                        "body": "这是通过 HTTP MCP 写入的可复用候选知识正文。",
+                        "evidence": [{"type": "session", "ref": "session:http-test"}],
+                    },
+                )
+                assert not result.is_error
+                payload = json.loads(result.content[0].text)
+                assert payload["id"] == "sample/fact/http-write"
+                assert payload["tier"] == "candidate"
+    node, _ = await store.read(payload["id"])
+    assert node.source[-1].ref == f"mcp:{config['sha256'][:12]}"
 
 
 async def test_http_rejects_overlapping_posts(

@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from memhub.contract.models import KB_ID_PATTERN, Kind, Predicate
+from memhub.contract.models import KB_ID_PATTERN, Kind, Predicate, SourceRef
 
 SLUG_PATTERN = r"[a-z0-9][a-z0-9-]{0,127}"
 _KINDS = "|".join(kind.value for kind in Kind)
@@ -37,3 +37,16 @@ class RelatedInput(ReadInput):
 class AuditInput(ToolInput):
     limit: ResultLimit = 50
     offset: int = Field(default=0, ge=0)
+
+
+class WriteCandidateInput(ToolInput):
+    """只创建候选节点；长度与内容门槛在 `memhub.kb.candidates` 里按业务规则判定。"""
+
+    project: str = Field(pattern=KB_ID_PATTERN)
+    kind: Kind
+    slug: str = Field(pattern=f"^{SLUG_PATTERN}$")
+    title: str
+    body: str
+    evidence: list[SourceRef]
+    tags: list[str] = Field(default_factory=list, max_length=16)
+    confidence: float | None = Field(default=None, ge=0, le=1)

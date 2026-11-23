@@ -84,7 +84,14 @@ async def test_tools_list_exposes_the_retrieval_group(store: KnowledgeStore) -> 
     response = await handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, store)
     assert response is not None
     names = [tool["name"] for tool in response["result"]["tools"]]
-    assert names == ["kb_search", "kb_read", "kb_related", "kb_audit_list"]
+    # stdio 是本机全库权限，写工具也可见。
+    assert names == [
+        "kb_search",
+        "kb_read",
+        "kb_related",
+        "kb_audit_list",
+        "kb_write_candidate",
+    ]
     assert [tool["name"] for tool in TOOLS] == names
 
 
