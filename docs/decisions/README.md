@@ -15,6 +15,7 @@
 | [ADR-0006](ADR-0006-upload-reuse-extraction-pipeline.md) | 管理台上传文档复用现有抽取管线 | accepted |
 | [ADR-0009](ADR-0009-collector-project-write-grants.md) | 采集器按设备授权写入已登记目标 | superseded by ADR-0010 |
 | [ADR-0010](ADR-0010-collector-target-without-grant-file.md) | 采集写的目标边界改为「显式 + 已登记 + 活动」 | accepted |
+| [ADR-0011](ADR-0011-mcp-write-candidate.md) | MCP 第一阶段只开放写候选 | proposed |
 
 模板：
 
