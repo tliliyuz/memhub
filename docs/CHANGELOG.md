@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 未发布（MCP 写候选）
+
+- `feat(mcp)`：开放第一个写工具 `kb_write_candidate`（ADR-0011）。新增 `mcp:write` 作用域（隐含读），`tools/list` 按作用域裁剪；只创建 `tier=candidate`，slug 命中 canonical/deprecated 返回 `slug_conflict_canonical`、命中已有 candidate 返回 `slug_conflict_candidate`、归一化正文哈希命中返回 `content_duplicate`。证据必填，复用 `SourceRef` 形状，做结构与归属校验（拒绝绝对路径、`..` 穿越、指向未授权库、敏感串形态）；不做可解析性校验。内容门槛覆盖可机械识别的垃圾（过短、寒暄/确认集合、日志倾倒）；每日上限 50 次/凭据/UTC 日，按新节点 `source` 中的 `mcp:<grant_id>` 标记现算。写成功自动 git commit，message 含工具名与调用者。canonical 修改与治理组其余工具仍关闭。
+- `docs`：MCP 契约升到 0.3（写候选）；跨端契约索引升到 v0.7；环境键说明更新 `MEMHUB_MCP_GRANTS` 的 scope 取值。
+
 ## 未发布（采集目标校验与会话候选门禁）
 
 - `docs(governance)`：分支与发版规则调整：`main` 为稳定分支，只有负责人明确允许后才能合入，发版只从 `main` 出；`dev` 为日常集成分支，worktree 从 `dev` 创建，验收后合回 `dev` 并清理；同步 `AGENTS.md`、`CLAUDE.md` 与开发指南 §6。
