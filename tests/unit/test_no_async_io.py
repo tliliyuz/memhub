@@ -60,3 +60,26 @@ def test_async_path_usage_passes(checker: ModuleType) -> None:
 def test_allowlisted_proc_module_passes(checker: ModuleType) -> None:
     source = "import subprocess\n\n\ndef f():\n    return subprocess.run(['git'], check=False)\n"
     assert checker.find_violations(source, "src/memhub/kb/proc.py") == []
+
+
+def test_alembic_dir_is_scanned(checker: ModuleType, tmp_path: Path) -> None:
+    """Alembic 迁移代码在 src/ 之外，同步 I/O 同样不能漏过门禁。"""
+    (tmp_path / "src").mkdir()
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "0001_kb.py").write_text(
+        "import time\n\n\ndef upgrade():\n    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    assert checker.main(["--root", str(tmp_path)]) == 1
+
+
+def test_alembic_dir_clean_passes(checker: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "0001_kb.py").write_text(
+        "from alembic import op\n\n\ndef upgrade():\n    op.create_table('kb_nodes')\n",
+        encoding="utf-8",
+    )
+    assert checker.main(["--root", str(tmp_path)]) == 0
