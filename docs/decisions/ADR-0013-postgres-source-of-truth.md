@@ -24,8 +24,8 @@ ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。�
    - `kb_projects`：知识库登记（`id`、显示名、描述、`created_at`、`archived_at`）。原 `.kbs.json` 的语义迁移到此，「目录存在 ≠ 可写」改由登记行 + 状态列表达。
    - `kb_nodes`：节点（`id` 主键、`project`、`kind`、`entity_kind`、`title`、`tier`、`confidence`、`tags`、`body`、`source`、`valid_from/valid_until`、`superseded_by`、`deprecated_reason`、`occurred_at/decided_at`、`status`、`created_at`、`updated_at`、`archived_at`、`revision`）。
    - `kb_edges`：边（`project`、`source`、`predicate`、`target`、`source_doc`，唯一约束 `(source, predicate, target)`）。
-   - `kb_node_revisions`：节点每次写入的不可变历史（`node_id`、`revision`、`tier`、`actor`、`reason`、`before`、`after`、`created_at`），承载 ADR-0002 里由 git 提供的「可回滚、可审计」。本轮建表并写入，但**不**实现审批型转正流程（见第 7 条）。
-   - `kb_archives`：整库归档快照与状态（`archive_id`、`project`、`status`、快照字节或引用、计数、`created_at`）。原 `_kb_archives/<id>/` 与 `blocked/` 标记迁移到此。
+   - `kb_node_revisions`：节点每次写入的不可变历史（`node_id`、`revision`、`tier`、`actor`、`reason`、`before`、`after`、`created_at`），承载 ADR-0002 里由 git 提供的「可回滚、可审计」。`before/after` 存**含正文的完整节点快照**（已裁决），保证单节点可精确回滚。本轮建表并写入，但**不**实现审批型转正流程（见第 7 条）。
+   - `kb_archives`：整库归档快照与状态（`archive_id`、`project`、`status`、`snapshot`（`bytea`，已裁决入库）、计数、`created_at`）。原 `_kb_archives/<id>/` 与 `blocked/` 标记迁移到此。
    - `kb_write_audit`：写入审计日志（`actor`、`project`、`node_id`、`action`、`result`、`created_at`），承接 ADR-0011 的 MCP 写审计与 ingest 的采集写审计。**与** `GET /api/v1/kb/audit` 的治理问题清单是两回事：后者（contradiction/orphan/stale 等）继续**现算、不入库**，只是数据源从文件换成表。
    - `kb_projects.revision` 与 `kb_nodes.revision`：乐观锁令牌，替代原文件 sha256 前 16 位的 `node_revision`。**格式不变：16 位小写十六进制**（`^[0-9a-f]{16}$`，契约与 MCP 输入硬校验此格式），由每次写入重新生成。契约「同一内容重写也产生新 revision」的语义保留：每次写入都生成新值。
 3. **删除是软删 + 归档**：原 `_trash/` 与 `_kb_archives/` 的语义用 `archived_at`、`kb_archives` 表与归档快照表达；「永不硬删」原则保留。
@@ -44,7 +44,7 @@ ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。�
 7. **本轮交付边界**：存储迁移 + 契约修订 + schema 预留。节点修订历史表建好并写入，但候选转正、`## Change Log`、tier 变更审批流等治理缺口另立里程碑，不在本轮实现。**上传批次清单是否入 `kb_batches` 明确不在本轮**：`uploads/<batch_id>.json` 与「按文件路径推导批次状态」保持不变，只把上传入口的库存在性校验从文件/`target_access` 改为查 `kb_projects`（登记且 `archived_at is null`）。
 8. **边端点不加外键**：`kb_edges.source/target` 允许指向尚未存在或已归档的节点，保留原 `_edges.jsonl` 的悬空边语义（`unresolved_edges`），`source_doc` 保留。实现时不得顺手加外键，否则会静默丢弃悬空边。
 9. **迁移执行是一次性运维动作**：读服务器 `knowledge/` → 写入 `kb_*` → 校验（**逐节点、逐边的内容哈希比对，仅比计数不够**）→ `pg_dump` 与 `knowledge/` 打包备份 → 删除 markdown。提供 `--dry-run` 与 `--verify-only`，校验不通过不删除。迁移**必须处理归档数据**：`_trash/` 与 `_kb_archives/` 的历史节点按 `archived_at` / `kb_archives` 迁入（或明确只备份不迁，二者择一并写死）；「目录存在但未在 `.kbs.json` 登记」的库（如仓库 memhub 库）按已登记库导入 `kb_projects`，不得静默跳过而丢归属。删除动作需负责人在服务器上执行或明确授权。
-10. **本地开发与测试直接用云端 PostgreSQL**（负责人选定），不再用内存实现替身。测试以 `MEMHUB_TEST_DB_URL` 指向 dev 库；本里程碑的验收命令**必须要求该变量存在**——未设置时 PG 用例 skip 不计为通过。
+10. **本地开发与测试直接用云端 PostgreSQL**（负责人选定），不再用内存实现替身。**测试隔离用独立 database**（已裁决）：每个用例建独立 database、跑完 `DROP DATABASE`。这要求一个带 CREATEDB 的独立测试角色，是对 ADR-0004「`memhub_app` 无 CREATEDB」的显式偏离——测试角色只连测试实例或 dev 实例的测试库，不碰 `memhub_prod`；具体由负责人确认（dev 实例建测试角色，或另起本机/临时 PG）。本里程碑的验收命令**必须要求 `MEMHUB_TEST_DB_URL` 存在**——未设置时 PG 用例 skip 不计为通过。
 
 ## 备选与否决理由
 

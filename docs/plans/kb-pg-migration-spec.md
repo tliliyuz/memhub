@@ -112,7 +112,7 @@
 | `tier` | text not null | 写入后的 tier |
 | `actor` | text null | 调用者（`ui:<user>` / `mcp:<grant>` / worker） |
 | `reason` | text null | |
-| `before` / `after` | jsonb not null | 节点快照（不含正文时可只存元数据，见 §9） |
+| `before` / `after` | jsonb not null | **完整节点快照，含 `body` 正文**（已裁决）。这是替代 git 后唯一的单节点精确回滚手段 |
 | `created_at` | timestamptz not null | |
 
 本轮：每次 `kb_nodes` 写入在同一事务内追加一条；不提供审批动作。
@@ -124,7 +124,7 @@
 | `archive_id` | text PK（32 位 hex） | |
 | `project` | text not null | 被归档库 |
 | `status` | text not null | `pending` / `active` / `restoring` |
-| `snapshot` | bytea null | 归档快照（若选择入库，见 §9 待裁决） |
+| `snapshot` | bytea not null | 归档快照字节（已裁决入库，取代 `_kb_archives/<id>/snapshot.zip`） |
 | `archived_count` / `removed_edges` | integer not null | |
 | `actor` / `deleted_at` | text / timestamptz | |
 | `created_at` | timestamptz not null | |
@@ -195,14 +195,23 @@
 9. 门禁：`check_no_raw_sql.py`、`check_async_io.py`（含 `alembic/` 覆盖）、`mypy`、文档格式与 ADR 治理全绿。
 10. **验收命令必须要求 `MEMHUB_TEST_DB_URL` 存在**：未设置时 PG 用例 skip **不计为通过**，命令应显式失败或标注未验证。
 
-## 9. 待裁决项
+## 9. 已裁决与新增待决
 
-1. **kb_archives 快照存放**：整库归档快照是 `bytea` 入库，还是继续放文件系统、库只存元数据（`snapshot` 列存引用）？入库更统一但增加备份体积；留文件则真源仍有一处文件依赖。
-2. **`kb_node_revisions` 是否存正文快照**：存全量 `before/after` 体积大但可精确回滚；只存元数据则回滚需结合备份。
-3. **受限角色授权范围**：`kb_*` 全部 DML，是否需要单独的只读角色给 `/mcp` 读工具与读写角色分离。
-4. **dev/测试隔离**：每用例独立 schema（倾向，与现有 `test_state_store` 临时 PG 一致）还是独立 database；cloud PG 的连接配额是否够测试并发。
+### 9.1 负责人已裁决（2026-11-24）
 
-已决（不再是待裁决）：上传批次清单本轮**不入** `kb_batches`（ADR-0013 §7）；边端点**不加**外键（§8）；连接数预算需重算（§6）。
+1. **归档快照入库**：`kb_archives.snapshot` 存 `bytea`（`not null`），`pg_dump` 即唯一完整备份；整库归档快照不再单独留文件。
+2. **修订存完整正文快照**：`kb_node_revisions.before/after` 存含 `body` 的完整节点 JSON，兑现「单节点可精确回滚」。
+3. **单 DML 角色**：kb-api 运行时只有一个只对 `kb_*` 做 DML 的角色；`mcp:read`/`mcp:write` 的区分仍由应用层凭据作用域控制，不另建 DB 只读角色。
+4. **测试隔离用独立 database**：每个用例建独立 database、跑完 `DROP DATABASE`。**由此产生一个新的权限约束（见 9.2）**，且这是对 ADR-0004「memhub_app 无 CREATEDB」的显式偏离。
+
+### 9.2 由上述裁决引出的新增待决
+
+1. **测试角色的 CREATEDB 权限**：ADR-0004 §1 规定 `memhub_app` 不得有 CREATEDB。每用例建独立 database 必须连一个带 CREATEDB 的**独立测试角色**（如 `memhub_test`），且只连测试实例或 dev 实例的测试数据库，不碰 `memhub_prod`。需负责人确认：允许在 dev 云实例上建该测试角色，还是要求本机/临时容器另起一个 PG 跑测试。
+2. **连接配额**：建 database 比建 schema 重，且测试并发 + kb 运行时 + ingest/worker 共用实例 `max_connections=60`。需核定测试并发上限与连接预算，写进部署清单。
+
+### 9.3 已决（不再讨论）
+
+上传批次清单本轮**不入** `kb_batches`（ADR-0013 §7）；边端点**不加**外键（§8）；连接数预算需重算（ADR-0013 §6）。
 
 ## 10. 契约与文档同步清单
 
