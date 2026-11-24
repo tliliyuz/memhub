@@ -36,6 +36,7 @@ from memhub.kb.errors import (
     NodeMissing,
     ProjectMissing,
     RevisionConflict,
+    TargetUnavailable,
     WriteDeferred,
 )
 
@@ -210,6 +211,45 @@ class KnowledgeStore:
 
     async def require_project(self, project: str) -> None:
         await self._require_project(project)
+
+    async def project_status(self, project: str) -> str:
+        """登记状态：`active` / `unregistered` / `inactive`（PG 版同口径）。
+
+        只认严格登记（`.kbs.json`）+ 活动普通目录：符号链接、重解析点与归档阻断
+        标记一律不活动。登记不可读或归档事务未完成时抛 `TargetUnavailable`，
+        调用方按可重试错误处理，不得猜默认值。
+        """
+        # 延迟导入：catalog / archive 都依赖本模块，模块级导入会成环。
+        from memhub.kb import archive, catalog
+        from memhub.kb.manage import ConflictError
+
+        try:
+            if await archive.path_kind(self.root) != "dir":
+                raise TargetUnavailable("target registry unavailable")
+            pending = await archive.checked_path(self.root, archive.PENDING)
+            if await archive.path_kind(pending) is not None:
+                raise TargetUnavailable("target registry unavailable")
+            _, registry = await catalog._strict_registry(self)
+            if not any(entry["id"] == project for entry in registry["kbs"]):
+                return "unregistered"
+            blocked = await archive.checked_path(self.root, f"{archive.ARCHIVES}/blocked/{project}")
+            if await archive.path_kind(blocked) is not None:
+                return "inactive"
+        except (ConflictError, OSError) as exc:
+            raise TargetUnavailable("target registry unavailable") from exc
+        try:
+            kind = await archive.path_kind(self.root / project)
+        except ConflictError:
+            return "inactive"
+        except OSError as exc:
+            raise TargetUnavailable("target registry unavailable") from exc
+        return "active" if kind == "dir" else "inactive"
+
+    def scoped_reader(self, projects: frozenset[str] | None) -> Any:
+        """按授权范围读取的视图；文件版保留符号链接与目录形状检查。"""
+        from memhub.kb.reader import ActiveReader
+
+        return ActiveReader(self, projects)
 
     # -- 节点 ------------------------------------------------------------
 

@@ -49,6 +49,13 @@ class InvalidError(ManageError):
     code = ErrorCode.KB_INVALID
 
 
+class TargetUnavailable(Exception):
+    """无法确认目标的登记状态（登记不可读、归档事务未完成）。
+
+    调用方按可重试的服务端错误处理，不得沿用旧权限猜一个默认值。
+    """
+
+
 class ProjectMissing(FileNotFoundError):
     """目标知识库不存在（文件版看目录，PG 版看 `kb_projects`）。
 

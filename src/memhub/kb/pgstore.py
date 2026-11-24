@@ -36,6 +36,7 @@ from memhub.kb.errors import (
     NodeMissing,
     ProjectMissing,
     RevisionConflict,
+    TargetUnavailable,
     WriteDeferred,
 )
 from memhub.kb.models import KbArchive, KbEdge, KbNode, KbNodeRevision, KbProject
@@ -252,6 +253,30 @@ class PgKnowledgeStore:
             raise ProjectMissing(f"知识库不存在或已归档：{project}")
         if row.archived_at is not None:
             raise WriteDeferred(f"知识库 {project} 已归档，恢复后才能写入", reason="archived")
+
+    async def project_status(self, project: str) -> str:
+        """登记状态：`active` / `unregistered` / `inactive`（与文件版同口径）。
+
+        归档事务未完成（`kb_archives.status == "pending"`）时抛 `TargetUnavailable`。
+        """
+        if not valid_project(project):
+            return "invalid"
+        async with self._session() as session:
+            pending = await session.scalar(
+                select(KbArchive.archive_id).where(KbArchive.status == "pending")
+            )
+            if pending is not None:
+                raise TargetUnavailable("有未恢复的知识库归档事务，无法确认目标状态")
+            row = await session.get(KbProject, project)
+        if row is None:
+            return "unregistered"
+        return "inactive" if row.archived_at is not None else "active"
+
+    def scoped_reader(self, projects: frozenset[str] | None) -> Any:
+        """按授权范围读取的视图；活动性来自 `kb_projects`。"""
+        from memhub.kb.reader import ScopedReader
+
+        return ScopedReader(self, projects)
 
     async def archive_project(self, project_id: str) -> None:
         async with self._session() as session:

@@ -1,18 +1,34 @@
-"""采集入口与 worker 共用的目标边界：已登记且活动。"""
+"""采集入口与 worker 共用的目标边界：已登记且活动。
+
+具体判据由存储对象给出（`project_status`）：文件版看 `.kbs.json` 与活动目录，
+PG 版看 `kb_projects`。`TargetUnavailable` 仍从本模块导出，兼容既有导入方。
+"""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Protocol
 
 from memhub.contract import explicit_project
-from memhub.kb import archive, catalog
-from memhub.kb.manage import ConflictError
+from memhub.kb.errors import TargetUnavailable
 from memhub.kb.store import KnowledgeStore
 
 
-class TargetUnavailable(Exception):
-    """无法确认当前登记状态。不得沿用旧权限。"""
+class ProjectSource(Protocol):
+    """只回答登记状态；文件版与 PG 版存储都满足。"""
+
+    async def project_status(self, project: str) -> str: ...
+
+
+__all__ = [
+    "ProjectSource",
+    "TargetRegistry",
+    "TargetStatus",
+    "TargetUnavailable",
+    "registered_active",
+    "target_status",
+]
 
 
 class TargetStatus(StrEnum):
@@ -22,39 +38,14 @@ class TargetStatus(StrEnum):
     INVALID = "invalid"
 
 
-async def target_status(store: KnowledgeStore, project: str) -> TargetStatus:
-    """目标当前状态：只认严格登记 + 活动普通目录。
-
-    登记文件不可读、归档事务未完成时抛 `TargetUnavailable`，调用方按可重试的
-    服务端错误处理；不能用「猜一个默认值」继续写。
-    """
+async def target_status(store: ProjectSource, project: str) -> TargetStatus:
+    """目标当前状态；登记不可读或归档事务未完成时抛 `TargetUnavailable`。"""
     if explicit_project(project) is None:
         return TargetStatus.INVALID
-    try:
-        if await archive.path_kind(store.root) != "dir":
-            raise TargetUnavailable("target registry unavailable")
-        pending = await archive.checked_path(store.root, archive.PENDING)
-        if await archive.path_kind(pending) is not None:
-            raise TargetUnavailable("target registry unavailable")
-        _, registry = await catalog._strict_registry(store)
-        if not any(entry["id"] == project for entry in registry["kbs"]):
-            return TargetStatus.UNREGISTERED
-        blocked = await archive.checked_path(store.root, f"{archive.ARCHIVES}/blocked/{project}")
-        if await archive.path_kind(blocked) is not None:
-            return TargetStatus.INACTIVE
-    except (ConflictError, OSError) as exc:
-        raise TargetUnavailable("target registry unavailable") from exc
-    # 已登记但指向非普通目录（含符号链接和 Windows 重解析点）的目标绝不活动。
-    try:
-        kind = await archive.path_kind(store.root / project)
-    except ConflictError:
-        return TargetStatus.INACTIVE
-    except OSError as exc:
-        raise TargetUnavailable("target registry unavailable") from exc
-    return TargetStatus.ACTIVE if kind == "dir" else TargetStatus.INACTIVE
+    return TargetStatus(await store.project_status(project))
 
 
-async def registered_active(store: KnowledgeStore, project: str) -> bool:
+async def registered_active(store: ProjectSource, project: str) -> bool:
     """检查严格登记与活动目录，不使用用于展示的目录发现规则。"""
     return await target_status(store, project) is TargetStatus.ACTIVE
 
