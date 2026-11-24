@@ -109,8 +109,12 @@ async def test_delete_source_requires_verify_only(
     assert "verify-only" in capsys.readouterr().err
 
 
-async def test_verify_only_requires_dsn(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+async def test_verify_only_requires_dsn(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """校验要连库比对，没有 DSN 就必须显式失败，不能静默当作通过。"""
+    # 开发机可能已导出 MEMHUB_KB_DB_URL；不清掉的话这里会去连真库，测的就不是缺键分支了。
+    monkeypatch.delenv("MEMHUB_KB_DB_URL", raising=False)
     root = _tree(tmp_path)
 
     code = await _migrate_kb(_args(root, dry_run=False, verify_only=True))
@@ -120,8 +124,9 @@ async def test_verify_only_requires_dsn(tmp_path: Path, capsys: pytest.CaptureFi
 
 
 async def test_non_dry_run_without_dsn_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("MEMHUB_KB_DB_URL", raising=False)
     root = _tree(tmp_path)
 
     code = await _migrate_kb(_args(root, dry_run=False))
