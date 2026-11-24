@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-21 |
+| 最后更新 | 2026-11-24 |
 | 适用范围 | 环境变量键集、默认值、读取方、失败语义 |
 | 不负责 | 部署拓扑、契约字段 |
 
@@ -22,6 +22,9 @@
 | `MEMHUB_DATA_DIR` | 是 | — | ingest/worker；kb-api（可选） | ingest/worker 缺失启动失败；kb-api 缺失时上传接口返回 503，其余接口正常（也可用 `memhub kb --data-dir` 指定） |
 | `MEMHUB_KNOWLEDGE_DIR` | 采集写入必需 | — | ingest / kb-api / worker | 三者必须指向同一真源。ingest 缺配置则不授予任何目标；配置后目录无法核验则返回通用服务错误。worker 缺配置且未传 `--knowledge-dir` 时退出 2；kb-api 的本地入口可传 `--knowledge-dir` |
 | `MEMHUB_DB_URL` | 生产采集必需 | 空 | ingest / worker | 格式 `postgresql://user@host:port/db`；两者必须使用同一登记库。ingest 无 DSN 使用进程内状态；独立 worker 无 DSN 无法验证采集设备，保留采集队列等待验证，不影响管理台上传 |
+| `MEMHUB_KB_DB_URL` | 是（kb 直连后） | — | kb-api | kb 运行时角色的 DSN，只对专用 schema `kb` 下的 `kb_*` 有 DML；模型在 `src/memhub/kb/session.py`。缺失或空值直接抛 `KbDsnMissing`，知识没有内存/文件退路。不得复用 `MEMHUB_DB_URL`——那是 `memhub_app`，能碰运行态表与令牌摘要 |
+| `MEMHUB_KB_MIGRATE_DB_URL` | 是（执行迁移时） | — | Alembic（`alembic/env.py`） | 迁移角色的 DSN，对 `kb_*` 有 DDL。迁移带外执行（`memhub migrate-kb` 或部署步骤），不在 kb 容器启动时跑，避免多副本并发迁移。与运行时键分开，公网进程不持 DDL 权 |
+| `MEMHUB_TEST_DB_URL` | 否 | 空（PG 用例跳过） | pytest | 测试库 DSN（`memhub_dev`），每个用例自建 `test_<uuid>` schema、跑完 `DROP SCHEMA CASCADE`。未设置时 PG 契约用例 skip，**不计为通过**；验收命令须显式要求它存在 |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
 | `MEMHUB_HTTP_PORT` | 否 | `8700` | ingest | 非法端口启动失败 |
 | `MEMHUB_LLM_BASE_URL` | 是 | — | worker | 启动失败（worker 不降级为无模型运行） |
