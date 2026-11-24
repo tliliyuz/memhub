@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import shutil
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -154,6 +155,25 @@ async def test_revision_is_stable_16_hex_and_content_addressed(tmp_path: Path) -
     assert node_revision(changed) != alpha["revision"]
 
 
+def test_revision_is_identical_for_the_same_instant_in_any_offset() -> None:
+    """PG 按会话时区回读 `timestamptz`；同一条记录在磁盘与库内必须算出同一哈希。"""
+    disk = {
+        "id": "demo/fact/alpha",
+        "valid_from": datetime(2026, 1, 1, 8, 0, tzinfo=timezone(timedelta(hours=8))),
+    }
+    stored = {"id": "demo/fact/alpha", "valid_from": datetime(2026, 1, 1, 0, 0, tzinfo=UTC)}
+
+    assert node_revision(disk) == node_revision(stored)
+
+
+def test_revision_treats_naive_timestamp_as_utc() -> None:
+    """库里不带时区的时间按 UTC 存储；校验侧不能因为少了 `+00:00` 就判不一致。"""
+    naive = {"id": "demo/fact/alpha", "valid_from": datetime(2026, 1, 1, 0, 0)}
+    aware = {"id": "demo/fact/alpha", "valid_from": datetime(2026, 1, 1, 0, 0, tzinfo=UTC)}
+
+    assert node_revision(naive) == node_revision(aware)
+
+
 async def test_supersedes_maps_to_target_column_without_data_loss(tmp_path: Path) -> None:
     """`supersedes` 在 `kb_nodes` 有正式列，必须原样落到行里且参与内容哈希。"""
     root = _tree(tmp_path)
@@ -186,6 +206,15 @@ async def test_trash_nodes_are_archived_not_dropped(tmp_path: Path) -> None:
     assert [node["id"] for node in archived] == ["demo/fact/alpha"]
     assert str(archived[0]["archived_at"]).startswith("20")
     assert plan.diff.invalid_trash == ()
+    # `.meta.json` 与节点文件同目录；不读它，删除审计（actor/reason）就丢了。
+    assert plan.trash_events == [
+        {
+            "node_id": "demo/fact/alpha",
+            "archived_at": archived[0]["archived_at"],
+            "actor": "ui:test",
+            "reason": "合成删除",
+        }
+    ]
 
 
 async def test_archive_snapshot_is_read_and_verified(tmp_path: Path) -> None:
@@ -274,6 +303,25 @@ async def test_nodes_of_unregistered_directory_keep_their_project(tmp_path: Path
 
     for node in plan.nodes:
         assert node["project"] in project_ids, node["id"]
+
+
+async def test_project_timestamps_follow_its_nodes_not_scan_time(tmp_path: Path) -> None:
+    """登记里没有 `created_at` 时不能拿「扫描时刻」充数：那会让每次解析得出不同的
+    项目哈希，写库后 `--verify-only` 永远报内容不一致。"""
+    plan = await parse_tree(_tree(tmp_path))
+
+    demo = next(item for item in plan.projects if item["id"] == "demo")
+    assert demo["created_at"] == datetime(2026, 1, 2, 3, 4, 5, 6, tzinfo=UTC)
+    assert demo["updated_at"] == datetime(2026, 1, 4, 0, 0, 0, tzinfo=UTC)
+
+
+async def test_project_revision_is_stable_across_parses(tmp_path: Path) -> None:
+    first = await parse_tree(_tree(tmp_path))
+    second = await parse_tree(_tree(tmp_path, "knowledge-again"))
+
+    assert [item["revision"] for item in first.projects] == [
+        item["revision"] for item in second.projects
+    ]
 
 
 async def test_registry_entry_created_at_is_carried_over(tmp_path: Path) -> None:
