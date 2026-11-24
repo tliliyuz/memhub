@@ -271,7 +271,7 @@ async def _scan_nodes(root: Path, diff: MigrationDiff) -> tuple[list[dict[str, A
     return nodes, sorted(projects)
 
 
-def _edges(
+async def _edges(
     root: Path,
     projects: list[str],
     node_ids: set[str],
@@ -282,12 +282,14 @@ def _edges(
     seen: set[tuple[str, str, str]] = set()
     for project in projects:
         path = root / project / "_edges.jsonl"
-        if not path.is_file():
+        if not await AsyncPath(path).is_file():
             continue
+        stat = await AsyncPath(path).stat()
         # `_edges.jsonl` 每行没有时间；用文件 mtime 作为 `kb_edges.created_at`
         # （not null 列必须有值），并在文档里写清这是近似来源。
-        recorded_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        text = await AsyncPath(path).read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), 1):
             if not line.strip():
                 continue
             try:
@@ -457,7 +459,7 @@ async def parse_tree(root: Path) -> MigrationPlan:
         )
 
     node_ids = {row["id"] for row in (*active_nodes, *trash_nodes)}
-    edges = _edges(root, sorted(set(dir_projects)), node_ids, diff)
+    edges = await _edges(root, sorted(set(dir_projects)), node_ids, diff)
     archives = await _scan_archives(root, diff)
 
     all_nodes = [*active_nodes, *trash_nodes]
