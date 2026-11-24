@@ -30,7 +30,7 @@ ADR 检查与裁决
 ## 2. 门禁兜不住的硬约束
 
 - 密钥、token、口令一律只经 `.env` 注入，禁止进入仓库、文档与提交信息；文档只写键名与读取方。
-- 会话正文、用户内容与原始观测只进 `raw_store/` 与 `knowledge/` 真源，禁止硬编码进源码、测试或文档。
+- 会话正文、用户内容与原始观测只进 `raw_store/`（迁移后含 PG 的 `kb_*` 表）真源，禁止硬编码进源码、测试或文档。
 - 分支模型：`main` 是稳定分支，只有负责人明确允许后才能合入，发版只从 `main` 出，不从特性分支或 worktree 出；`dev` 是日常开发的集成分支。所有代码修改在从 `dev` 创建的独立分支 + 独立 worktree 中完成，验收后合回 `dev` 并清理，不长期停留在特性分支。细则见 [DEVELOPMENT](docs/guides/DEVELOPMENT.md) §6。
 - Git 本地写操作（提交、合并、变基、切换、worktree、分支与标签管理、清理等）默认授权，无需逐次确认；仅远端操作（推送、拉取、抓取、修改 remote、推送标签、创建或更新 PR/release 等）需要负责人针对当前操作明确授权。授权边界见 [DEVELOPMENT](docs/guides/DEVELOPMENT.md) §6。
 - 只修改当前任务和已确认规范覆盖的范围，不提前实现后续里程碑。
@@ -50,6 +50,6 @@ ADR 检查与裁决
 | 开发环境、命令、验证矩阵、提交粒度、分支与 worktree 闭环 | `docs/guides/DEVELOPMENT.md` |
 | 重要架构决策 | `docs/decisions/README.md`（具体决策：`docs/decisions/ADR-NNNN-*.md`） |
 | 行为变更记录（按日期追加） | `docs/CHANGELOG.md` |
-| 知识真源 | `knowledge/`（markdown，git 管理；投影产物不入库） |
+| 知识真源 | PostgreSQL 的 `kb_*` 表（ADR-0013；markdown 仅作一次性迁移源） |
 
 当文档冲突或实现领先于规范时，不自行选择方便实现的一方：先输出文档裁决候选并取得负责人有效裁决。
