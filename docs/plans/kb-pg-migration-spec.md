@@ -193,7 +193,7 @@
 7. 归档/软删：整库归档后节点从检索消失、可恢复；恢复后计数一致；归档期间普通写入返回 `busy/pending` 等价错误。
 8. 上传：`/api/v1/kb/uploads` 目标校验改查 `kb_projects`，未登记/已归档仍 `404/422`；批次清单仍走文件。
 9. 门禁：`check_no_raw_sql.py`、`check_async_io.py`（含 `alembic/` 覆盖）、`mypy`、文档格式与 ADR 治理全绿。
-10. **验收命令必须要求 `MEMHUB_TEST_DB_URL` 存在**：未设置时 PG 用例 skip **不计为通过**，命令应显式失败或标注未验证。
+10. **验收命令必须要求 `MEMHUB_TEST_DB_URL` 存在**（指向 `memhub_dev`）：未设置时 PG 用例 skip **不计为通过**，命令应显式失败或标注未验证。测试隔离用 schema-per-test（§9.1 第 4 条）。
 
 ## 9. 已裁决与新增待决
 
@@ -202,12 +202,13 @@
 1. **归档快照入库**：`kb_archives.snapshot` 存 `bytea`（`not null`），`pg_dump` 即唯一完整备份；整库归档快照不再单独留文件。
 2. **修订存完整正文快照**：`kb_node_revisions.before/after` 存含 `body` 的完整节点 JSON，兑现「单节点可精确回滚」。
 3. **单 DML 角色**：kb-api 运行时只有一个只对 `kb_*` 做 DML 的角色；`mcp:read`/`mcp:write` 的区分仍由应用层凭据作用域控制，不另建 DB 只读角色。
-4. **测试隔离用独立 database**：每个用例建独立 database、跑完 `DROP DATABASE`。**由此产生一个新的权限约束（见 9.2）**，且这是对 ADR-0004「memhub_app 无 CREATEDB」的显式偏离。
+4. **测试隔离用 schema-per-test**（2026-11-24 终裁，取代此前「每用例独立 database」）：每个用例 `CREATE SCHEMA test_<uuid>`、跑完 `DROP SCHEMA CASCADE`（同 `tests/contract/test_state_store.py` 现状）。dev 库 `memhub_dev`（owner/角色 `memhub_dev_app`，无 CREATEDB，`CONNECTION LIMIT 8`）已建好，并行 lane 共用。不需要 CREATEDB 测试角色，不偏离 ADR-0004。
 
-### 9.2 由上述裁决引出的新增待决
+### 9.2 已裁决（2026-11-24 终裁）
 
-1. **测试角色的 CREATEDB 权限**：ADR-0004 §1 规定 `memhub_app` 不得有 CREATEDB。每用例建独立 database 必须连一个带 CREATEDB 的**独立测试角色**（如 `memhub_test`），且只连测试实例或 dev 实例的测试数据库，不碰 `memhub_prod`。需负责人确认：允许在 dev 云实例上建该测试角色，还是要求本机/临时容器另起一个 PG 跑测试。
-2. **连接配额**：建 database 比建 schema 重，且测试并发 + kb 运行时 + ingest/worker 共用实例 `max_connections=60`。需核定测试并发上限与连接预算，写进部署清单。
+1. **测试角色与 CREATEDB**：不复用、不需要。dev 库 `memhub_dev`（owner/角色 `memhub_dev_app`，无 CREATEDB，连接限额 8）承载全部日常开发与测试，隔离用 schema-per-test（见 9.1 第 4 条）；生产实例的 PUBLIC CONNECT 与 pg_hba 未动。
+2. **连接配额**：rolconnlimit 合计 50（现有）+ 8（`memhub_dev_app`）= 58 ≤ `max_connections=60`（扣超级用户预留 3 后实际可用 57）；测试并发建议 `-n ≤ 4`。kb 运行时连接池上线前仍须把生产侧预算写进部署清单。
+3. **kb 生产角色与 `kb_*` 表的落库位置**（`memhub_prod` 内独立 schema，或独立 database）**仍未裁决**，见 ADR-0013 §6；裁决前不创建生产 kb 角色与表。
 
 ### 9.3 已决（不再讨论）
 

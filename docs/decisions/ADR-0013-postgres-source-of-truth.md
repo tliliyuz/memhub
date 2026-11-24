@@ -44,7 +44,7 @@ ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。�
 7. **本轮交付边界**：存储迁移 + 契约修订 + schema 预留。节点修订历史表建好并写入，但候选转正、`## Change Log`、tier 变更审批流等治理缺口另立里程碑，不在本轮实现。**上传批次清单是否入 `kb_batches` 明确不在本轮**：`uploads/<batch_id>.json` 与「按文件路径推导批次状态」保持不变，只把上传入口的库存在性校验从文件/`target_access` 改为查 `kb_projects`（登记且 `archived_at is null`）。
 8. **边端点不加外键**：`kb_edges.source/target` 允许指向尚未存在或已归档的节点，保留原 `_edges.jsonl` 的悬空边语义（`unresolved_edges`），`source_doc` 保留。实现时不得顺手加外键，否则会静默丢弃悬空边。
 9. **迁移执行是一次性运维动作**：读服务器 `knowledge/` → 写入 `kb_*` → 校验（**逐节点、逐边的内容哈希比对，仅比计数不够**）→ `pg_dump` 与 `knowledge/` 打包备份 → 删除 markdown。提供 `--dry-run` 与 `--verify-only`，校验不通过不删除。迁移**必须处理归档数据**：`_trash/` 与 `_kb_archives/` 的历史节点按 `archived_at` / `kb_archives` 迁入（或明确只备份不迁，二者择一并写死）；「目录存在但未在 `.kbs.json` 登记」的库（如仓库 memhub 库）按已登记库导入 `kb_projects`，不得静默跳过而丢归属。删除动作需负责人在服务器上执行或明确授权。
-10. **本地开发与测试直接用云端 PostgreSQL**（负责人选定），不再用内存实现替身。**测试隔离用独立 database**（已裁决）：每个用例建独立 database、跑完 `DROP DATABASE`。这要求一个带 CREATEDB 的独立测试角色，是对 ADR-0004「`memhub_app` 无 CREATEDB」的显式偏离——测试角色只连测试实例或 dev 实例的测试库，不碰 `memhub_prod`；具体由负责人确认（dev 实例建测试角色，或另起本机/临时 PG）。本里程碑的验收命令**必须要求 `MEMHUB_TEST_DB_URL` 存在**——未设置时 PG 用例 skip 不计为通过。
+10. **本地开发与测试直接用云端 PostgreSQL**（负责人选定），不再用内存实现替身。**测试隔离用 schema-per-test**（2026-11-24 负责人终裁，取代此前「每用例独立 database」的初步选择）：每个用例 `CREATE SCHEMA test_<uuid>`、跑完 `DROP SCHEMA CASCADE`，与 `tests/contract/test_state_store.py` 既有模式一致。落地形态（已在生产实例建好并验证）：dev 库 `memhub_dev`（owner `memhub_dev_app`），角色 `memhub_dev_app` 为 LOGIN、无 SUPERUSER/CREATEDB/CREATEROLE、`CONNECTION LIMIT 8`；并行开发 lane 共用该库与该账号。不需要 CREATEDB 测试角色，不偏离 ADR-0004；不触碰 `memhub_prod` 的角色、ACL 与 pg_hba。连接预算：现有 rolconnlimit 合计 50 + 8 = 58 ≤ `max_connections=60`（扣超级用户预留 3 后实际可用 57），测试并发建议 `-n ≤ 4`。本里程碑的验收命令**必须要求 `MEMHUB_TEST_DB_URL` 存在**——未设置时 PG 用例 skip 不计为通过。
 
 ## 备选与否决理由
 
