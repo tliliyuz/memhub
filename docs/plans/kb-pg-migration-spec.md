@@ -2,7 +2,7 @@
 
 | 属性 | 值 |
 |:---|:---|
-| 文档状态 | draft（待负责人评审） |
+| 文档状态 | specified（2026-11-24 负责人评审） |
 | 最后更新 | 2026-11-24 |
 | 适用范围 | 知识真源的 PG 数据模型、存储边界、一次性迁移、检索与并发语义、验收条件与待裁决项 |
 | 不负责 | 架构裁决（见 [ADR-0013](../decisions/ADR-0013-postgres-source-of-truth.md)）、对外字段取值（见 [contracts](../contracts/README.md)）、实施历史（见 [CHANGELOG](../CHANGELOG.md)） |
