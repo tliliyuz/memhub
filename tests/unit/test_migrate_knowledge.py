@@ -264,3 +264,59 @@ async def test_project_rows_are_deterministically_revised(tmp_path: Path, name: 
     plan = await parse_tree(_tree(tmp_path))
     project = next(item for item in plan.projects if item["id"] == name)
     assert REVISION_RE.fullmatch(project["revision"])
+
+
+async def test_nodes_of_unregistered_directory_keep_their_project(tmp_path: Path) -> None:
+    """未登记库必须建 project 行，否则 `kb_nodes.project` 的外键无主、节点无处可落。"""
+    plan = await parse_tree(_tree(tmp_path))
+    project_ids = {item["id"] for item in plan.projects}
+
+    for node in plan.nodes:
+        assert node["project"] in project_ids, node["id"]
+
+
+async def test_registry_entry_created_at_is_carried_over(tmp_path: Path) -> None:
+    """`.kbs.json` 里已有的 created_at 是真源事实，迁移不得用扫描时刻覆盖它。"""
+    root = _tree(tmp_path)
+    (root / ".kbs.json").write_text(
+        json.dumps(
+            {
+                "kbs": [
+                    {
+                        "id": "demo",
+                        "name": "演示库",
+                        "description": "迁移解析用的合成样本",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = await parse_tree(root)
+    demo = next(item for item in plan.projects if item["id"] == "demo")
+
+    assert demo["created_at"].year == 2026
+    assert demo["created_at"].month == 1
+    assert demo["created_at"].day == 1
+
+
+async def test_pending_archive_is_reported_but_plan_still_inspects(tmp_path: Path) -> None:
+    """`pending.json` 只阻断写库，不阻断只读统计：dry-run 仍要看得到计数与差异。"""
+    root = _tree(tmp_path)
+    (root / "_kb_archives").mkdir(parents=True, exist_ok=True)
+    (root / "_kb_archives" / "pending.json").write_text("{}\n", encoding="utf-8")
+
+    plan = await parse_tree(root)
+
+    assert plan.blocking is True
+    assert {node["id"] for node in plan.nodes} >= {"demo/fact/alpha", "orphan/fact/gamma"}
+
+
+async def test_edge_created_at_is_populated_not_null(tmp_path: Path) -> None:
+    """`kb_edges.created_at` 是 not null；解析侧必须给出确定值，不能留空等写库时才定。"""
+    plan = await parse_tree(_tree(tmp_path))
+
+    for edge in plan.edges:
+        assert edge["created_at"] is not None

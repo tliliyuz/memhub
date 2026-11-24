@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -128,6 +127,17 @@ def _project_revision(kb_id: str, created_at: datetime, updated_at: datetime) ->
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _parse_time(value: object, default: datetime) -> datetime:
+    """登记/边文件里的时间字符串（可能带 Z 或偏移）；解析不了就用默认值，不静默丢行。"""
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return default
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return default
+
+
 async def _registry(root: Path, diff: MigrationDiff) -> dict[str, dict[str, Any]]:
     """读 `.kbs.json`；结构坏时报 registry_error 并按空登记继续（目录扫描兜底）。"""
     path = root / ".kbs.json"
@@ -183,7 +193,7 @@ def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str
 async def _trash_row(root: Path, relative: Path) -> dict[str, Any] | None:
     """`_trash/<stamp>/<node_id>.md` → 软删节点行（`archived_at` = 删除时间）。"""
     stamp_match = STAMP_RE.fullmatch(relative.parts[1])
-    node_id = relative.with_suffix("").relative_to(*relative.parts[:2]).as_posix()
+    node_id = Path(*relative.parts[2:]).with_suffix("").as_posix()
     if stamp_match is None or not NODE_ID_RE.fullmatch(node_id):
         return None
     stamp = datetime.strptime(stamp_match.group(0), "%Y%m%dT%H%M%S%f").replace(tzinfo=UTC)
@@ -274,6 +284,9 @@ def _edges(
         path = root / project / "_edges.jsonl"
         if not path.is_file():
             continue
+        # `_edges.jsonl` 每行没有时间；用文件 mtime 作为 `kb_edges.created_at`
+        # （not null 列必须有值），并在文档里写清这是近似来源。
+        recorded_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if not line.strip():
                 continue
@@ -300,7 +313,7 @@ def _edges(
                     "predicate": record["predicate"],
                     "target": record["target"],
                     "source_doc": record.get("source_doc"),
-                    "created_at": None,
+                    "created_at": recorded_at,
                 }
             )
             if record["source"] not in node_ids or record["target"] not in node_ids:
@@ -425,7 +438,8 @@ async def parse_tree(root: Path) -> MigrationPlan:
         meta = registry.get(kb_id, {})
         if kb_id not in registered:
             diff.unregistered_projects = (*diff.unregistered_projects, kb_id)
-        created = now
+        # 登记里的 created_at 是真源事实；未登记/缺值时用扫描时刻。
+        created = _parse_time(meta.get("created_at"), now)
         projects.append(
             {
                 "id": kb_id,
@@ -459,7 +473,3 @@ async def parse_tree(root: Path) -> MigrationPlan:
         trash_events=trash_events,
         diff=diff,
     )
-
-
-def _unused(*_: Any) -> None:  # pragma: no cover - 保留 uuid 导入给后续写库半段
-    uuid.uuid4()
