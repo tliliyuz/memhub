@@ -18,6 +18,8 @@ postgres = [
     "psycopg[binary,pool]>=3.2,<3.3",
     # 异步 ORM；psycopg 3 同时提供异步 dialect（postgresql+psycopg）
     "sqlalchemy>=2.0.30,<2.1",
+    # kb_* 的 DDL 版本化（ADR-0013 §4）；迁移角色带外执行
+    "alembic>=1.16,<2",
 ]
 engine = [
     # 解析/切分/去重/图谱/向量/explorer 复用 semantica
@@ -35,6 +37,8 @@ dev = [
     # 让 `mypy src` 能解析 memhub.ingest.postgres（生产实现），测试也用它
     "psycopg[binary,pool]>=3.2,<3.3",
     "sqlalchemy>=2.0.30,<2.1",
+    # 迁移契约测试要跑 alembic upgrade/downgrade
+    "alembic>=1.16,<2",
     # 存储协议改成 async 后，契约测试需要 pytest 的 async 支持
     "pytest-asyncio>=0.24,<2",
 ]

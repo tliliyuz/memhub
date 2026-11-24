@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 KB_DSN_KEY = "MEMHUB_KB_DB_URL"
+MIGRATE_DSN_KEY = "MEMHUB_KB_MIGRATE_DB_URL"
 KB_SCHEMA = "kb"
 RUNTIME_POOL_SIZE = 2
 RUNTIME_MAX_OVERFLOW = 2
@@ -34,13 +35,28 @@ class KbDsnMissing(RuntimeError):
 
 def kb_dsn(environ: Mapping[str, str] | None = None) -> str:
     """读取并校验 `MEMHUB_KB_DB_URL`；空值与缺失同样视为未配置。"""
+    return _require_dsn(
+        KB_DSN_KEY,
+        environ,
+        "kb 需要专用受限角色的连接串（只对 kb_* 有 DML）；"
+        "不得复用 MEMHUB_DB_URL —— 那是运行态角色，能碰运行态表与令牌摘要",
+    )
+
+
+def migrate_dsn(environ: Mapping[str, str] | None = None) -> str:
+    """迁移（DDL）角色连接串；带外执行 Alembic，不在 kb 容器启动时跑。"""
+    return _require_dsn(
+        MIGRATE_DSN_KEY,
+        environ,
+        "Alembic 迁移需要 kb_* 的 DDL 权限；不得复用运行时角色或 MEMHUB_DB_URL",
+    )
+
+
+def _require_dsn(key: str, environ: Mapping[str, str] | None, hint: str) -> str:
     source = environ if environ is not None else _environ()
-    dsn = (source.get(KB_DSN_KEY) or "").strip()
+    dsn = (source.get(key) or "").strip()
     if not dsn:
-        raise KbDsnMissing(
-            f"缺少 {KB_DSN_KEY}：kb 需要专用受限角色的连接串（只对 kb_* 有 DML）；"
-            "不得复用 MEMHUB_DB_URL —— 那是运行态角色，能碰运行态表与令牌摘要"
-        )
+        raise KbDsnMissing(f"缺少 {key}：{hint}")
     return dsn
 
 
