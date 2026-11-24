@@ -38,7 +38,8 @@ updated_at: 2026-11-18T10:02:00Z
 valid_from: null                   # 可选，时间语义
 valid_until: null
 supersedes: []                     # 取代了哪些 id
-superseded_by: null
+superseded_by: null                # 被谁取代；没有替代节点时留空
+deprecated_reason: null            # tier=deprecated 且无替代节点时写原因
 ---
 ```
 
@@ -91,7 +92,7 @@ superseded_by: null
 
 规则：
 - 检索默认只返回 `canonical`；无命中时回退 `candidate` 并标注。
-- 永不硬删；废弃用 `tier: deprecated` + `superseded_by`。
+- 永不硬删；废弃用 `tier: deprecated`，并至少给出 `superseded_by`（有替代节点）或 `deprecated_reason`（结论被证伪、无替代物）。
 - 每次修改必须更新 `updated_at`，并在文件末尾追加 `## Change Log` 条目（谁、为什么、证据）。
 
 ## 6. 投影

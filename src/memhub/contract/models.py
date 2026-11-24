@@ -113,6 +113,7 @@ class NodeFrontmatter(BaseModel):
     valid_until: datetime | None = None
     supersedes: list[str] = Field(default_factory=list)
     superseded_by: str | None = None
+    deprecated_reason: str | None = None
     occurred_at: datetime | None = None
     decided_at: datetime | None = None
     status: QuestionStatus | None = None
@@ -123,8 +124,9 @@ class NodeFrontmatter(BaseModel):
             raise ValueError("kind=entity 时必须提供 entity_kind")
         if self.kind is Kind.QUESTION and self.status is None:
             raise ValueError("kind=question 时必须提供 status")
-        if self.tier is Tier.DEPRECATED and not self.superseded_by:
-            raise ValueError("tier=deprecated 时必须提供 superseded_by")
+        # 废弃既可以指向替代节点，也可以只记原因：结论被证伪时没有替代物可指。
+        if self.tier is Tier.DEPRECATED and not (self.superseded_by or self.deprecated_reason):
+            raise ValueError("tier=deprecated 时必须提供 superseded_by 或 deprecated_reason")
         return self
 
 

@@ -78,6 +78,7 @@ export type Frontmatter = {
   valid_until: string | null
   supersedes: string[]
   superseded_by: string | null
+  deprecated_reason: string | null
   occurred_at: string | null
   decided_at: string | null
   status: 'open' | 'resolved' | null

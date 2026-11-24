@@ -1,8 +1,10 @@
 """MCP 首版工具的参数契约，供工具列表与服务端校验共用。"""
 
+from __future__ import annotations
+
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from memhub.contract.models import KB_ID_PATTERN, Kind, Predicate, SourceRef
 
@@ -50,3 +52,40 @@ class WriteCandidateInput(ToolInput):
     evidence: list[SourceRef]
     tags: list[str] = Field(default_factory=list, max_length=16)
     confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class RevisionedNode(ToolInput):
+    """按修订号定位候选节点；`expected_revision` 是乐观并发前置条件。"""
+
+    id: str = Field(pattern=NODE_ID_PATTERN)
+    expected_revision: str = Field(min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$")
+
+
+class UpdateCandidateInput(RevisionedNode):
+    """只改候选节点的标题、正文、标签与置信度；至少给一项。"""
+
+    title: str | None = None
+    body: str | None = None
+    tags: list[str] | None = Field(default=None, max_length=16)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def at_least_one_field(self) -> UpdateCandidateInput:
+        if not any(
+            value is not None for value in (self.title, self.body, self.tags, self.confidence)
+        ):
+            raise ValueError("至少提供 title、body、tags、confidence 之一")
+        return self
+
+
+class DeprecateInput(RevisionedNode):
+    """把候选标记为废弃并保留文件；替代节点与原因至少给一项。"""
+
+    reason: str = Field(default="", max_length=2000)
+    superseded_by: str | None = Field(default=None, pattern=NODE_ID_PATTERN)
+
+    @model_validator(mode="after")
+    def needs_reason_or_successor(self) -> DeprecateInput:
+        if not self.reason.strip() and not self.superseded_by:
+            raise ValueError("必须提供 reason 或 superseded_by")
+        return self

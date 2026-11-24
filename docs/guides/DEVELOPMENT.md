@@ -156,8 +156,10 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./kno
 claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
 ```
 
-暴露四个检索工具和一个写候选工具（契约见 [`mcp-tools.md`](../contracts/mcp-tools.md)）：
-`kb_search`、`kb_read`、`kb_related`、`kb_audit_list`、`kb_write_candidate`。
+暴露四个检索工具和三个候选区写工具（契约见 [`mcp-tools.md`](../contracts/mcp-tools.md)）：
+`kb_search`、`kb_read`、`kb_related`、`kb_audit_list`、`kb_write_candidate`、
+`kb_update_candidate`、`kb_deprecate`。三个写工具都只作用于 `tier=candidate`；更新与废弃
+必须带 `kb_read` 返回的 `revision` 作为 `expected_revision`。
 
 分层：工具定义与入口在 `src/memhub/mcp/`——`tools.py` 共享实现与校验、`server.py` stdio 适配、
 `http.py` HTTP 入口、`auth.py` 凭据鉴权；检索算法在 `src/memhub/kb/query.py`，受限读取与
