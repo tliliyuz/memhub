@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 
@@ -21,28 +22,40 @@ def _sqlalchemy_url(dsn: str) -> str:
     return dsn.replace("postgresql://", "postgresql+psycopg://", 1)
 
 
-@pytest_asyncio.fixture
-async def kb_engine() -> AsyncIterator[AsyncEngine]:
-    """search_path 固定在独立 schema 的异步引擎；用例结束整体删除该 schema。"""
-    from sqlalchemy import text
-
+@pytest.fixture
+def test_dsn() -> str:
+    """`MEMHUB_TEST_DB_URL`；未设置时 skip，且不计为通过（规格 §8.10）。"""
     dsn = os.environ.get("MEMHUB_TEST_DB_URL", "")
     if not dsn:
         pytest.skip("MEMHUB_TEST_DB_URL 未设置；kb PG 契约未执行（不计为通过）")
+    return dsn
+
+
+@pytest_asyncio.fixture
+async def kb_schema(test_dsn: str) -> AsyncIterator[str]:
+    """建一个空 schema 并返回名字；用例结束整体删除。"""
     schema = f"test_{uuid.uuid4().hex[:12]}"
-    engine = create_async_engine(
-        _sqlalchemy_url(dsn),
-        pool_size=1,
-        max_overflow=1,
-        connect_args={"options": f"-csearch_path={schema}"},
-    )
-    admin = create_async_engine(_sqlalchemy_url(dsn), isolation_level="AUTOCOMMIT")
+    admin = create_async_engine(_sqlalchemy_url(test_dsn), isolation_level="AUTOCOMMIT")
     try:
         async with admin.connect() as conn:
             await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        yield engine
+        yield schema
     finally:
-        await engine.dispose()
         async with admin.connect() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await admin.dispose()
+
+
+@pytest_asyncio.fixture
+async def kb_engine(kb_schema: str, test_dsn: str) -> AsyncIterator[AsyncEngine]:
+    """search_path 固定在独立 schema 的异步引擎。"""
+    engine = create_async_engine(
+        _sqlalchemy_url(test_dsn),
+        pool_size=1,
+        max_overflow=1,
+        connect_args={"options": f"-csearch_path={kb_schema}"},
+    )
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
