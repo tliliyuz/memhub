@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -32,8 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from memhub.contract import Edge, NodeFrontmatter, Predicate, valid_project
 from memhub.kb.errors import (
+    ConflictError,
     InvalidError,
     NodeMissing,
+    NotFoundError,
     ProjectMissing,
     RevisionConflict,
     TargetUnavailable,
@@ -423,11 +426,30 @@ class PgKnowledgeStore:
         project: str | None = None,
         q: str | None = None,
     ) -> dict[str, Any]:
-        """回收站：`archived_at` 非空的节点 + 最近一条删除快照的 reason/actor。"""
+        """回收站：`archived_at` 非空的节点 + 最近一条删除快照的 reason/actor。
+
+        整库归档一并软删的节点不属于回收站条目（文件版归档时整个目录被移出活跃树），
+        归档前就单独软删的节点仍保留，恢复整库后照旧可见。
+        """
         async with self._session() as session:
             rows = list(
                 (await session.scalars(select(KbNode).where(KbNode.archived_at.is_not(None)))).all()
             )
+            archived_projects = {
+                row.id: row.archived_at
+                for row in (
+                    await session.scalars(
+                        select(KbProject).where(KbProject.archived_at.is_not(None))
+                    )
+                ).all()
+            }
+            rows = [
+                row
+                for row in rows
+                if (archived_at := archived_projects.get(row.project)) is None
+                or row.archived_at is None
+                or row.archived_at < archived_at
+            ]
             deletions: dict[str, KbNodeRevision] = {}
             if rows:
                 revisions = (
@@ -614,9 +636,15 @@ class PgKnowledgeStore:
             return await self._remove_nodes_edges(session, node_ids)
 
     async def _resolver(
-        self, session: AsyncSession, *, include: str | set[str] | None = None
+        self,
+        session: AsyncSession,
+        *,
+        include: str | set[str] | None = None,
+        exclude: set[str] | None = None,
     ) -> Callable[[str], str | None]:
         ids = set(await session.scalars(select(KbNode.id).where(KbNode.archived_at.is_(None))))
+        if exclude:
+            ids -= exclude
         if include is not None:
             ids.update({include} if isinstance(include, str) else include)
         slug_index: dict[str, list[str]] = {}
@@ -665,6 +693,352 @@ class PgKnowledgeStore:
             return 0
         await session.execute(delete(KbEdge).where(KbEdge.id.in_(doomed)))
         return len(doomed)
+
+    # -- 知识库目录（catalog 的 PG 实现） --------------------------------
+
+    async def _project_entry(self, session: AsyncSession, row: KbProject) -> dict[str, Any]:
+        nodes = await session.scalar(
+            select(func.count())
+            .select_from(KbNode)
+            .where(KbNode.project == row.id, KbNode.archived_at.is_(None))
+        )
+        edges = await session.scalar(
+            select(func.count()).select_from(KbEdge).where(KbEdge.project == row.id)
+        )
+        updated = await session.scalar(
+            select(func.max(KbNode.updated_at)).where(
+                KbNode.project == row.id, KbNode.archived_at.is_(None)
+            )
+        )
+        return {
+            "id": row.id,
+            "name": row.name,
+            "description": row.description,
+            "nodes": int(nodes or 0),
+            "edges": int(edges or 0),
+            "updated_at": updated.isoformat() if updated else None,
+            "created_at": row.created_at.isoformat(),
+        }
+
+    async def list_projects(self) -> dict[str, Any]:
+        """活动知识库清单；与文件版 `catalog.list_kbs` 同形。"""
+        async with self._session() as session:
+            rows = (
+                await session.scalars(
+                    select(KbProject).where(KbProject.archived_at.is_(None)).order_by(KbProject.id)
+                )
+            ).all()
+            items = [await self._project_entry(session, row) for row in rows]
+        return {"items": items, "total": len(items)}
+
+    async def create_project(
+        self, project_id: str, *, name: str = "", description: str = ""
+    ) -> dict[str, Any]:
+        """登记新库；已登记即冲突，已归档需先恢复（与文件版同口径）。"""
+        async with self.write_scope():
+            async with self._session() as session:
+                row = await session.get(KbProject, project_id, with_for_update=True)
+                if row is not None and row.archived_at is not None:
+                    raise WriteDeferred(
+                        f"知识库 {project_id} 已归档，恢复后才能写入", reason="archived"
+                    )
+                if row is not None:
+                    raise ConflictError("知识库已存在", {"id": project_id})
+                now = _now()
+                row = KbProject(
+                    id=project_id,
+                    name=name.strip() or project_id,
+                    description=description.strip(),
+                    revision=new_revision(),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            return {
+                "id": project_id,
+                "name": row.name,
+                "description": row.description,
+                "created_at": row.created_at.isoformat(),
+            }
+
+    async def update_project(
+        self,
+        project_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        async with self.write_scope(), self._session() as session:
+            row = await session.get(KbProject, project_id, with_for_update=True)
+            if row is None or row.archived_at is not None:
+                raise NotFoundError(f"知识库不存在: {project_id}")
+            if name is not None:
+                row.name = name.strip() or project_id
+            if description is not None:
+                row.description = description.strip()
+            row.revision = new_revision()
+            row.updated_at = _now()
+            return {
+                "id": row.id,
+                "name": row.name,
+                "description": row.description,
+                "created_at": row.created_at.isoformat(),
+            }
+
+    async def list_archives(self) -> dict[str, Any]:
+        """未恢复的整库归档；与文件版 `catalog.list_archives` 同形。"""
+        from memhub.kb import archive
+
+        async with self._session() as session:
+            rows = (
+                await session.scalars(
+                    select(KbArchive)
+                    .where(KbArchive.status == "active")
+                    .order_by(KbArchive.created_at.desc())
+                )
+            ).all()
+            items = []
+            for row in rows:
+                payload, _ = await archive.unpack_bundle(row.snapshot)
+                try:
+                    header = dict(payload["header"])
+                    if header["archive_id"] != row.archive_id:
+                        raise ValueError("archive_id")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ConflictError(
+                        "知识库归档快照损坏", {"archive_id": row.archive_id}
+                    ) from exc
+                items.append(header)
+        return {"items": items, "total": len(items)}
+
+    async def archive_project_kb(self, project_id: str, *, actor: str = "ui") -> dict[str, Any]:
+        """整库归档：快照入库、节点软删、相连边删除、登记置归档（规格 §8.7）。
+
+        一次事务完成，不产生 `pending` 中间态；`write_scope` 的 pending 检查保留，
+        用于人工修复时识别残留行。
+        """
+        from memhub.kb import archive
+
+        async with self.write_scope(), self._session() as session:
+            project = await session.get(KbProject, project_id, with_for_update=True)
+            if project is None or project.archived_at is not None:
+                raise NotFoundError(f"知识库不存在: {project_id}")
+            nodes = (
+                await session.scalars(
+                    select(KbNode)
+                    .where(KbNode.project == project_id, KbNode.archived_at.is_(None))
+                    .order_by(KbNode.id)
+                )
+            ).all()
+            node_ids = {row.id for row in nodes}
+            before = await self._resolver(session, include=node_ids)
+            after = await self._resolver(session, exclude=node_ids)
+
+            rows = (await session.scalars(select(KbEdge).order_by(KbEdge.id))).all()
+            doomed: list[KbEdge] = []
+            for row in rows:
+                if row.project == project_id:
+                    doomed.append(row)
+                    continue
+                endpoints = (before(row.source), before(row.target))
+                if endpoints[0] in node_ids or endpoints[1] in node_ids:
+                    doomed.append(row)
+                    continue
+                if endpoints != (after(row.source), after(row.target)):
+                    raise ConflictError(
+                        "归档会改变现有关系的短别名",
+                        {"path": f"{row.project}/_edges.jsonl"},
+                    )
+
+            now = _now()
+            archive_id = uuid.uuid4().hex
+            header: dict[str, Any] = {
+                "id": project_id,
+                "archive_id": archive_id,
+                "deleted_at": now.isoformat(),
+                "name": project.name,
+                "actor": actor,
+                "archived_count": len(nodes),
+                "removed_edges": len(doomed),
+            }
+            payload = {
+                "header": header,
+                "entry": {
+                    "id": project.id,
+                    "name": project.name,
+                    "description": project.description,
+                    "created_at": project.created_at.isoformat(),
+                },
+                "nodes": [
+                    {
+                        "node": _node_from_row(row).model_dump(mode="json"),
+                        "body": row.body,
+                    }
+                    for row in nodes
+                ],
+                "edges": [
+                    {
+                        "project": row.project,
+                        "source": row.source,
+                        "predicate": row.predicate,
+                        "target": row.target,
+                        "source_doc": row.source_doc,
+                    }
+                    for row in doomed
+                ],
+            }
+            snapshot = await archive.pack_bundle(payload, {})
+            if doomed:
+                await session.execute(
+                    delete(KbEdge).where(KbEdge.id.in_([row.id for row in doomed]))
+                )
+            for node_row in nodes:
+                node_row.archived_at = now
+                node_row.revision = new_revision()
+                node_row.updated_at = now
+            project.archived_at = now
+            project.revision = new_revision()
+            project.updated_at = now
+            session.add(
+                KbArchive(
+                    archive_id=archive_id,
+                    project=project_id,
+                    status="active",
+                    snapshot=snapshot,
+                    archived_count=len(nodes),
+                    removed_edges=len(doomed),
+                    actor=actor,
+                    deleted_at=now,
+                    created_at=now,
+                )
+            )
+        return {**header, "commit": None}
+
+    async def restore_project_kb(self, archive_id: str) -> dict[str, Any]:
+        """恢复整库归档：节点取消软删、边补回、登记取消归档。
+
+        只取消本次归档软删的节点；归档前已单独软删的节点保持软删。
+        已被恢复过的归档（`status="restored"`）不再可恢复。
+        """
+        from memhub.kb import archive
+
+        if not re.fullmatch(r"[0-9a-f]{32}", archive_id):
+            raise NotFoundError("知识库归档不存在")
+        async with self.write_scope(recovery=True), self._session() as session:
+            row = await session.get(KbArchive, archive_id, with_for_update=True)
+            if row is None or row.status != "active":
+                raise NotFoundError("知识库归档不存在")
+            payload, _ = await archive.unpack_bundle(row.snapshot)
+            try:
+                header = payload["header"]
+                entry = payload["entry"]
+                saved_nodes = payload["nodes"]
+                saved_edges = payload["edges"]
+                project_id = header["id"]
+                if not isinstance(header, dict) or header["archive_id"] != archive_id:
+                    raise ValueError("header")
+                if not valid_project(project_id) or entry["id"] != project_id:
+                    raise ValueError("entry")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConflictError("知识库归档快照损坏") from exc
+
+            restored_ids = {str(item["node"]["id"]) for item in saved_nodes}
+            conflict = set(
+                await session.scalars(
+                    select(KbNode.id).where(
+                        KbNode.id.in_(restored_ids), KbNode.archived_at.is_(None)
+                    )
+                )
+            )
+            if conflict:
+                raise ConflictError("恢复目标已存在", {"ids": sorted(conflict)})
+
+            project = await session.get(KbProject, project_id, with_for_update=True)
+            if project is not None and project.archived_at is None:
+                raise ConflictError("已存在同名库登记", {"id": project_id})
+
+            before = await self._resolver(session)
+            after = await self._resolver(session, include=restored_ids)
+            saved_triples = {
+                (edge["source"], edge["predicate"], edge["target"]) for edge in saved_edges
+            }
+            for edge in (await session.scalars(select(KbEdge))).all():
+                if (edge.source, edge.predicate, edge.target) in saved_triples:
+                    continue
+                if (before(edge.source), before(edge.target)) != (
+                    after(edge.source),
+                    after(edge.target),
+                ):
+                    raise ConflictError(
+                        "恢复会改变现有关系的短别名",
+                        {"path": f"{edge.project}/_edges.jsonl"},
+                    )
+
+            now = _now()
+            if project is None:
+                project = KbProject(
+                    id=project_id,
+                    name=str(entry["name"]) or project_id,
+                    description=str(entry["description"]),
+                    revision=new_revision(),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(project)
+            else:
+                project.name = str(entry["name"]) or project_id
+                project.description = str(entry["description"])
+                project.archived_at = None
+                project.revision = new_revision()
+                project.updated_at = now
+
+            for item in saved_nodes:
+                node = NodeFrontmatter.model_validate(item["node"])
+                values = _row_from(node, node.id, str(item["body"]), new_revision())
+                values["archived_at"] = None
+                await session.execute(
+                    pg_insert(KbNode)
+                    .values(**values)
+                    .on_conflict_do_update(
+                        index_elements=[KbNode.id],
+                        set_={key: value for key, value in values.items() if key != "id"},
+                    )
+                )
+                session.add(
+                    KbNodeRevision(
+                        node_id=node.id,
+                        revision=values["revision"],
+                        tier=str(node.tier),
+                        actor="archive-restore",
+                        reason="restore",
+                        before={},
+                        after=_snapshot(node, str(item["body"])),
+                        created_at=now,
+                    )
+                )
+            for edge in saved_edges:
+                await session.execute(
+                    pg_insert(KbEdge)
+                    .values(
+                        project=str(edge["project"]),
+                        source=str(edge["source"]),
+                        predicate=str(edge["predicate"]),
+                        target=str(edge["target"]),
+                        source_doc=edge.get("source_doc"),
+                        created_at=now,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[KbEdge.source, KbEdge.predicate, KbEdge.target]
+                    )
+                )
+            row.status = "restored"
+        return {
+            "id": str(header["id"]),
+            "archive_id": archive_id,
+            "restored_count": int(header["archived_count"]),
+            "restored_edges": int(header["removed_edges"]),
+            "commit": None,
+        }
 
     # -- 历史 ------------------------------------------------------------
 

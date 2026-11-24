@@ -188,6 +188,16 @@ def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+async def pack_bundle(meta: dict[str, Any], blobs: dict[str, bytes]) -> bytes:
+    """把元数据与附件打成可校验的 zip 字节串（PG 版快照直接入 `bytea`）。"""
+    return await anyio.to_thread.run_sync(_pack, meta, blobs)
+
+
+async def unpack_bundle(value: bytes) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """解包并校验附件摘要；损坏时抛 `ConflictError`。"""
+    return await anyio.to_thread.run_sync(_unpack, value)
+
+
 async def save_bundle(path: Path, meta: dict[str, Any], blobs: dict[str, bytes]) -> str:
     value = await anyio.to_thread.run_sync(_pack, meta, blobs)
     await replace(path, value)

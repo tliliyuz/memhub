@@ -13,8 +13,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from memhub.contract import Kind, NodeFrontmatter, Predicate, SourceKind, SourceRef, Tier
-from memhub.kb.models import Base, KbEdge, KbNode, KbNodeRevision
-from memhub.kb.pgstore import NodeMissing, PgKnowledgeStore, RevisionConflict
+from memhub.kb.errors import TargetUnavailable
+from memhub.kb.models import Base, KbArchive, KbEdge, KbNode, KbNodeRevision
+from memhub.kb.pgstore import NodeMissing, PgKnowledgeStore, RevisionConflict, WriteDeferred
 from memhub.kb.session import create_sessionmaker
 from memhub.kb.store import ProjectMissing
 
@@ -203,6 +204,37 @@ async def test_stale_expected_revision_is_rejected_and_data_unchanged(
     assert err.value.current == fresh
     node, _ = await store.read("demo/fact/alpha")
     assert node.title == "较新标题"
+
+
+async def test_pending_archive_blocks_writes_and_status(
+    engine: AsyncEngine, store: PgKnowledgeStore
+) -> None:
+    """规格 §8.7：归档事务未完成时普通写入拿 `pending`，恢复流程不受阻。"""
+    await store.register_project(PROJECT, name="演示库")
+    async with AsyncSession(engine) as session:
+        session.add(
+            KbArchive(
+                archive_id="0" * 32,
+                project=PROJECT,
+                status="pending",
+                snapshot=b"",
+                archived_count=0,
+                removed_edges=0,
+                created_at=NOW,
+            )
+        )
+        await session.commit()
+
+    with pytest.raises(WriteDeferred) as err:
+        async with store.write_scope(timeout=0):
+            pass
+    assert err.value.reason == "pending"
+
+    with pytest.raises(TargetUnavailable):
+        await store.project_status(PROJECT)
+
+    async with store.write_scope(timeout=0, recovery=True):
+        pass
 
 
 async def test_concurrent_writes_only_one_wins(store: PgKnowledgeStore) -> None:
