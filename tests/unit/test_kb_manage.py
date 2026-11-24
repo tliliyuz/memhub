@@ -13,6 +13,7 @@ from anyio import Path as AsyncPath
 
 from memhub.contract import Edge, Kind, Predicate, Tier
 from memhub.kb import manage, proc
+from memhub.kb import store as store_module
 from memhub.kb.store import KnowledgeStore, ProjectMissing
 
 
@@ -338,7 +339,7 @@ async def test_git_commit_excludes_runtime_files_but_keeps_archive_state(
         await path.parent.mkdir(exist_ok=True, parents=True)
         await path.touch()
 
-    git = manage._git
+    git = store_module.git
 
     async def stage_only_git(
         repo: Path, args: list[str], *, timeout: float
@@ -347,7 +348,9 @@ async def test_git_commit_excludes_runtime_files_but_keeps_archive_state(
             return 0, b"test", b""
         return await git(repo, args, timeout=timeout)
 
-    monkeypatch.setattr(manage, "_git", stage_only_git)
+    # 提交逻辑已下沉到存储层：`manage._git_commit` 是 `store.git_commit` 的转发，
+    # 拦截点也随之移到 `store.git`（同一份排除规则的唯一实现）。
+    monkeypatch.setattr(store_module, "git", stage_only_git)
     assert await manage._git_commit(root, "test") == "test"
     _, stdout, _ = await git(tmp_path, ["ls-files"], timeout=10)
     assert set(stdout.decode().splitlines()) == {
