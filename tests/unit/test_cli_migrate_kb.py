@@ -31,6 +31,7 @@ def _args(root: Path, **overrides: object) -> argparse.Namespace:
     data: dict[str, object] = {
         "knowledge_dir": str(root),
         "dsn": None,
+        "schema": None,
         "dry_run": True,
         "verify_only": False,
         "delete_source": False,

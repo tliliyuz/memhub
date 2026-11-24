@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anyio import Path as AsyncPath
 
@@ -27,6 +28,9 @@ from memhub.worker.render import (
     render_session_blocks,
     truncate_blocks,
 )
+
+if TYPE_CHECKING:
+    from memhub.kb.migrate_db import VerifyDiff
 
 SKELETON_PAGES = {"schema.md", "log.md", "purpose.md"}
 DEVICE_ID_RE = re.compile(
@@ -137,6 +141,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     migrate_kb.add_argument("--knowledge-dir", default=None)
     migrate_kb.add_argument("--dsn", default=None, help="缺省取 MEMHUB_KB_DB_URL（运行时角色）")
+    migrate_kb.add_argument(
+        "--schema",
+        default=None,
+        help="目标 schema（search_path）；缺省不设，生产用专用 schema kb",
+    )
     migrate_kb.add_argument("--dry-run", action="store_true", help="只解析与统计，不写库不删文件")
     migrate_kb.add_argument("--verify-only", action="store_true", help="与库内数据逐项比对")
     migrate_kb.add_argument(
@@ -598,8 +607,8 @@ async def _run_server(
 async def _migrate_kb(args: argparse.Namespace) -> int:
     """一次性迁移入口（规格 §5）：默认只 dry-run，写库需 DSN，删真源需校验通过。
 
-    写库半段依赖 `kb_*` ORM（另一条 lane），这里只把关只读统计、阻塞判定与删除
-    前置条件；未具备写库条件时显式失败，绝不把「没做」报告成「通过」。
+    前三步（解析、阻塞判定、差异清单）只读磁盘；`--verify-only` 与写库走
+    `memhub.kb.migrate_db`。任何「没做」都显式失败，不报告成通过。
     """
     from memhub.kb import migrate
 
@@ -654,12 +663,56 @@ async def _migrate_kb(args: argparse.Namespace) -> int:
     if not dsn:
         print("缺少 MEMHUB_KB_DB_URL（运行时角色 DSN），无法写库", file=sys.stderr)
         return 2
-    print(
-        "写库半段尚未接入：本次只完成只读解析与校验。"
-        "数据库写入与 --verify-only 的逐节点比对在 ORM 落地后启用。",
-        file=sys.stderr,
-    )
-    return 2
+    from memhub.kb import migrate_db
+    from memhub.kb.session import create_engine_from_env
+
+    # 迁移工具按调用方给的 DSN 走，不强制生产 schema `kb`：目标 schema 由
+    # search_path 决定，测试/联调可以指向独立 schema。
+    engine = create_engine_from_env(dsn=dsn, schema=args.schema)
+    try:
+        if args.verify_only:
+            stored = await migrate_db.read_stored(engine)
+            report = migrate_db.diff_plan(plan, stored, archives=args.archives)
+            _print_verify_report(report)
+            if not report.ok:
+                return 1
+            print("校验通过：库内内容与磁盘真源逐节点、逐边一致")
+            if args.delete_source:
+                print(
+                    "--delete-source 的删除动作需负责人授权后在服务器执行；本次未删除任何文件",
+                    file=sys.stderr,
+                )
+                return 3
+            return 0
+        await migrate_db.apply_plan(engine, plan, archives=args.archives)
+        print(
+            f"写入完成: projects={len(plan.projects)} nodes={len(plan.nodes)} "
+            f"edges={len(plan.edges)} archives={len(plan.archives) if args.archives == 'migrate' else 0}"
+        )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+def _print_verify_report(report: VerifyDiff) -> None:
+    """逐项打印差异；空清单不占终端行。"""
+    payload = report.as_dict()
+    labels = {
+        "missing_projects": "库内缺少的知识库",
+        "extra_projects": "库内多出的知识库",
+        "changed_projects": "内容不一致的知识库",
+        "missing_nodes": "库内缺少的节点",
+        "extra_nodes": "库内多出的节点",
+        "changed_nodes": "内容不一致的节点",
+        "missing_edges": "库内缺少的边",
+        "extra_edges": "库内多出的边",
+        "archive_mismatches": "归档快照不一致",
+    }
+    for key, label in labels.items():
+        if payload[key]:
+            print(f"{label}: {len(payload[key])} 处", file=sys.stderr)
+            for item in payload[key]:
+                print(f"  {item}", file=sys.stderr)
 
 
 async def _kb(args: argparse.Namespace) -> int:
