@@ -289,6 +289,36 @@ async def test_pending_archive_blocks_migration(tmp_path: Path) -> None:
     assert plan.blocking is True
 
 
+async def test_projection_marker_alone_does_not_block(tmp_path: Path) -> None:
+    """`projection-dirty` 只表示投影待重建：迁移后投影整体退役，不该阻断写库。"""
+    root = _tree(tmp_path)
+    marker = root / "_kb_archives" / "projection-dirty"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+
+    plan = await parse_tree(root)
+
+    assert plan.diff.pending_archive is False
+    assert plan.blocking is False
+
+
+async def test_completed_archive_does_not_block(tmp_path: Path) -> None:
+    """整库归档成功后 `projection-dirty` 会留在盘上，直到投影重建。
+
+    归档本身已完成（`active.json` 与快照都在），迁移必须能继续；把这两个状态
+    混为一谈会让「归档过任何库」的服务器永远无法迁移。
+    """
+    root = _tree(tmp_path)
+    await catalog.delete_kb(KnowledgeStore(root), "demo", actor="ui:test")
+    assert (root / "_kb_archives" / "projection-dirty").exists()
+
+    plan = await parse_tree(root)
+
+    assert plan.diff.pending_archive is False
+    assert plan.blocking is False
+    assert len(plan.archives) == 1
+
+
 @pytest.mark.parametrize("name", ["demo", "orphan"])
 async def test_project_rows_are_deterministically_revised(tmp_path: Path, name: str) -> None:
     plan = await parse_tree(_tree(tmp_path))
@@ -301,6 +331,34 @@ async def test_nodes_of_unregistered_directory_keep_their_project(tmp_path: Path
     plan = await parse_tree(_tree(tmp_path))
     project_ids = {item["id"] for item in plan.projects}
 
+    for node in plan.nodes:
+        assert node["project"] in project_ids, node["id"]
+
+
+async def test_trashed_node_of_archived_kb_keeps_a_parent_project(tmp_path: Path) -> None:
+    """整库归档后目录与登记都消失，但回收站里的节点仍在盘上。
+
+    这些节点的 `project` 外键必须仍能指到行，否则写库时外键失败、迁移整体回滚。
+    归档库的行按 `kb_projects.archived_at` 复现（规格 §3.1），显示名取归档头。
+    """
+    root = _tree(tmp_path)
+    store = KnowledgeStore(root)
+    revision = await manage.node_revision(store, "demo/fact/alpha")
+    assert revision is not None
+    await manage.delete_node(
+        store, "demo/fact/alpha", expected_revision=revision, reason="合成删除", actor="ui:test"
+    )
+    await catalog.delete_kb(store, "demo", actor="ui:test")
+
+    plan = await parse_tree(root)
+
+    projects = {item["id"]: item for item in plan.projects}
+    assert "demo" in projects, "归档库也要建 project 行，否则回收站节点无主"
+    demo = projects["demo"]
+    assert demo["archived_at"] is not None
+    assert demo["name"] == "演示库"
+    assert "demo/fact/alpha" in {node["id"] for node in plan.nodes}
+    project_ids = {item["id"] for item in plan.projects}
     for node in plan.nodes:
         assert node["project"] in project_ids, node["id"]
 

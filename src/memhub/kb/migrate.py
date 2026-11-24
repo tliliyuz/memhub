@@ -440,17 +440,19 @@ async def _scan_archives(root: Path, diff: MigrationDiff) -> list[dict[str, Any]
 async def parse_tree(root: Path) -> MigrationPlan:
     """只读扫描 `root`，产出目标表行与差异清单；不做任何写入。"""
     root = Path(root)
-    diff = MigrationDiff(pending_archive=await archive.projection_dirty(root))
+    diff = MigrationDiff(pending_archive=await archive.pending_transaction(root))
     registry = await _registry(root, diff)
 
     active_nodes, dir_projects = await _scan_nodes(root, diff)
     trash_nodes, trash_events = await _scan_trash(root, diff)
     all_nodes = [*active_nodes, *trash_nodes]
+    archives = await _scan_archives(root, diff)
 
-    projects = _project_rows(registry, dir_projects, all_nodes, diff)
+    # 归档先扫：整库归档后目录与登记都没了，但 `_trash` 里的节点仍要落到
+    # `kb_projects` 之外还有外键指向的那一行，项目行必须能按归档头复现。
+    projects = _project_rows(registry, dir_projects, all_nodes, archives, diff)
     node_ids = {row["id"] for row in all_nodes}
     edges = await _edges(root, sorted(set(dir_projects)), node_ids, diff)
-    archives = await _scan_archives(root, diff)
 
     for row in all_nodes:
         row["revision"] = node_revision(row)
@@ -466,13 +468,34 @@ async def parse_tree(root: Path) -> MigrationPlan:
     )
 
 
+def _latest_archives(archives: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """每个库取最后一次整库归档；同一库多次归档时以最晚 `deleted_at` 为准。"""
+    latest: dict[str, dict[str, Any]] = {}
+    for row in archives:
+        current = latest.get(row["project"])
+        if current is None or _later(row["deleted_at"], current["deleted_at"]):
+            latest[row["project"]] = row
+    return latest
+
+
+def _later(left: datetime | None, right: datetime | None) -> bool:
+    if right is None:
+        return left is not None
+    return left is not None and left > right
+
+
 def _project_rows(
     registry: dict[str, dict[str, Any]],
     dir_projects: list[str],
     nodes: list[dict[str, Any]],
+    archives: list[dict[str, Any]],
     diff: MigrationDiff,
 ) -> list[dict[str, Any]]:
-    """登记 + 目录 → `kb_projects` 行。
+    """登记 + 目录 + 归档 + 节点归属 → `kb_projects` 行。
+
+    任何节点行的 `project` 都必须有行：`kb_nodes.project` 有外键，漏建会让
+    写库整体回滚。整库归档后目录与登记都消失，归档头就是剩下的唯一事实来源
+    （`name`、`deleted_at` → `archived_at`，规格 §3.1/§3.5）。
 
     时间来源必须是磁盘上的事实，不能用扫描时刻：否则每次解析得到不同的
     `revision`，写库后 `--verify-only` 永远报「内容不一致」。登记缺
@@ -490,28 +513,34 @@ def _project_rows(
         )
 
     registered = set(registry)
+    archived = _latest_archives(archives)
+    node_projects = set(created_min)
     rows: list[dict[str, Any]] = []
-    for kb_id in sorted(set(dir_projects) | registered):
+    for kb_id in sorted(set(dir_projects) | registered | set(archived) | node_projects):
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", kb_id):
             diff.unknown_files = (*diff.unknown_files, kb_id)
             continue
-        if kb_id not in dir_projects:
+        archive_row = archived.get(kb_id)
+        if kb_id not in dir_projects and archive_row is None and kb_id not in node_projects:
             diff.missing_projects = (*diff.missing_projects, kb_id)
             continue
         meta = registry.get(kb_id, {})
-        if kb_id not in registered:
+        if kb_id in dir_projects and kb_id not in registered:
             diff.unregistered_projects = (*diff.unregistered_projects, kb_id)
         fallback = created_min.get(kb_id, datetime(1970, 1, 1, tzinfo=UTC))
         created = _parse_time(meta.get("created_at"), fallback)
         updated = max(created, updated_max.get(kb_id, created))
+        archived_at = archive_row["deleted_at"] if archive_row is not None else None
+        if archived_at is not None:
+            updated = max(updated, archived_at)
         row: dict[str, Any] = {
             "id": kb_id,
-            "name": str(meta.get("name") or kb_id),
+            "name": str(meta.get("name") or (archive_row or {}).get("name") or kb_id),
             "description": str(meta.get("description") or ""),
             "revision": "",
             "created_at": created,
             "updated_at": updated,
-            "archived_at": None,
+            "archived_at": archived_at,
         }
         row["revision"] = _project_revision(kb_id, created, updated)
         rows.append(row)

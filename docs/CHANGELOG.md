@@ -9,6 +9,8 @@
 - `fix(migrate)`：项目行的时间取磁盘事实而非扫描时刻。登记缺 `created_at` 时回落到该库节点时间的极值（无节点才用纪元时间），`updated_at` 取 `created_at` 与节点极大值的较大者；原先用扫描时刻会让每次解析都得到不同的项目哈希，`--verify-only` 永远报内容不一致。
 - `fix(migrate)`：回收站 `.meta.json` 改为相对知识库根解析。原先按进程 CWD 拼路径，文件永远找不到，删除审计（`actor` / `reason`）静默丢失，而迁移后 `kb_node_revisions` 是唯一的删除留痕。
 - `fix(migrate)`：归档行带解析侧的辅助键（`snapshot_sha256`、`name`），直接进 upsert 会因不存在该列而编译失败；写库前按目标表的真实列名过滤。
+- `fix(migrate)`：迁移的「未完成归档事务」判定只认 `_kb_archives/pending.json`。原先复用了 `archive.projection_dirty`，它把 `pending.json` 与 `projection-dirty` 一并算作阻断；而整库归档**成功后**也会留下 `projection-dirty` 直到投影重建，结果是归档过任何库的服务器永远报「存在未完成的归档事务」而无法迁移。新增 `archive.pending_transaction` 区分两者，`projection_dirty` 的既有调用方不变。
+- `fix(migrate)`：整库归档后目录与登记都已消失，但 `_trash` 里的节点还在盘上；这些节点的 `project` 外键指向的行原先不建，写库直接 `kb_nodes_project_fkey` 失败并整体回滚。现在按归档头复现归档库的 `kb_projects` 行（`name` 取归档头显示名，`archived_at` 取 `deleted_at`，`updated_at` 不早于归档时间），并保证任何节点行引用的库都有对应行；解析顺序改为先扫归档再建项目行。仅登记无目录、无节点、无归档的库仍只进 `missing_projects`，不建行。
 - `docs(guides)`：开发指南 §3 新增 PG 契约测试命令，说明 `MEMHUB_TEST_DB_URL` 未设置时用例 skip、skip 不计为通过，且只单独导出该键、不整份 source 环境文件（会顺带覆盖运行态 `MEMHUB_DB_URL` 与 `PG*`，测试结果不可信）；§4 验证矩阵新增「kb 存储 / 迁移 / 契约夹具」一行；§9 增补一次性迁移的端到端命令。
 - 迁移态（记录见本条，规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) 为当次权威）：
   - 当前真实形态：知识仍以 markdown 为运行时真源（`KnowledgeStore`、跨进程写锁、`.kbs.json` 登记），`kb_*` 六张表已建好、迁移工具可写可校验，但运行时读写尚未切换。
@@ -17,7 +19,7 @@
   - Consumer：kb-api 与 MCP 读取、worker 提炼写入、管理台删除/归档、采集目标校验；切换点由存储层的 `PgKnowledgeStore` 决定，逐个 consumer 改由同一存储协议承接。
   - 兼容调用量：迁移工具在 dev 库 `memhub_dev` 上实测通过；生产 `knowledge/` 的节点量、逐库边数与悬空边数须在服务器上以 `--dry-run` 现场统计，本仓库无该数据。
   - 退出门禁与删除时点：逐节点、逐边哈希全部一致 + `pg_dump` 与 markdown 打包备份完成（ADR-0013 §9）；删除动作由负责人在服务器执行或明确授权，本仓库不做。
-- 验证（2026-11-24，本地，只单独导出 `MEMHUB_TEST_DB_URL`，未写进任何文件）：`pytest -q` 全量 `441 passed, 1 skipped`（117.17s）；同一命令不设该键时 `407 passed, 35 skipped`，PG 用例整组 skip、按规格 §8.10 不计为通过。`ruff check src tests alembic scripts` 与 `ruff format --check` 通过（98 文件）；`mypy src` 无问题（45 个源文件）。`memhub migrate-kb` 对 dev 库实测：写入 → 校验通过 → 再写入 → 再校验通过 → `--delete-source` 返回 3 且源文件与哈希不变。上面均为本地结果，不含生产数据与服务器操作。
+- 验证（2026-11-24，本地，只单独导出 `MEMHUB_TEST_DB_URL`，未写进任何文件）：`pytest -q` 全量 `444 passed, 1 skipped`（117.58s；skip 为 Windows 下无法建符号链接的既有用例）；同一命令不设该键时 `407 passed, 35 skipped`，PG 用例整组 skip、按规格 §8.10 不计为通过。`ruff check src tests scripts alembic deploy` 与 `ruff format --check` 通过（98 文件）；`mypy src` 无问题（45 个源文件）；七个治理门禁通过。`memhub migrate-kb` 对 dev 库实测（含「先软删节点、再整库归档」的合成树，Alembic 基线建出的全新 schema）：写入 → 校验通过 → 再写入 → 再校验通过 → `--delete-source` 返回 3 且源文件不动；库内该归档库的 `kb_projects.archived_at` 非空、显示名取归档头，回收站节点与归档快照均落库。上面均为本地结果，不含生产数据与服务器操作。
 
 ## 2026-11-24（MCP 写候选与候选区闭环）
 
