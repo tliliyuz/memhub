@@ -91,8 +91,9 @@ async def test_tier_all_sees_candidates(store: KnowledgeStore) -> None:
     response = await search(store, "代理", tier="all")
     ids = [item["id"] for item in response["results"]]
     assert "memhub/fact/proxy-502" in ids
-    assert response["results"][0]["matched"] == "fts"
+    assert response["results"][0]["matched"] == "bm25"
     assert response["results"][0]["tier"] == "candidate"
+    assert all(0.0 <= item["score"] <= 1.0 for item in response["results"])
 
 
 async def test_chinese_without_spaces_still_matches(tmp_path: Path) -> None:

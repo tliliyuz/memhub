@@ -113,7 +113,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/v1/kb/search?q=&project=&kinds=a,b&tier=all&limit=` | `{results:[{id, kind, tier, title, score, matched, snippet}]}` |
+| GET | `/api/v1/kb/search?q=&project=&kinds=a,b&tier=all&limit=` | `{results:[{id, kind, tier, title, score, matched, snippet}]}`；`matched` 固定为 `bm25`，`score` 归一化到 0–1 且只在本次结果内可比（真源为 `kb_*` 表，应用层 BM25Okapi 排序） |
 | GET | `/api/v1/kb/audit?limit=&offset=` | `{issues:[{type, target, …}], total, offset, limit}` |
 
 审计 issue 类型：`contradiction`（矛盾）、`broken_link`（断链 / 未解析边）、`orphan`（孤立节点）、`low_confidence`（置信度低）、`stale`（长期未更新）。修复入口都是节点编辑。

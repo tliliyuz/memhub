@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from memhub.contract import Kind, NodeFrontmatter, Predicate, Tier
+from memhub.kb.bm25 import BM25Okapi, normalize, tokenize
 
 
 class KnowledgeReader(Protocol):
@@ -120,6 +121,7 @@ def _snippet(body: str, terms: list[str]) -> str:
 
 
 def _score(record: NodeRecord, terms: list[str]) -> float:
+    """旧子串打分；仅保留给 `kb_audit_list` 等未切换路径，`search` 已改用 BM25。"""
     title = record.node.title.lower()
     tags = [tag.lower() for tag in record.node.tags]
     body = record.body.lower()
@@ -162,15 +164,20 @@ async def search(
         return {"results": [], "hint": "query 为空；请给出要查的概念、报错或项目"}
 
     scored: list[tuple[float, NodeRecord]] = []
+    candidates: list[tuple[NodeRecord, list[str]]] = []
     for record in await _records(store, project):
         if wanted_kinds is not None and record.node.kind.value not in wanted_kinds:
             continue
         if tier != "all" and record.node.tier.value != tier:
             continue
-        score = _score(record, terms)
-        if score > 0:
-            scored.append((score, record))
-
+        candidates.append((record, _document_tokens(record)))
+    if candidates:
+        index = BM25Okapi([tokens for _, tokens in candidates])
+        raw_scores = index.get_scores(terms)
+        ceiling = max(raw_scores, default=0.0)
+        for (record, _), raw in zip(candidates, raw_scores, strict=True):
+            if raw > 0:
+                scored.append((raw, record))
     if not scored:
         return {
             "results": [],
@@ -178,6 +185,7 @@ async def search(
         }
 
     scored.sort(key=lambda item: (-item[0], item[1].id))
+    ceiling = scored[0][0]
     results = []
     for raw, record in scored[:limit]:
         results.append(
@@ -186,13 +194,26 @@ async def search(
                 "kind": record.node.kind.value,
                 "tier": record.node.tier.value,
                 "title": record.node.title,
-                "score": round(min(0.99, raw / (raw + 5)), 3),
-                "matched": "fts",
+                "score": normalize(raw, ceiling=ceiling),
+                "matched": "bm25",
                 "snippet": _snippet(record.body, terms),
                 "updated_at": record.node.updated_at.isoformat(),
             }
         )
     return {"results": results}
+
+
+def _document_tokens(record: NodeRecord) -> list[str]:
+    """BM25 文档侧 token：标题、标签与正文，权重靠重复标题/标签体现。
+
+    正文会切出一份词频，标题与标签各再计一次——比旧子串打分更平滑，且对
+    「标题命中」的偏好保留。分词本身不改变召回面（与 `_terms` 同口径）。
+    """
+    tokens = tokenize(record.body)
+    tokens.extend(tokenize(record.node.title))
+    for tag in record.node.tags:
+        tokens.extend(tokenize(tag))
+    return tokens
 
 
 async def _empty_hint(

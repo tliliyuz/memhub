@@ -9,7 +9,7 @@
 
 | 工具 | 参数 | 返回 |
 |---|---|---|
-| `kb_search` | `query`（最多 512 字符）、`project?`、`kinds?`、`tier?`、`limit?`（默认 8，1–50） | `results` 含 ID、标题、tier、摘要、更新时间、分数和 `matched`。默认只搜 `canonical`，可显式选择 `candidate` 或 `all`。无结果返回空列表和 `hint`。`matched: fts` 为历史兼容值，当前是 Markdown 关键词打分，不是索引或向量召回。 |
+| `kb_search` | `query`（最多 512 字符）、`project?`、`kinds?`、`tier?`、`limit?`（默认 8，1–50） | `results` 含 ID、标题、tier、摘要、更新时间、分数和 `matched`。默认只搜 `canonical`，可显式选择 `candidate` 或 `all`。无结果返回空列表和 `hint`。真源为 PostgreSQL 的 `kb_*` 表，`matched` 取 `bm25`：SQL 侧按库/`kind`/`tier` 过滤候选集，应用层 BM25Okapi 排序；`score` 归一化到 0–1，仅表示本次结果内的相对相关度，不是索引或向量召回。 |
 | `kb_read` | `id`（完整 `project/kind/slug`） | 节点元数据、正文（最多 8192 字符，截断标记 `truncated`）、`revision`（当前修订号）和可见入边/出边（各最多 20 条）。受限调用不返回原始来源引用、设备信息或元数据中的跨库节点引用。 |
 | `kb_related` | `id`、`depth?`（默认 1，1–2）、`predicates?`、`limit?`（默认 30，1–50） | 邻接子图；边单独限制为最多 100 条并标记截断。 |
 | `kb_audit_list` | `limit?`（默认 50，1–50）、`offset?`（默认 0） | 只读分页，现算矛盾、断链、孤立、低置信、陈旧等问题；受限调用的结果是授权范围内的视图，不代表全图审计。 |
