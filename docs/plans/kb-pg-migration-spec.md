@@ -77,6 +77,7 @@
 | `body` | text not null | 原 markdown 正文（不含 frontmatter） |
 | `source` | jsonb not null default `'[]'` | `SourceRef[]` |
 | `valid_from` / `valid_until` | timestamptz null | |
+| `supersedes` | text[] not null default `'{}'` | 取代了哪些 id（契约字段，`node-schema.md`；不入列则迁移静默丢数据） |
 | `superseded_by` | text null | |
 | `deprecated_reason` | text null | |
 | `occurred_at` / `decided_at` | timestamptz null | |

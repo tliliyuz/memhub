@@ -22,7 +22,7 @@ ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。�
 1. **唯一真源是 PostgreSQL**。节点、边、知识库登记、候选/废弃治理状态、审计与节点修订历史全部进库；markdown 不再是真源，迁移后从服务器删除，仓库里只保留极少量测试 fixtures。原 ADR-0002 的「markdown 为真源、投影可重建」整条被本条取代。
 2. **表结构（概要）**：
    - `kb_projects`：知识库登记（`id`、显示名、描述、`created_at`、`archived_at`）。原 `.kbs.json` 的语义迁移到此，「目录存在 ≠ 可写」改由登记行 + 状态列表达。
-   - `kb_nodes`：节点（`id` 主键、`project`、`kind`、`entity_kind`、`title`、`tier`、`confidence`、`tags`、`body`、`source`、`valid_from/valid_until`、`superseded_by`、`deprecated_reason`、`occurred_at/decided_at`、`status`、`created_at`、`updated_at`、`archived_at`、`revision`）。
+   - `kb_nodes`：节点（`id` 主键、`project`、`kind`、`entity_kind`、`title`、`tier`、`confidence`、`tags`、`body`、`source`、`valid_from/valid_until`、`supersedes`、`superseded_by`、`deprecated_reason`、`occurred_at/decided_at`、`status`、`created_at`、`updated_at`、`archived_at`、`revision`）。
    - `kb_edges`：边（`project`、`source`、`predicate`、`target`、`source_doc`，唯一约束 `(source, predicate, target)`）。
    - `kb_node_revisions`：节点每次写入的不可变历史（`node_id`、`revision`、`tier`、`actor`、`reason`、`before`、`after`、`created_at`），承载 ADR-0002 里由 git 提供的「可回滚、可审计」。`before/after` 存**含正文的完整节点快照**（已裁决），保证单节点可精确回滚。本轮建表并写入，但**不**实现审批型转正流程（见第 7 条）。
    - `kb_archives`：整库归档快照与状态（`archive_id`、`project`、`status`、`snapshot`（`bytea`，已裁决入库）、计数、`created_at`）。原 `_kb_archives/<id>/` 与 `blocked/` 标记迁移到此。
