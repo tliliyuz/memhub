@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """机械门禁：全仓 I/O 必须异步（ADR-0005 / 用户指令）。
 
-扫描 `src/` 下 Python 文件，命中以下任一即失败：
+扫描 `src/` 与 `alembic/` 下 Python 文件，命中以下任一即失败：
 
 - 同步子进程 / 磁盘 / 网络 / 睡眠原语：`subprocess.*`、`os.walk|stat|utime|...`、
   `time.sleep`、`shutil.*`、内置 `open(...)`、`httpx.Client(...)`；
 - 在 Windows SelectorEventLoop 上必然失败的子进程 API：`anyio.run_process`、
   `anyio.open_process`、`asyncio.create_subprocess_*`；
 - 对同步 `Path(...)` 直接调用阻塞方法（`read_text` / `is_file` / `rglob` …）。
+
+`alembic/` 在 `src/` 之外，但迁移体同样不能塞同步 I/O 绕过门禁。
 
 放行名单只有 `src/memhub/kb/proc.py`：Windows 的 SelectorEventLoop 不支持
 asyncio 子进程，唯一的替代是把它放进 anyio 工作线程；该文件是这条规则的
@@ -27,6 +29,9 @@ from pathlib import Path
 ALLOWED: dict[str, set[str]] = {
     "src/memhub/kb/proc.py": {"subprocess", "builtins.open"},
 }
+
+# 扫描根：`alembic/` 不存在时跳过（未引入 Alembic 的分支不受影响）。
+SCAN_ROOTS = ("src", "alembic")
 
 SYNC_ATTRS: dict[str, set[str]] = {
     "subprocess": {
@@ -136,11 +141,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
     failed = False
-    for path in sorted((root / "src").rglob("*.py")):
-        relative = path.relative_to(root).as_posix()
-        for lineno, message in find_violations(path.read_text(encoding="utf-8"), relative):
-            print(f"{relative}:{lineno}: {message}")
-            failed = True
+    for scan_root in SCAN_ROOTS:
+        base = root / scan_root
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            relative = path.relative_to(root).as_posix()
+            for lineno, message in find_violations(path.read_text(encoding="utf-8"), relative):
+                print(f"{relative}:{lineno}: {message}")
+                failed = True
     if failed:
         print("同步 I/O：请改为 async 实现（例外需在 ADR 登记）", flush=True)
         return 1
