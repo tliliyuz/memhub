@@ -1,0 +1,59 @@
+# ADR-0013 PostgreSQL 作为知识唯一真源
+
+| 属性 | 值 |
+|:---|:---|
+| 状态 | accepted |
+| 日期 | 2026-11-24 |
+| 关联 | 取代 ADR-0002；部分取代 ADR-0004 §2（「运行态 ≠ 知识」边界）与 §3（dev 内存实现）；部分取代 ADR-0005 决策 4（不引 Alembic）与「kb-api 不访问数据库」的前提 |
+
+## 背景
+
+ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。当时否决「以 PostgreSQL 为真源」的理由是「个人知识库规模用不上」，前提是「最小改动即可满足」；实践后该前提被推翻：
+
+- 真正的写入边界不是「一个文件」，而是「文件系统 + 目录约定 + `.kbs.json` 登记 + 写锁 + git」。这套约定在运行时不断分叉：目录存在不等于可写，登记表会漏项，写锁用跨进程文件锁，git 版本化依赖运行环境里恰好有 `.git`（生产未核实）。任何一项失配都会让「看起来在跑」与「实际没落盘」共存。
+- 检索目前是全量扫 markdown 现算的子串打分，`matched` 返回写死的 `"fts"`，契约里承诺的 `kg.json` / 向量 / `fts.db` 三项投影有两项从未实现。规模到数百节点后，每次搜索都要读全部文件。
+- 生产已有多项运行态在 PostgreSQL（ADR-0004），再让知识单独走文件，等于在同一系统里维护两套持久化、两套备份、两套一致性模型。
+- 负责人在 2026-11-24 明确表态：当初走「文件即真源」是方案评审没细看，「最小改动」的前提应是高可用、高性能、高扩展，而不是省事。据此裁决：知识真源迁到 PostgreSQL，服务器上的 markdown 只作为一次性迁移源，迁移后删除。
+
+本条的决策以负责人 2026-11-24 的裁决为准；随后由其确认了分区、检索、连接方式与交付边界四项具体选择（见决策各条）。
+
+## 决策
+
+1. **唯一真源是 PostgreSQL**。节点、边、知识库登记、候选/废弃治理状态、审计与节点修订历史全部进库；markdown 不再是真源，迁移后从服务器删除，仓库里只保留极少量测试 fixtures。原 ADR-0002 的「markdown 为真源、投影可重建」整条被本条取代。
+2. **表结构（概要）**：
+   - `kb_projects`：知识库登记（`id`、显示名、描述、`created_at`、`archived_at`）。原 `.kbs.json` 的语义迁移到此，「目录存在 ≠ 可写」改由登记行 + 状态列表达。
+   - `kb_nodes`：节点（`id` 主键、`project`、`kind`、`entity_kind`、`title`、`tier`、`confidence`、`tags`、`body`、`source`、`valid_from/valid_until`、`superseded_by`、`deprecated_reason`、`occurred_at/decided_at`、`status`、`created_at`、`updated_at`、`archived_at`、`revision`）。
+   - `kb_edges`：边（`project`、`source`、`predicate`、`target`、`source_doc`，唯一约束 `(source, predicate, target)`）。
+   - `kb_node_revisions`：节点每次写入的不可变历史（`node_id`、`revision`、`tier`、`actor`、`reason`、`before`、`after`、`created_at`），承载 ADR-0002 里由 git 提供的「可回滚、可审计」。本轮建表并写入，但**不**实现审批型转正流程（见第 7 条）。
+   - `kb_projects.revision` 与 `kb_nodes.revision`：乐观锁令牌，替代原文件 sha256 前 16 位的 `node_revision`，语义与契约 `expected_revision` 不变。
+3. **删除是软删 + 归档**：原 `_trash/` 与 `_kb_archives/` 的语义用 `archived_at`、`kb_archives` 表与归档快照表达；「永不硬删」原则保留。
+4. **迁移工具用 Alembic**（负责人选定）。理由：知识表是本系统第一组会长期演进、需要按序应用与回滚追踪的结构化 schema，手工 `MIGRATIONS` 列表已不足以表达带索引、外键、数据回填的多步迁移。落地约束：
+   - 新建 `alembic/` 与 `alembic.ini`，`env.py` 复用 `MEMHUB_DB_URL` 与 ORM `Base.metadata`。
+   - 迁移体只用 Alembic `op.create_table` / `op.add_column` 等 Core 构造，不写裸 SQL，`scripts/check_no_raw_sql.py` 不放宽。若确需数据回填，用 `op.get_bind()` 上的 Core `insert/update`，仍不写 SQL 字符串。
+   - 现有 5 张运行态表仍由 `ingest/migrations.py` 的冻结基线负责；本轮不搬动它们。Alembic 的基线修订只建知识表，并对已有库以 `stamp` 衔接，避免两套 DDL 描述同一组表。运行态表并入 Alembic 另立事项。
+5. **检索用应用层 BM25**（负责人选定「直接引 BM25，后期接向量做混合」）。实现方式：SQL 侧按授权范围、库、`kind`、`tier` 过滤出候选集，应用层用 BM25Okapi 打分排序；中文按字符二元组切分（与现 `query._terms` 的 CJK bigram 一致），不依赖分词器。**不**引入 ParadeDB / pg_search（需重启生产 PG）或 PG 内置 `ts_rank`（simple 配置对中文不分词）。BM25 在进程内实现（约数十行，纯 CPU），不新增第三方依赖。`matched` 从写死的 `"fts"` 改为如实的 `"bm25"`；向量混合检索按 ADR-0007 草案另案推进，不在本轮。
+6. **kb-api 直连 PostgreSQL，使用专用受限角色**（负责人选定）。该角色只能读写 `kb_*` 表，不得访问运行态表（`devices`、`sources`、`batches`、`seen_shas`、`file_cursors`）与令牌摘要。据此部分取代 ADR-0007 草案里「kb 是否连库」的待决项为「直连 + 受限角色」。凭据经 `.env` 注入，键名见环境文档。kb 容器需新增 `sqlalchemy`/`psycopg` 依赖并重出 wheelhouse。
+7. **本轮交付边界**：存储迁移 + 契约修订 + schema 预留。节点修订历史表建好并写入，但候选转正、`## Change Log`、tier 变更审批流等治理缺口另立里程碑，不在本轮实现。
+8. **迁移执行是一次性运维动作**：读服务器 `knowledge/` → 写入 `kb_*` → 校验节点数与边数一致 → `pg_dump` 与 `knowledge/` 打包备份 → 删除 markdown。提供 `--dry-run` 与 `--verify-only`，校验不通过不删除。删除动作需负责人在服务器上执行或明确授权。
+9. **本地开发与测试直接用云端 PostgreSQL**（负责人选定），不再用内存实现替身。测试以 `MEMHUB_TEST_DB_URL` 指向 dev 库；未设置时 PG 用例跳过，不伪装通过。
+
+## 备选与否决理由
+
+| 备选 | 结论 |
+|:---|:---|
+| 维持 markdown 真源，只补 `.kbs.json` 与 git（ADR-0002 原路） | 否决：负责人的前提是「高可用、高性能、高扩展」，文件系统 + 目录约定的运行时漂移正是要消除的对象 |
+| 手工 `MIGRATIONS` 前向追加管理知识表（ADR-0005 决策 4） | 否决：知识表需索引、外键与数据回填，前向列表难以表达；负责人选定 Alembic |
+| ParadeDB / pg_search 提供库内 BM25 | 否决：需给生产宿主 PG 加 apt 源、超级用户建扩展、改 `shared_preload_libraries` 并重启，运维成本远高于收益 |
+| PG 内置 `to_tsvector` / `ts_rank` 冒充 BM25 | 否决：simple 配置对中文不分词，召回明显回退；且并非 BM25 |
+| kb 经 worker 内部接口代理访问向量/知识 | 否决（本轮）：worker 无监听面，加鉴权、限流、超时是新的一整块工程；直连 + 受限角色攻击面可控 |
+| kb 复用 `memhub_app` 可写角色 | 否决：公网可达的 kb 进程会拿到运行态表与令牌摘要的访问权，权限过大 |
+| 本轮同时补齐候选转正与审批流 | 否决（本轮）：把存储迁移与治理闭环绑在一次评审里，变更面与风险都过大 |
+
+## 后果
+
+- ADR-0002 全文被取代；其「写知识 = 写文件 + git commit」由 `kb_node_revisions` + `pg_dump` 备份承接。ADR-0004 §2「知识真源仍是 markdown」与 §3「dev 用 MemoryStore」失效，运行态部分结论继续有效。ADR-0005 决策 4 的「不引 Alembic」本轮被改；`kb-api 不访问数据库` 的前提失效。
+- `docs/architecture.md` 数据流、`docs/contracts/node-schema.md`（真源形态与投影表）、`docs/contracts/kb-admin-api.md`、`docs/contracts/mcp-tools.md`（`matched` 语义）、`docs/tech/ENVIRONMENT.md`（新增 kb 直连键）必须同步修订。
+- 新增运维面：kb 专用角色及其授权、Alembic 迁移执行、一次性数据迁移与删除、cloud PG 作为 dev/测试依赖。
+- 备份与恢复：`pg_dump -Fc` 成为唯一全量备份手段；恢复演练在装有 PG 的云主机做。迁移后失去「直接读文件即可审阅」的能力，人工审阅改走管理台与库查询。
+- git 不再承载知识历史；服务器 `knowledge/` 删除后，回滚点只有数据库备份。因此删除前的 `pg_dump` + `knowledge/` 打包备份是硬前置。
+- 检索行为从子串打分变为 BM25 排序，结果顺序会变化；`matched` 标签改为 `bm25`，调用方若按 `"fts"` 判断需同步修改（契约中此前已注明该字段不是索引或向量召回）。

@@ -50,6 +50,6 @@ ADR 检查与裁决
 | 开发环境、命令、验证矩阵、提交粒度、分支与 worktree 闭环 | `docs/guides/DEVELOPMENT.md` |
 | 重要架构决策 | `docs/decisions/README.md`（具体决策：`docs/decisions/ADR-NNNN-*.md`） |
 | 行为变更记录（按日期追加） | `docs/CHANGELOG.md` |
-| 知识真源 | `knowledge/`（markdown，git 管理；投影产物不入库） |
+| 知识真源 | PostgreSQL 的 `kb_*` 表（ADR-0013；markdown 仅作一次性迁移源） |
 
 当文档冲突或实现领先于规范时，不自行选择方便实现的一方：先输出文档裁决候选并取得负责人有效裁决。
