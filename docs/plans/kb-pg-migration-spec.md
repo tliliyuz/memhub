@@ -147,8 +147,8 @@
 ## 4. 迁移（Alembic）
 
 - `alembic/versions/0001_kb_tables.py` 建 §3 的表与索引（`kb_projects`、`kb_nodes`、`kb_edges`、`kb_node_revisions`、`kb_archives`、`kb_write_audit`）；只用 `op.create_table` / `op.create_index`，不写 SQL 字符串。
-- `alembic/env.py` 从 `MEMHUB_KB_DB_URL`（受限角色，与 `MEMHUB_DB_URL` 分开，见 §10）取 DSN、`target_metadata` 用 ORM `Base.metadata`。
-- **门禁覆盖**：`check_no_raw_sql.py` / `check_async_io.py` 目前只扫 `src/`，不覆盖 `alembic/`；须把 `alembic/` 加入两脚本扫描根并补自测，否则迁移目录无脚本把关。
+- `alembic/env.py` 的 DSN 取 **`MEMHUB_KB_MIGRATE_DB_URL`**（迁移角色，对 `kb_*` 有 DDL；带外执行、不在 kb 容器启动时跑）。kb-api 运行时另用 **`MEMHUB_KB_DB_URL`**（运行时角色，只对 `kb_*` 做 DML）。两者都不复用 `MEMHUB_DB_URL`（那是 `memhub_app`，能碰运行态表）。`target_metadata` 用 ORM `Base.metadata`。若负责人选择单角色方案，退路是运行时角色兼表所有者（仍不碰运行态表，但公网进程持 DDL 权），需其确认。
+- **门禁覆盖**：`check_no_raw_sql.py` / `check_async_io.py` 目前只扫 `src/`，不覆盖 `alembic/`；须把 `alembic/` 加入两脚本扫描根并补自测（已由 `ci(gate)` 提交实现 `SCAN_ROOTS=(src, alembic)`），否则迁移目录无脚本把关。
 - **两套迁移共存**：同一 database 里 `schema_migrations`（运行态，`ingest/migrations.py`）与 `alembic_version`（知识表）各自独立。部署与启动须分别执行：ingest 迁移随 ingest 启动，Alembic 由 `memhub migrate-kb` 或部署步骤跑；任一未跑完，该库不算就绪。运行态表并入 Alembic 另立事项。
 - 回滚：知识表只有 `upgrade` 加表，`downgrade` 为 `drop_table`（仅空库演练用；生产回滚以 `pg_dump` 恢复为准）。
 
@@ -210,6 +210,6 @@
 - `docs/contracts/node-schema.md`：§1 真源形态改为表；§6 投影表（`kg.json`/`vector/`/`fts.db`）改为「表 + BM25 + 未来向量」。
 - `docs/contracts/kb-admin-api.md`：§4.8 投影语义、§5 不变式（去掉 git/`_trash` 文件口径）。
 - `docs/contracts/mcp-tools.md`：`matched` 语义（`fts`→`bm25`）、「以 Markdown 为真源」改为库、revision 来源。
-- `docs/tech/ENVIRONMENT.md`：新增 kb 直连键 `MEMHUB_KB_DB_URL`（受限角色，与 `MEMHUB_DB_URL` 分开）、测试 `MEMHUB_TEST_DB_URL`、受限角色说明；标注 `MEMHUB_KB_GRAPH` / `MEMHUB_KB_GRAPH_PORT` / `MEMHUB_KB_AUTO_REBUILD` 三项投影相关键待删（见 §9 已决项与 ADR-0013 后果）。
+- `docs/tech/ENVIRONMENT.md`：新增 kb 直连键 `MEMHUB_KB_DB_URL`（运行时角色，DML）、`MEMHUB_KB_MIGRATE_DB_URL`（迁移角色，DDL）、测试 `MEMHUB_TEST_DB_URL`、受限角色说明；三者都与 `MEMHUB_DB_URL` 分开。标注 `MEMHUB_KB_GRAPH` / `MEMHUB_KB_GRAPH_PORT` / `MEMHUB_KB_AUTO_REBUILD` 三项投影相关键待删（见 §9 已决项与 ADR-0013 后果）。
 - `docs/guides/DEVELOPMENT.md`：验证矩阵与端到端命令（§9 的 markdown 闭环改为库）。
 - `docs/CHANGELOG.md`：实现落地后按日期追加。

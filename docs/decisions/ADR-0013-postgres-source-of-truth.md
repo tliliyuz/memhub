@@ -30,8 +30,12 @@ ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。�
    - `kb_projects.revision` 与 `kb_nodes.revision`：乐观锁令牌，替代原文件 sha256 前 16 位的 `node_revision`。**格式不变：16 位小写十六进制**（`^[0-9a-f]{16}$`，契约与 MCP 输入硬校验此格式），由每次写入重新生成。契约「同一内容重写也产生新 revision」的语义保留：每次写入都生成新值。
 3. **删除是软删 + 归档**：原 `_trash/` 与 `_kb_archives/` 的语义用 `archived_at`、`kb_archives` 表与归档快照表达；「永不硬删」原则保留。
 4. **迁移工具用 Alembic**（负责人选定）。理由：知识表是本系统第一组会长期演进、需要按序应用与回滚追踪的结构化 schema，手工 `MIGRATIONS` 列表已不足以表达带索引、外键、数据回填的多步迁移。落地约束：
-   - 新建 `alembic/` 与 `alembic.ini`，`env.py` 复用 `MEMHUB_DB_URL` 与 ORM `Base.metadata`。
-   - 迁移体只用 Alembic `op.create_table` / `op.add_column` 等 Core 构造，不写裸 SQL。**注意门禁现状**：`scripts/check_no_raw_sql.py` 与 `check_async_io.py` 目前只扫 `src/`，不覆盖 `alembic/`；因此 ADR-0005 的「不写裸 SQL」在 alembic 目录内靠评审而非脚本把关，除非把 `alembic/` 纳入脚本扫描根（列为后续事项，见后果）。
+   - 新建 `alembic/` 与 `alembic.ini`，`target_metadata` 用 ORM `Base.metadata`。
+   - **DSN 分角色，不复用 `MEMHUB_DB_URL`**：`MEMHUB_DB_URL` 是 `memhub_app`（ingest/worker，可碰运行态表与令牌摘要），kb 运行时与迁移都不得用它，否则违反第 6 条的受限边界。因此：
+     - `MEMHUB_KB_DB_URL`：kb-api 运行时角色，只对 `kb_*` 做 DML。
+     - `MEMHUB_KB_MIGRATE_DB_URL`：Alembic 迁移角色，对 `kb_*` 有 DDL（建表/索引）。迁移**带外执行**（`memhub migrate-kb` 或部署步骤），不在 kb 容器启动时跑——多副本容器各自跑迁移会竞争。迁移角色不读运行态表。
+     - 若负责人在评审时选择「少一个键」，退路是让 kb 运行时角色同时拥有 `kb_*` 表所有权：仍碰不到运行态表，但公网可达的 kb 进程将持有 DDL 权，安全性弱于双角色；需负责人确认后采用。
+   - 迁移体只用 Alembic `op.create_table` / `op.add_column` 等 Core 构造，不写裸 SQL。**注意门禁现状**：`scripts/check_no_raw_sql.py` 与 `check_async_io.py` 目前只扫 `src/`，不覆盖 `alembic/`；因此 ADR-0005 的「不写裸 SQL」在 alembic 目录内靠评审而非脚本把关，扩展扫描根已列为独立事项（见后果）。
    - 现有 5 张运行态表仍由 `ingest/migrations.py` 的冻结基线负责；本轮不搬动它们。Alembic 的基线修订只建 `kb_*` 表，并对已有库以 `alembic stamp` 衔接。**两套迁移共存**：同一 database 里存在 `schema_migrations`（运行态）与 `alembic_version`（知识表）两张版本表，各自独立、互不知晓；启动与部署必须分别执行两者（ingest 迁移在 ingest 启动时跑，Alembic 由 `memhub migrate-kb` / 部署步骤跑），任一未跑完都不算该库就绪。运行态表并入 Alembic 另立事项。
    - **分发包**：kb 容器需同时具备 `sqlalchemy`、`psycopg` 与 `alembic`，三者须加入 kb 的 wheelhouse 并重生成 `SHA256SUMS`（离线 `--network=none` 构建）；`alembic` 也从可选依赖转为基础/部署依赖，键集与打包清单同步。
 5. **检索用应用层 BM25**（负责人选定「直接引 BM25，后期接向量做混合」）。实现方式：SQL 侧按授权范围、库、`kind`、`tier` 过滤出候选集，应用层用 BM25Okapi 打分排序；中文按字符二元组切分，**照搬现 `query._terms` 的规则**（空格切分 + 小写；CJK 连续字符 ≥4 个才补相邻二元组，只对 CJK 段补），不依赖分词器、不新增第三方依赖。**不**引入 ParadeDB / pg_search（需重启生产 PG）或 PG 内置 `ts_rank`（simple 配置对中文不分词）。分数对外仍归一化到 0–1（保持契约与前端口径），排序依据为 BM25 原始相关度。`matched` 从写死的 `"fts"` 改为如实的 `"bm25"`；**两处共建实现都要改**——MCP `kb_search` 与 kb-admin `GET /api/v1/kb/search` 共用 `query.py`，契约两份同时修订。向量混合检索按 ADR-0007 草案另案推进，不在本轮。
