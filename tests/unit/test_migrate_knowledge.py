@@ -363,6 +363,29 @@ async def test_trashed_node_of_archived_kb_keeps_a_parent_project(tmp_path: Path
         assert node["project"] in project_ids, node["id"]
 
 
+async def test_restored_archive_folder_does_not_block(tmp_path: Path) -> None:
+    """恢复会删掉 `active.json` 但留下 `snapshot.zip` 与目录。
+
+    归档是否仍然生效由 `active.json` 决定（`catalog.list_archives` 同口径）；
+    已恢复的归档只剩历史快照，不是坏包，把它报成 `invalid_archives` 会让
+    「归档过再恢复」的服务器永远无法迁移。
+    """
+    root = _tree(tmp_path)
+    store = KnowledgeStore(root)
+    archived = await catalog.delete_kb(store, "demo", actor="ui:test")
+    await catalog.restore_kb(store, archived["archive_id"])
+    assert not (root / "_kb_archives" / archived["archive_id"] / "active.json").exists()
+    assert (root / "_kb_archives" / archived["archive_id"] / "snapshot.zip").exists()
+
+    plan = await parse_tree(root)
+
+    assert plan.diff.invalid_archives == ()
+    assert plan.blocking is False
+    assert plan.archives == []
+    demo = next(item for item in plan.projects if item["id"] == "demo")
+    assert demo["archived_at"] is None
+
+
 async def test_project_timestamps_follow_its_nodes_not_scan_time(tmp_path: Path) -> None:
     """登记里没有 `created_at` 时不能拿「扫描时刻」充数：那会让每次解析得出不同的
     项目哈希，写库后 `--verify-only` 永远报内容不一致。"""

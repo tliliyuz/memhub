@@ -387,13 +387,18 @@ async def _scan_archives(root: Path, diff: MigrationDiff) -> list[dict[str, Any]
         if not archive.ARCHIVE_ID.fullmatch(folder.name):
             continue
         active = await archive.read_optional(root / archive.ARCHIVES / folder.name / "active.json")
+        if active is None:
+            # 归档是否生效以 `active.json` 为准（与 `catalog.list_archives` 同口径）：
+            # 恢复成功会删掉它、只留下 `snapshot.zip`，那是历史快照不是坏包，
+            # 报成 invalid_archives 会让「归档过再恢复」的服务器永远无法迁移。
+            continue
         snapshot = await archive.read_optional(
             root / archive.ARCHIVES / folder.name / "snapshot.zip"
         )
-        if active is None or snapshot is None:
+        if snapshot is None:
             diff.invalid_archives = (
                 *diff.invalid_archives,
-                {"archive_id": folder.name, "error": "active.json 或 snapshot.zip 缺失"},
+                {"archive_id": folder.name, "error": "active.json 在但 snapshot.zip 缺失"},
             )
             continue
         try:
