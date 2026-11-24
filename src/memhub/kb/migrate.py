@@ -37,9 +37,10 @@ STAMP_RE = re.compile(r"\d{8}T\d{6}\d*")
 # `_trash/<stamp>/<node_id>.md` 里的 node_id 含 `/`，stamp 是纯数字段时间。
 NODE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9]+/[a-z0-9][a-z0-9-]{0,127}$")
 
-# 目标表没有对应列的 frontmatter 字段；非空出现即进 diff.unsupported_fields。
-# `id`/`project` 由路径与首段推导、迁移后是冗余列，`supersedes` 本轮无表列。
-UNSUPPORTED_FIELDS = ("supersedes",)
+# 契约里已有、但目标表暂无对应列的 frontmatter 字段；非空出现即数据损失，进
+# diff.unsupported_fields。`supersedes` 已补列（规格 §3.2），故当前为空；
+# 机制保留：将来 `node-schema.md` 新增字段而表未跟随时，迁移必须显性报出而不是静默丢。
+UNSUPPORTED_FIELDS: tuple[str, ...] = ()
 
 
 @dataclass
@@ -159,8 +160,10 @@ async def _registry(root: Path, diff: MigrationDiff) -> dict[str, dict[str, Any]
     return kbs
 
 
-def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str, Any]:
-    """`NodeFrontmatter` + 正文 → `kb_nodes` 行；列名对齐规格 §3.2。"""
+def _frontmatter_row(
+    node_id: str, node: NodeFrontmatter, body: str
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """`NodeFrontmatter` + 正文 → (`kb_nodes` 行, 无列字段清单)；列名对齐规格 §3.2。"""
     row: dict[str, Any] = {
         "id": node_id,
         "project": node.project,
@@ -174,6 +177,7 @@ def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str
         "source": [item.model_dump(mode="json") for item in node.source],
         "valid_from": node.valid_from,
         "valid_until": node.valid_until,
+        "supersedes": list(node.supersedes),
         "superseded_by": node.superseded_by,
         "deprecated_reason": node.deprecated_reason,
         "occurred_at": node.occurred_at,
@@ -187,10 +191,10 @@ def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str
     unsupported = [
         {"node_id": node_id, "field": name} for name in UNSUPPORTED_FIELDS if getattr(node, name)
     ]
-    return row | {"_unsupported": unsupported}
+    return row, unsupported
 
 
-async def _trash_row(root: Path, relative: Path) -> dict[str, Any] | None:
+async def _trash_row(root: Path, relative: Path, diff: MigrationDiff) -> dict[str, Any] | None:
     """`_trash/<stamp>/<node_id>.md` → 软删节点行（`archived_at` = 删除时间）。"""
     stamp_match = STAMP_RE.fullmatch(relative.parts[1])
     node_id = Path(*relative.parts[2:]).with_suffix("").as_posix()
@@ -208,9 +212,9 @@ async def _trash_row(root: Path, relative: Path) -> dict[str, Any] | None:
         node = NodeFrontmatter.model_validate(metadata)
     except ValueError:
         return None
-    row = _frontmatter_row(node_id, node, post.content)
+    row, unsupported = _frontmatter_row(node_id, node, post.content)
+    diff.unsupported_fields = (*diff.unsupported_fields, *unsupported)
     row["archived_at"] = stamp
-    row["revision"] = ""
     return row
 
 
@@ -253,8 +257,8 @@ async def _scan_nodes(root: Path, diff: MigrationDiff) -> tuple[list[dict[str, A
                 {"node_id": node_id, "frontmatter_project": node.project},
             )
         projects.add(relative.parts[0])
-        row = _frontmatter_row(node_id, node, post.content)
-        diff.unsupported_fields = (*diff.unsupported_fields, *row.pop("_unsupported"))
+        row, unsupported = _frontmatter_row(node_id, node, post.content)
+        diff.unsupported_fields = (*diff.unsupported_fields, *unsupported)
         if node_id in seen:
             diff.duplicate_ids = (*diff.duplicate_ids, node_id)
             continue
@@ -341,7 +345,7 @@ async def _scan_trash(
         return rows, events
     async for path in AsyncPath(base).rglob("*.md"):
         relative = Path(path).relative_to(root)
-        row = await _trash_row(root, relative)
+        row = await _trash_row(root, relative, diff)
         if row is None:
             diff.invalid_trash = (*diff.invalid_trash, relative.as_posix())
             continue

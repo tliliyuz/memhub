@@ -40,6 +40,7 @@ KB_NODE_COLUMNS = {
     "source",
     "valid_from",
     "valid_until",
+    "supersedes",
     "superseded_by",
     "deprecated_reason",
     "occurred_at",
@@ -153,8 +154,8 @@ async def test_revision_is_stable_16_hex_and_content_addressed(tmp_path: Path) -
     assert node_revision(changed) != alpha["revision"]
 
 
-async def test_supersedes_without_target_column_is_reported(tmp_path: Path) -> None:
-    """`NodeFrontmatter.supersedes` 在 `kb_nodes` 没有对应列：非空即数据损失，必须显性报出。"""
+async def test_supersedes_maps_to_target_column_without_data_loss(tmp_path: Path) -> None:
+    """`supersedes` 在 `kb_nodes` 有正式列，必须原样落到行里且参与内容哈希。"""
     root = _tree(tmp_path)
     path = root / "demo" / "fact" / "alpha.md"
     path.write_text(
@@ -164,10 +165,10 @@ async def test_supersedes_without_target_column_is_reported(tmp_path: Path) -> N
 
     plan = await parse_tree(root)
 
-    assert plan.diff.unsupported_fields, "supersedes 非空必须出现在差异里"
-    entry = plan.diff.unsupported_fields[0]
-    assert entry["node_id"] == "demo/fact/alpha"
-    assert entry["field"] == "supersedes"
+    alpha = next(node for node in plan.nodes if node["id"] == "demo/fact/alpha")
+    assert alpha["supersedes"] == ["demo/fact/old"]
+    assert plan.diff.unsupported_fields == (), "已有正式列，不应再报数据损失"
+    assert node_revision({**alpha, "supersedes": []}) != alpha["revision"]
 
 
 async def test_trash_nodes_are_archived_not_dropped(tmp_path: Path) -> None:
