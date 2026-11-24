@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-21 |
+| 最后更新 | 2026-11-24 |
 | 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
 | 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../architecture.md) 与 [contracts](../contracts/README.md)） |
 
@@ -41,7 +41,7 @@ tests/
 docs/
 scripts/      治理检查脚本
 deploy/       compose / nginx / systemd / daemon.json
-knowledge/    markdown 真源（git）
+knowledge/    迁移期的 markdown 真源（迁移后删除，见 §9.1）
 prompts/      各 source_type 的抽取 profile
 ```
 
@@ -65,6 +65,7 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|
 | 测试 | `pytest` |
 | 契约测试 | `pytest tests/contract` |
+| PG 契约测试 | 先让 `MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，再 `pytest tests/contract`。未设置时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
 | 检查 | `ruff check .` |
 | 格式 | `ruff format --check .` |
 | 类型 | `python -m mypy src` |
@@ -72,6 +73,8 @@ prompts/      各 source_type 的抽取 profile
 | 文档链接与结构 | `python scripts/check_document_format.py` |
 | 启动依赖 | `docker compose -f deploy/compose.yaml up -d` |
 | 本机运行 | `memhub --version` |
+
+`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。单独导出这一个键即可，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
 
 本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
@@ -83,6 +86,7 @@ prompts/      各 source_type 的抽取 profile
 | 契约字段 | 契约测试 + 文档同步 |
 | ingest | 单元测试 + 契约测试 + 手工 curl 游标/推送 |
 | worker/kb | 单元测试 + 固定样本回归（同一输入产出同一节点集） |
+| kb 存储 / 迁移 / 契约夹具 | `MEMHUB_TEST_DB_URL` 已设置时的全量 `pytest`：PG 用例按 schema-per-test 建删 schema，未设置时整组 skip，视为**未验证** |
 | MCP 工具或入口 | `pytest tests/unit/test_mcp_read_tools.py tests/contract/test_mcp_http.py`；HTTP 用例需安装 `.[dev,mcp-http]`，未装时整组跳过 |
 | 部署文件 | `docker compose config` + 在临时目录验证 systemd unit 语法 |
 | 治理脚本 | 全部脚本 + 在临时仓库验证能检出目标违规 |
@@ -143,8 +147,25 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main serve --graph kb/kg.json 
 `SEMANTICA_ALLOW_ANONYMOUS=true`（否则 API 报 “Server is not configured for authentication”）。
 已显式设置的同名环境变量优先，不会被覆盖。
 
-产物不入库：`kb/kg.json` 是投影，随时可从真源重建；`knowledge/` 下的 markdown 才是真源。
+产物不入库：`kb/kg.json` 是投影，随时可从真源重建。上面这条闭环仍是**迁移期**的形态：本节写的是运行时真源，运行时切换到 PostgreSQL 之前 markdown 依旧是它（迁移态，记录见 [CHANGELOG](../CHANGELOG.md)，2026-11-24）；切换后 `project` / `serve` 两步随投影一并退役，真源改为库，管理台与 MCP 直接查表。
 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
+
+### 9.1 一次性迁移（markdown → PostgreSQL）
+
+```bash
+# 目标库由 --dsn 或 MEMHUB_KB_DB_URL 决定；--schema 决定 search_path（生产用 kb）
+# 1) 只读统计：不写库、不删文件
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
+  --knowledge-dir ./knowledge --dry-run
+# 2) 写库：单事务、按 id / 边三元组 upsert，可重复运行
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
+  --knowledge-dir ./knowledge --schema <schema>
+# 3) 逐节点、逐边比对；不一致非 0 退出。加 --archives migrate 才迁整库归档快照
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
+  --knowledge-dir ./knowledge --schema <schema> --verify-only
+```
+
+`--delete-source` 只接受与 `--verify-only` 同时使用，且校验通过后仍不执行删除（返回 3）：`pg_dump` 与 `knowledge/` 打包备份、删除动作都由负责人在服务器上执行或明确授权（ADR-0013 §9）。
 
 ## 10. MCP 检索服务（stdio 与 HTTP）
 

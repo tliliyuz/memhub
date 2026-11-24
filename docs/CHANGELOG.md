@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 2026-11-24（kb 迁移工具：写库半段与逐节点校验）
+
+- `feat(migrate-kb)`：新增 `src/memhub/kb/migrate_db.py`，把解析出的迁移计划写进 `kb_projects` / `kb_nodes` / `kb_edges` / `kb_archives`，并回写回收站的删除留痕到 `kb_node_revisions`。写入顺序固定为项目 → 节点 → 边 → 归档（可选）→ 修订，单事务提交；`kb_projects` 先于 `kb_nodes`，因为 ORM 模型之间没有 relationship、flush 顺序不由依赖推断。`apply_plan` 按主键 / `(source, predicate, target)` 三元组 upsert，重复运行计数不变（规格 §5 第 9 步）。
+- `feat(migrate-kb)`：`--verify-only` 改为逐节点、逐边比对（规格 §5 第 7 步）：`read_stored` 回读库内全部行，`diff_plan` 用与解析侧同一个 `node_revision` 重算内容哈希后比对，差异分九类（项目缺失/多余/变更、节点缺失/多余/变更、边缺失/多余、归档快照不符）逐项打印，不一致非 0 退出。归档快照默认不比，`--archives migrate` 时才对 `bytea` 快照的 sha256。悬空边原样写入并参与比对，不因校验丢弃。
+- `feat(cli)`：`memhub migrate-kb` 新增 `--schema`，目标 schema 由 `search_path` 决定，缺省不设（生产用专用 schema `kb`，测试可指向独立 schema）。`--delete-source` 仍不执行删除：校验通过后打印需负责人授权、返回 3，源文件不动（ADR-0013 §9）。
+- `fix(migrate)`：内容哈希按 UTC 归一。`timestamptz` 按会话时区回读，磁盘侧的 `+08:00` 与库侧的 `+00:00` 表示同一时刻，不归一就会让同一条记录在两侧算出不同 `revision`；不带时区的时间按 UTC 处理。
+- `fix(migrate)`：项目行的时间取磁盘事实而非扫描时刻。登记缺 `created_at` 时回落到该库节点时间的极值（无节点才用纪元时间），`updated_at` 取 `created_at` 与节点极大值的较大者；原先用扫描时刻会让每次解析都得到不同的项目哈希，`--verify-only` 永远报内容不一致。
+- `fix(migrate)`：回收站 `.meta.json` 改为相对知识库根解析。原先按进程 CWD 拼路径，文件永远找不到，删除审计（`actor` / `reason`）静默丢失，而迁移后 `kb_node_revisions` 是唯一的删除留痕。
+- `fix(migrate)`：归档行带解析侧的辅助键（`snapshot_sha256`、`name`），直接进 upsert 会因不存在该列而编译失败；写库前按目标表的真实列名过滤。
+- `docs(guides)`：开发指南 §3 新增 PG 契约测试命令，说明 `MEMHUB_TEST_DB_URL` 未设置时用例 skip、skip 不计为通过，且只单独导出该键、不整份 source 环境文件（会顺带覆盖运行态 `MEMHUB_DB_URL` 与 `PG*`，测试结果不可信）；§4 验证矩阵新增「kb 存储 / 迁移 / 契约夹具」一行；§9 增补一次性迁移的端到端命令。
+- 迁移态（记录见本条，规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) 为当次权威）：
+  - 当前真实形态：知识仍以 markdown 为运行时真源（`KnowledgeStore`、跨进程写锁、`.kbs.json` 登记），`kb_*` 六张表已建好、迁移工具可写可校验，但运行时读写尚未切换。
+  - 最终目标：PostgreSQL 的 `kb_*` 为唯一真源（ADR-0013），服务器 markdown 迁移后删除，仓库只留 `tests/fixtures`。
+  - 迁移步骤与依赖：建表（Alembic 基线）→ `migrate-kb` 写库 → `--verify-only` 逐节点通过 → `pg_dump` 与 `knowledge/` 打包备份 → 负责人授权后删除 markdown → 运行时切到 PG 存储层 → 删除文件退路。
+  - Consumer：kb-api 与 MCP 读取、worker 提炼写入、管理台删除/归档、采集目标校验；切换点由存储层的 `PgKnowledgeStore` 决定，逐个 consumer 改由同一存储协议承接。
+  - 兼容调用量：迁移工具在 dev 库 `memhub_dev` 上实测通过；生产 `knowledge/` 的节点量、逐库边数与悬空边数须在服务器上以 `--dry-run` 现场统计，本仓库无该数据。
+  - 退出门禁与删除时点：逐节点、逐边哈希全部一致 + `pg_dump` 与 markdown 打包备份完成（ADR-0013 §9）；删除动作由负责人在服务器执行或明确授权，本仓库不做。
+- 验证（2026-11-24，本地，只单独导出 `MEMHUB_TEST_DB_URL`，未写进任何文件）：`pytest -q` 全量 `441 passed, 1 skipped`（117.17s）；同一命令不设该键时 `407 passed, 35 skipped`，PG 用例整组 skip、按规格 §8.10 不计为通过。`ruff check src tests alembic scripts` 与 `ruff format --check` 通过（98 文件）；`mypy src` 无问题（45 个源文件）。`memhub migrate-kb` 对 dev 库实测：写入 → 校验通过 → 再写入 → 再校验通过 → `--delete-source` 返回 3 且源文件与哈希不变。上面均为本地结果，不含生产数据与服务器操作。
+
 ## 2026-11-24（MCP 写候选与候选区闭环）
 
 - `feat(mcp)`：新增 `kb_update_candidate` 与 `kb_deprecate`（ADR-0012），补齐候选区写闭环，仍然不碰 canonical。两者都要求 `mcp:write` 与 `expected_revision`（取自 `kb_read` 新增返回的 `revision`）；检查与写入在同一把跨进程写锁内完成，不符返回 `409/1010` `revision_conflict`，目标不是 `tier=candidate` 返回 `409/1010` `not_candidate` 且不改文件。更新只允许 `title/body/tags/confidence`，并对更新后的标题与正文重跑内容门槛与同项目正文哈希去重；废弃保留文件、`reason` 写入 `deprecated_reason` 并追加 `## 废弃说明`，`superseded_by` 可选（指向自己或不存在分别返回 `superseded_by_invalid` / `superseded_by_unavailable`）。
