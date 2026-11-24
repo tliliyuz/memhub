@@ -209,7 +209,9 @@
 
 1. **测试角色与 CREATEDB**：不复用、不需要。dev 库 `memhub_dev`（owner/角色 `memhub_dev_app`，无 CREATEDB，连接限额 8）承载全部日常开发与测试，隔离用 schema-per-test（见 9.1 第 4 条）；生产实例的 PUBLIC CONNECT 与 pg_hba 未动。
 2. **连接配额**：rolconnlimit 合计 50（现有）+ 8（`memhub_dev_app`）= 58 ≤ `max_connections=60`（扣超级用户预留 3 后实际可用 57）；测试并发建议 `-n ≤ 4`。kb 运行时连接池上线前仍须把生产侧预算写进部署清单。
-3. **kb 生产角色与 `kb_*` 表的落库位置**（`memhub_prod` 内独立 schema，或独立 database）**仍未裁决**，见 ADR-0013 §6；裁决前不创建生产 kb 角色与表。
+3. **`kb_*` 表的落库位置**（2026-11-24 负责人裁决）：**落 `memhub_prod`**，与运行态表同库，不建独立 database。
+   - 权限边界因此落在 schema 层：`kb_*` 与 `alembic_version` 建在专用 schema `kb`，运行时/迁移角色 `search_path` 固定为 `kb`，只授予该 schema 的 `USAGE` 与 `kb_*` 权限，不授予 `public`（运行态 5 表所在）。理由见 ADR-0013 §6。
+   - 生产侧建 schema、建 kb 角色与授权仍是带外运维动作，需负责人授权后执行；本轮交付不创建生产对象。
 
 ### 9.3 已决（不再讨论）
 
