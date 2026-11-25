@@ -1,26 +1,28 @@
 # 知识节点 Schema
 
-> 版本: 0.1（草案，待与客户端/服务器侧评审）
-> 适用范围：知识库真源（markdown frontmatter）、API 返回、MCP 输出、图谱投影共用同一套枚举。
+> 版本: 0.2（真源改为 PostgreSQL `kb_*`，ADR-0013）
+> 适用范围：知识库真源（PG `kb_nodes`）、API 返回、MCP 输出、图谱投影共用同一套枚举。
 > 不负责：检索与工具接口（见 [mcp-tools.md](mcp-tools.md)）、采集协议（见 [ingest-api.md](ingest-api.md)）。
 
 ## 1. 真源形态
 
-每条知识是一个 markdown 文件，路径即 id：
+每条知识是 PG `kb_nodes` 的一行，`id` 为 `<project>/<kind>/<slug>`：
 
 ```
-knowledge/<project>/<kind>/<slug>.md
-例：knowledge/memory-hub/concept/memory-hub.md
-    knowledge/memory-hub/pitfall/no-proxy-ipv6-httpx.md
+kb_nodes.id: memory-hub/concept/memory-hub
+             memory-hub/pitfall/no-proxy-ipv6-httpx
 ```
 
 slug：小写、空格转连字符、保留中文。
 
-## 2. frontmatter
+markdown 文件（`knowledge/<project>/<kind>/<slug>.md`）只在一次性迁移时作为来源读取，迁移校验通过后从服务器删除；仓库只保留测试夹具。文件路径与 `id` 的对应关系（相对路径去扩展名）仅用于迁移映射。
+
+## 2. 节点字段
+
+逻辑形状如下（`kb_nodes` 列与 API/MCP 输出同名；`body` 单独存正文）：
 
 ```yaml
----
-id: memory-hub                     # 全局唯一，等于相对路径去扩展名，可重命名后保持稳定
+id: memory-hub                     # 全局唯一，<project>/<kind>/<slug>，可重命名后保持稳定
 kind: entity                       # 必填，见枚举
 entity_kind: service               # kind=entity 时必填
 title: Memory Hub
@@ -33,6 +35,7 @@ source:                            # 溯源，可多条
     ref: claude-code/2026-11-18/abc123#L420-L455
     device: applesay-win-01
     captured_at: 2026-11-18T10:00:00Z
+revision: 9f2c1a3b4d5e6f70         # 16 位小写 hex，每次写入重算
 created_at: 2026-11-18T10:02:00Z
 updated_at: 2026-11-18T10:02:00Z
 valid_from: null                   # 可选，时间语义
@@ -40,7 +43,6 @@ valid_until: null
 supersedes: []                     # 取代了哪些 id
 superseded_by: null                # 被谁取代；没有替代节点时留空
 deprecated_reason: null            # tier=deprecated 且无替代节点时写原因
----
 ```
 
 ## 3. kind 枚举
@@ -61,10 +63,10 @@ deprecated_reason: null            # tier=deprecated 且无替代节点时写原
 
 ## 4. 关系（边）枚举
 
-关系存放在独立文件 `knowledge/<project>/_edges.jsonl`（一行一条），或由正文 `[[wikilink]]` 解析生成。
+关系存放在 PG `kb_edges`（`project` 归属、`source`/`target`/`predicate`/`source_doc`），由提炼管线写入，`[[wikilink]]` 解析仍可生成。迁移期 markdown 的 `knowledge/<project>/_edges.jsonl`（一行一条）只作一次性来源。
 
-```jsonl
-{"source":"memory-hub","predicate":"manages","target":"wiki","source_doc":"memory-hub/concept/memory-hub.md"}
+```json
+{"source":"memory-hub","predicate":"manages","target":"wiki","source_doc":"memory-hub/concept/memory-hub"}
 ```
 
 | predicate | 语义 | 典型两端 |
@@ -93,14 +95,14 @@ deprecated_reason: null            # tier=deprecated 且无替代节点时写原
 规则：
 - 检索默认只返回 `canonical`；无命中时回退 `candidate` 并标注。
 - 永不硬删；废弃用 `tier: deprecated`，并至少给出 `superseded_by`（有替代节点）或 `deprecated_reason`（结论被证伪、无替代物）。
-- 每次修改必须更新 `updated_at`，并在文件末尾追加 `## Change Log` 条目（谁、为什么、证据）。
+- 每次修改必须更新 `updated_at`，并在同一事务向 `kb_node_revisions` 追加一条修订（含 `before`/`after` 完整快照，`actor` 与 `reason`），取代原 markdown 的 `## Change Log` 与 git 提交。候选转正、tier 审批流仍由治理流程另行推进。
 
 ## 6. 投影
 
 | 投影 | 来源 | 用途 |
 |---|---|---|
-| `kg.json` | frontmatter + edges | MCP 图遍历、explorer 可视化 |
-| `vector/` | title + 正文 + tags | 语义检索 |
-| `fts.db` | 正文（中文分词） | 关键词检索 |
+| `kg.json` | `kb_nodes` + `kb_edges` | MCP 图遍历、explorer 可视化 |
 
-投影可随时丢弃重建；真源只有 markdown。
+关键词检索不再依赖 `fts.db` 投影：kb-api 在 SQL 侧过滤候选集后用应用层 BM25 排序（`matched` 为 `"bm25"`）。向量投影与混合检索按 ADR-0007 另案推进。
+
+投影可随时丢弃重建；真源只有 PG `kb_*` 表。

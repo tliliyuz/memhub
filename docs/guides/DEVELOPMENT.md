@@ -143,17 +143,18 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main serve --graph kb/kg.json 
 `SEMANTICA_ALLOW_ANONYMOUS=true`（否则 API 报 “Server is not configured for authentication”）。
 已显式设置的同名环境变量优先，不会被覆盖。
 
-产物不入库：`kb/kg.json` 是投影，随时可从真源重建；`knowledge/` 下的 markdown 才是真源。
+产物不入库：`kb/kg.json` 是投影，随时可从 PG `kb_*` 真源重建；`knowledge/` 下的 markdown 只作一次性迁移源。
 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
 
 ## 10. MCP 检索服务（stdio 与 HTTP）
 
 ```bash
 # 直接跑：每行一条 JSON-RPC 2.0，stdout 只放协议，日志走 stderr
-PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
+# 必须先配 MEMHUB_KB_DB_URL（运行入口强制 PG，缺失启动失败）
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp
 
 # 挂到 Claude Code（本机当前目录）
-claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
+claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp
 ```
 
 暴露四个检索工具和三个候选区写工具（契约见 [`mcp-tools.md`](../contracts/mcp-tools.md)）：
@@ -171,7 +172,7 @@ claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp --knowledge
 python -m pip install -e ".[dev,mcp-http]"     # 官方 MCP Python SDK，只有 HTTP 入口需要
 MEMHUB_MCP_GRANTS='[{"sha256":"<令牌的 SHA-256>","scope":"mcp:read",
   "expires_at":"<UTC ISO 时间>","projects":["<库 id>"]}]' \
-  PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb --knowledge-dir ./knowledge
+  PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb
 # 客户端：POST http://127.0.0.1:8701/mcp，Authorization: Bearer <原始令牌>
 ```
 
@@ -199,5 +200,5 @@ stdio 编码固定 UTF-8（`serve()` 会 `reconfigure` 两个流）：Windows �
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  | PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp --knowledge-dir ./knowledge
+  | PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp
 ```

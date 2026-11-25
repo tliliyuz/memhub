@@ -25,8 +25,8 @@
  │  ingest-api / kb-api(上传) → queue.rawstore (原始增量, 按 device/source)  │
  │           → runtime state (PostgreSQL: 设备/游标/批次幂等, memhub_prod)   │
  │  worker:  value_filter(cheap) → extract(expensive) → merge              │
- │  merge → knowledge/ (markdown 真源, git) → rebuild projections          │
- │  projections: kg.json | vector/ | fts.db                                │
+ │  merge → PostgreSQL 知识真源 kb_* (schema kb) → 重建 kg.json 投影        │
+ │  检索：应用层 BM25（向量混合按 ADR-0007 另案）                             │
  └─────────────────────────────────────────────────────────────────────────┘
            ▲
            │ 读取 / 受权写候选
@@ -43,8 +43,8 @@
 | 记忆失败 = 模型不可用 | 采集/提炼失败只影响记忆新鲜度，用户正常工作 |
 | Team Brain MCP 本地进程 + 共享 key | 远端 `/mcp`，每条凭据限定库范围与读写作用域；吊销靠改配置重启 |
 | 会话靠 Proxy 旁路抓取 | collector 直接读本地 session 文件，游标增量 |
-| 状态散在 Proxy/本地 relay | 状态只在云端（raw_store + 游标 + 知识库） |
-| 数据格式即实现 | markdown 真源 + 可重建投影 |
+| 状态散在 Proxy/本地 relay | 状态只在云端（raw_store + 游标 + 知识库表） |
+| 数据格式即实现 | PostgreSQL `kb_*` 真源 + 可重建 `kg.json` 投影（markdown 仅一次性迁移源） |
 
 ## 3. 组件职责
 
@@ -55,7 +55,7 @@
 - 崩溃恢复：state 文件原子写；未确认批次重推（服务端按 batch_id 幂等）。
 
 ### ingest-api（服务端）
-- 先验证设备凭据，再检查显式目标的登记、活动状态和设备授权；通过后才可能落 raw_store 或推进游标。
+- 先验证设备凭据，再检查显式目标：`kb_projects` 存在该行且 `archived_at` 为空（只读，不写知识真源）；通过后才可能落 raw_store 或推进游标。
 - 只做校验，不做 LLM 调用，响应 <200ms。
 
 ### queue（跨模块落盘与配额，非独立进程）
@@ -64,18 +64,18 @@
 - 放在 `queue/` 而不是 `ingest/`：上传入口不该依赖采集协议层（鉴权、游标、<200ms 约束）；鉴权、游标校验与错误码映射留在各自路由层，这里只做与协议无关的落盘与计量。
 
 ### worker（服务端，单机串行 + 少量并发）
-- 先确认队列来源和目标授权，再按类型抽取；写入锁内再次确认。明确不合规的队列项隔离，暂不能核验时留队。管理台凭据不与设备授权混用。
-- 会话只从有出处的对话提炼候选，允许零结果；文档和 wiki 继续走文档提炼管线。实际合并后 Markdown 为真源，投影可重建。
+- 先确认队列来源和目标授权，再按类型抽取；写入作用域内再次确认。明确不合规的队列项隔离，暂不能核验时留队。管理台凭据不与设备授权混用。
+- 会话只从有出处的对话提炼候选，允许零结果；文档和 wiki 继续走文档提炼管线。合并直接写 PG `kb_*` 表（一次写入 = 一个事务），不再落 markdown。
 
 ### kb-api
-- 检索：FTS + 向量 + 图邻接，三路融合；默认 `tier=canonical`。
-- 写入：只给治理 agent 用（见 mcp-tools.md）。
+- 检索：SQL 侧按授权范围与 `kind`/`tier` 过滤候选集，应用层 BM25 排序；向量混合检索按 ADR-0007 另案推进。默认 `tier=canonical`。
+- 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
 - 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
-- 真源操作走 git：每次写产生一个 commit，可回滚。
+- 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 
 ### mcp-server（首版随 kb-api 进程）
 - 由 kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP，协议解析交给官方 MCP Python SDK；配置了 MCP 凭据才启用，未配置时直接返回 404，不落到管理台。
-- 授权库范围与读写作用域按请求注入。写工具只创建候选，复用真源写锁和活动库校验；不修改权威节点。
+- 授权库范围与读写作用域按请求注入。写工具只创建候选，复用 PG 写作用域（事务级 advisory lock）和 `kb_projects` 活动库校验；不修改权威节点。
 - 独立进程与多副本形态尚未实现；拆分需先改本节与 §5 的部署形态。
 
 ### explorer
@@ -95,8 +95,8 @@
 
 - Docker Compose：`ingest-api` / `worker` / `kb-api` / `nginx`（nginx 也可用宿主机的）；`/mcp` 由
   kb-api 进程提供，不单列服务。
-- systemd timer：`rebuild.timer`（投影重建）、`disk-guard.timer`、`git-gc.timer`。
-- 真源目录 `knowledge/` 挂 volume + 每日 git push 到私有远端（可选）。
+- systemd timer：`rebuild.timer`（投影重建）、`disk-guard.timer`；知识库备份由部署侧定时 `pg_dump` 承担。
+- 知识真源在 PostgreSQL（`memhub_prod` 的 `kb` schema），随实例备份；`knowledge/` 只作为一次性迁移源，迁移校验通过后从服务器删除。
 - 配置与密钥：`.env`（600）+ systemd `EnvironmentFile`；不写进镜像。
 
 ## 6. 目录
@@ -108,11 +108,12 @@ memhub/
     queue/         # raw_store 落盘与配额（ingest / kb 上传共用）
     ingest/        # 鉴权、游标、幂等、入队
     worker/        # value_filter / extract / merge
-    kb/            # 真源读写、检索、投影重建
+    kb/            # 真源读写（PG kb_*）、检索、投影重建
     mcp/           # MCP 工具
     cli/           # 运维命令
   docs/            # 架构、契约、运维
-  knowledge/       # markdown 真源（git）
+  knowledge/       # markdown 一次性迁移源（迁移完成后从服务器删除；仓库只留测试夹具）
+  alembic/         # kb_* 表的 DDL 迁移
   prompts/         # 各 source_type 的抽取 profile
   deploy/          # compose / nginx / systemd / daemon.json
   web/             # 管理台前端

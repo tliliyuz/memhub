@@ -192,7 +192,7 @@ Authorization: Bearer <device_token>
 
 ### `DELETE /ingest/source/{source_id}?device_id=<id>&purge=true`
 
-用户态调用。`purge=true` 时将该源原始增量标记删除（markdown 真源保留，溯源里该来源标记失效）。
+用户态调用。`purge=true` 时将该源原始增量标记删除（知识真源 `kb_*` 不受影响，溯源里该来源标记失效）。
 
 ## 3. 错误码
 
