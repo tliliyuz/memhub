@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-25（部署与锁文件对齐 PG 真源）
+
+- `feat(deploy)`：`Dockerfile.kb` 改装 `memhub[postgres,engine,mcp-http]`，移除 `--knowledge-dir`，烘入 `alembic.ini` 与 `alembic/`——Alembic 由一次性容器带外执行（ADR-0013 §4，不在容器启动时跑），运行入口只认 `MEMHUB_KB_DB_URL`。
+- `docs(deploy)`：README 新增「知识真源切换（markdown → PG，一次性）」小节：建对象与角色 → 停写 → Alembic 建表（一次性容器，运行位置留有备选宿主 venv 的待负责人裁决项）→ `migrate-kb` dry-run/写库/`--verify-only`（强制 `--archives migrate`）→ 备份 → 负责人授权删 markdown → 强制重建三容器 → 回滚与验收；`project` 等 timer 命令去掉 `--knowledge-dir`，kb-api 条目补连 PG 说明。
+- `chore(deploy)`：`lock-ingest.txt`（23→28 项）与 `lock-worker.txt`（55→60 项）补 `alembic 1.20.1` / `SQLAlchemy 2.0.58` / `greenlet 3.5.6` / `Mako 1.4.3` / `MarkupSafe 3.0.4`，纯增不改既有版本。注意：本机 Docker daemon 未运行，锁由离线 `pip install --target`（多 `--platform` 标签）仿真生成；**权威锁仍须发版时在镜像内 `pip freeze` 重出**，同时 `deploy/dist` 的 wheelhouse 需补上述 3 个 wheel 并按最终发布提交重打 memhub wheel 与 `SHA256SUMS`/`MANIFEST`。
+- `docs(compose)`：kb 服务注释改为「连 PG：`MEMHUB_KB_DB_URL` 经 env_file 注入，缺失启动即失败」，图谱页数据来源改为 `/api/v1/kb/graph` 直读 PG。
+- `docs(guides)`：DEVELOPMENT §1/§2/§3/§9/§9.1/§10 按运行态 PG 重写（安装 extra、目录分层、PG 契约测试命令、端到端闭环走 `--create-project`/`project --out`、一次性迁移与归档恢复命令、MCP 不再传 `--knowledge-dir`）。
+- 验证（2026-11-25，本地）：`docker compose -f deploy/compose.yml config` 通过（stub env_file）；锁文件为离线 `pip install --target`（ingest=29 wheel、worker=78 wheel 安装产物去 win32 项）导出，SQLAlchemy 保持 2.0.58（拒绝 2.1.9，符合 `<2.1` 钉子）；`ruff check`/`ruff format --check` 对 `deploy` 通过。全量 pytest 未在本机重跑（避免与 peer 并发共用测试库），以 peer 分支 `d954c3b`/`ecd380a` 的 504 passed/1 skipped 为准。
+
 ## 2026-11-24（kb 迁移工具：写库半段与逐节点校验）
 
 - `feat(migrate-kb)`：新增 `src/memhub/kb/migrate_db.py`，把解析出的迁移计划写进 `kb_projects` / `kb_nodes` / `kb_edges` / `kb_archives`，并回写回收站的删除留痕到 `kb_node_revisions`。写入顺序固定为项目 → 节点 → 边 → 归档（可选）→ 修订，单事务提交；`kb_projects` 先于 `kb_nodes`，因为 ORM 模型之间没有 relationship、flush 顺序不由依赖推断。`apply_plan` 按主键 / `(source, predicate, target)` 三元组 upsert，重复运行计数不变（规格 §5 第 9 步）。
