@@ -82,11 +82,11 @@ services:
   kb:
     <<: *defaults
     # 管理台：静态前端 + /api/v1/kb/*。图谱页由前端 cytoscape 渲染，
-    # 数据来自 /api/v1/kb/graph（直读 PG kb_* 表）；kg.json 投影只供旧 explorer。
+    # 数据来自 /api/v1/kb/graph（直读 PG kb_* 表），没有文件投影与 explorer。
     # **独立 env_file（默认的 /etc/memhub/env 只给 ingest / worker / oauth2-proxy）**：
     # kb 用受限角色连知识表，不该看到运行态全权 DSN（MEMHUB_DB_URL）、PGPASSWORD、
     # LLM 凭据与设备 token 密钥。文件至少写 MEMHUB_KB_DB_URL；MCP HTTP 入口（/mcp）
-    # 用 MEMHUB_MCP_GRANTS，按需再拷 MEMHUB_LOG_LEVEL / MEMHUB_KB_AUTO_REBUILD /
+    # 用 MEMHUB_MCP_GRANTS，按需再拷 MEMHUB_LOG_LEVEL /
     # MEMHUB_QUEUE_MAX_BYTES / MEMHUB_KB_HTTP_PORT。
     env_file: /etc/memhub/env.kb
     image: memhub/app-kb:0.1.0
@@ -95,44 +95,11 @@ services:
     # 连 PG：MEMHUB_KB_DB_URL（运行时 DML 角色）经 env_file 注入，缺失启动即失败（ADR-0013）。
     # 鉴权靠 nginx 的 oauth2-proxy。
     # kb-api 代码固定绑 127.0.0.1:8701（无 --allow-non-loopback 之类的开关）。
-    # 实测：投影重建（437 节点 / 2631 边）峰值 ~143MB，384m 是 2.5 倍余量。
+    # 实测：载入 437 节点 / 2631 边的图谱页并渲染首页后 ≈143MB，384m 是 2.5 倍余量。
     mem_limit: 384m
     memswap_limit: 384m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8701/healthz', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  explorer:
-    <<: *defaults
-    # 563fefe 起不再部署：管理台自带图谱页，图谱投影由 kb-api 重建。
-    # 保留本段仅作为回退参考——需要旧 explorer 时取消注释、把 nginx `/` 改回 8703。
-    profiles: ["legacy"]
-    image: memhub/app-worker:0.1.0
-    container_name: memhub-explorer
-    # 只读可视化：读 rebuild timer 产出的 kg.json，绑回环 8703，由 nginx 挂到 /。
-    # 图谱不存在时 serve 直接 exit 2 —— 部署顺序必须是「先跑一次 rebuild」再起本服务，
-    # 否则会连续重启 5 次后停住（on-failure:5 就是为这种情况设的）。
-    command:
-      - memhub
-      - serve
-      - --graph
-      - /var/lib/memhub/kb/kg.json
-      - --port
-      - "8703"
-      - --no-browser
-    # HOME 默认在只读 rootfs 外的卷上，但 explorer 只需要一个可写缓存目录；
-    # 用 tmpfs 里的 /tmp，重启即清，不污染数据卷。
-    environment:
-      HOME: /tmp
-      TMPDIR: /tmp
-    restart: "on-failure:5"
-    # 实测：加载 6 节点图谱并渲染首页后容器占用 151MB，384m 是 2.5 倍余量。
-    mem_limit: 384m
-    memswap_limit: 384m
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8703/', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3

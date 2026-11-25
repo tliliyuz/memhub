@@ -1,7 +1,7 @@
 [project]
 name = "memhub"
 version = "0.1.0"
-description = "Memhub 2.0：本地采集推送、云端提炼、markdown 真源 + 图谱投影"
+description = "Memhub 2.0：本地采集推送、云端提炼、PostgreSQL 知识真源 + 图谱/检索"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9,<3",
@@ -22,9 +22,9 @@ postgres = [
     "alembic>=1.16,<2",
 ]
 engine = [
-    # 解析/切分/去重/图谱/向量/explorer 复用 semantica
+    # 投影子系统下线后 semantica 已无代码引用；与离线 wheelhouse / 锁文件一起清理是独立任务
     "semantica>=0.7.0,<0.8",
-    # semantica explorer 的表单上传依赖，缺失时启动即报 "Form data requires python-multipart"
+    # kb-api 上传接口的 multipart 解析，缺失时启动即报 "Form data requires python-multipart"
     "python-multipart>=0.0.9,<1",
 ]
 # 可选的远程 MCP 传输；stdio 和默认管理台不加载该 SDK。

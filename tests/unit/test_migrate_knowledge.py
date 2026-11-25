@@ -290,7 +290,7 @@ async def test_pending_archive_blocks_migration(tmp_path: Path) -> None:
 
 
 async def test_projection_marker_alone_does_not_block(tmp_path: Path) -> None:
-    """`projection-dirty` 只表示投影待重建：迁移后投影整体退役，不该阻断写库。"""
+    """`projection-dirty` 是历史投影子系统的遗留哨兵：投影已下线，不该阻断写库。"""
     root = _tree(tmp_path)
     marker = root / "_kb_archives" / "projection-dirty"
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -303,7 +303,7 @@ async def test_projection_marker_alone_does_not_block(tmp_path: Path) -> None:
 
 
 async def test_completed_archive_does_not_block(tmp_path: Path) -> None:
-    """整库归档成功后 `projection-dirty` 会留在盘上，直到投影重建。
+    """整库归档成功后 `projection-dirty` 会留在盘上（已无消费者）。
 
     归档本身已完成（`active.json` 与快照都在），迁移必须能继续；把这两个状态
     混为一谈会让「归档过任何库」的服务器永远无法迁移。

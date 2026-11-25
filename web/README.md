@@ -12,7 +12,7 @@ kb-api（`memhub kb`，默认 `127.0.0.1:8701`）托管的前端：**按知识�
 
 - `components/ui/*`：零改动。
 - `components/data-table/*`：沿用 DFG 的服务端分页 + `rowCount` + 中文文案，**本仓库未再改**；若将来要改，先在这里记一条，避免两边 diff 漂移。
-- `components/layout/nav-user.tsx`：菜单换成「后端健康状态 + 重建投影」，不涉及用户体系。
+- `components/layout/nav-user.tsx`：换成登录身份块（GitHub 头像 / 用户名 / 退出登录，经 oauth2-proxy 注入），不涉及权限体系。
 - 删除未引用组件：`ui/input-otp.tsx`（DFG 也只在 auth 演示路由用）。
 - 依赖：比 DFG 多 `react-top-loading-bar@^3.0.2`（`NavigationProgress` 需要）与 `cytoscape@3.35` + `cytoscape-fcose@2.2`（自绘图谱），少认证相关包。`cytoscape-fcose` 不带类型，`src/types/cytoscape-fcose.d.ts` 里补了一条 `Ext` 声明。
 
@@ -34,7 +34,7 @@ pnpm typecheck
 构建产物 `dist/` 由 kb-api 托管：
 
 ```bash
-memhub kb --graph-out kb/kg.json --web-dist web/dist --data-dir data
+memhub kb --web-dist web/dist --data-dir data
 # 真源是 PostgreSQL（MEMHUB_KB_DB_URL，经 .env 注入）；没有 --knowledge-dir
 ```
 
@@ -44,7 +44,7 @@ memhub kb --graph-out kb/kg.json --web-dist web/dist --data-dir data
 
 - 前端不持有任何真源状态：列表/详情来自 kb-api，写操作带 `expected_revision`（冲突 409 / `1010` 时提示刷新）。
 - 删除是软删（`kb_nodes.archived_at` + 修订快照）；「废弃」不删节点，只改 tier 与 `superseded_by`。
-- 投影（`kg.json`，仅供旧 semantica explorer 与投影状态接口）由后端重建，前端只触发 `POST /api/v1/kb/rebuild`；管理台图谱直读 `GET /api/v1/kb/graph`（PG `kb_*` 表），不依赖它。
+- 图谱与检索都直读 `GET /api/v1/kb/graph` 与 `GET /api/v1/kb/search`（PG `kb_*` 表），没有文件投影，也没有重建入口。
 - 接口细节见 [../docs/contracts/kb-admin-api.md](../docs/contracts/kb-admin-api.md)。
 
 ## 目录速览
@@ -58,5 +58,5 @@ src/components/layout/kb-nav-group.tsx  侧栏动态知识库分组
 src/lib/api.ts        带类型的 kb-api 客户端
 src/components/ui     shadcn 组件（上游原样）
 src/components/data-table  表格工具（上游，服务端分页 + 中文）
-src/components/layout      应用外壳（侧栏、页头、NavUser=健康状态+重建按钮）
+src/components/layout      应用外壳（侧栏、页头、NavUser=登录身份）
 ```

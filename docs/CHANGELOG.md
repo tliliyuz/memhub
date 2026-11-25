@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-11-25（投影子系统下线：图谱与检索直读 PG）
+
+- `refactor(kb)`：删除 `memhub/kb/projection.py` 与 `tests/contract/test_kb_projection_pg.py`；kb-api 去掉 `GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `_GraphRestarter`，`healthz` 改为只返回 `{ok, store, nodes}`（`store` 恒为 `pg`）。`archive.projection_dirty()` / `clear_projection_dirty()` 与 `PgKnowledgeStore.latest_write()` 一并移除；`archive.MARKER` 保留为历史 journal 的最后一个步骤，恢复流程按原样重放。
+- `refactor(cli)`：删除 `memhub project` 与 `memhub serve` 子命令及 `_serve_env`；`memhub kb` 只接受 `--port` / `--web-dist` / `--data-dir`，不再读取或导出 `MEMHUB_KB_GRAPH` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_KB_GRAPH_PORT`。`recover-kb-archive` 的成功提示不再要求重建投影。
+- `refactor(deploy)`：`compose.yml` 删除 `explorer`（`legacy` profile）；`Dockerfile.kb` 的 CMD 去掉 `--graph-out`；`deploy/README.md` 删除 rebuild timer 与 explorer 端口/回退说明；`docs/tech/ENVIRONMENT.md` 与 `.env.example` 删除三项投影键。
+- `refactor(web)`：删除投影状态横幅、侧栏「重建投影」入口、`Projection` 类型与 `projection`/`rebuild` 客户端方法，`healthz` 类型改为 `{ok, store, nodes}`；删除无引用的 `VITE_GRAPH_URL` 声明。
+- `docs`：契约索引升 0.12，`kb-admin-api.md` 升 0.4（删除 §4.8 投影并重排前端小节、更新不变式），`node-schema.md` 升 0.4（§6 改为「不生成文件投影」），`architecture.md` / `DEVELOPMENT.md` / `deploy/README.md` / `web/README.md` / 根 `README.md` 同步；ADR-0013 后果段记录负责人确认删除。
+- `test`：新增 `test_healthz_has_no_projection_state`、`test_projection_routes_are_removed`、`test_projection_subcommands_are_removed`、`test_kb_console_rejects_removed_projection_flags`；`test_pipeline.py` 的投影用例改为断言合并后的边已按完整 id 落库；删除 `test_serve_env.py`（被测函数已移除）。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 按直连端点单独注入）：RED——改动前四个目标用例分别因 healthz 含 `projection`、投影/重建路由仍存在、`project`/`serve` 仍被识别、`kb` 仍接受 `--graph-out` 等参数而失败；GREEN——全量 `pytest` **545 passed / 1 skipped**；`ruff check src tests scripts alembic`、`ruff format --check src tests scripts alembic`、`mypy src`（47 files）、`check_env_example_keys.py`、`check_document_format.py`、`check_document_ownership.py --all`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py` 全绿；`web` 的 `tsc -b` 通过。`ruff check .` 另在 `.claude/hooks/guard-git-write.py`（本分支未改动的已提交文件）报 ISC004，属既有问题，未在本分支处理。
+- 依赖：`engine` extra 仍保留 `semantica`（已无代码引用）与 `python-multipart`（上传必需）；移除 semantica 需同时重出锁文件与离线 wheelhouse，按独立任务处理。
+
+
 ## 2026-11-25（模型边界统一把时间归一为 UTC）
 
 - `fix(contract)`：`NodeFrontmatter` 的 `created_at` / `updated_at` / `valid_from` / `valid_until` / `occurred_at` / `decided_at` 增加 UTC 归一校验：naive 值按 UTC 补齐，带偏移的换算到 UTC。此前 API/MCP/CLI 传入裸日期（如 `valid_until: '2026-11-21'`）会得到 naive datetime，写进 `timestamptz` 时按会话时区（生产 +08）解释，落成前一天 16:00Z——与迁移写库缺陷同源，只是入口不同。迁移侧的局部修复保留（解析行也要守同一口径），模型边界覆盖运行态。

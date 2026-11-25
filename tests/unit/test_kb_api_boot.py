@@ -17,9 +17,7 @@ DSN = "postgresql://kb@127.0.0.1:5432/memhub_prod"
 def _clean_env(monkeypatch: pytest.MonkeyPatch, knowledge: Path | None = None) -> None:
     for key in (
         KB_DSN_KEY,
-        "MEMHUB_KB_GRAPH",
         "MEMHUB_KB_WEB_DIST",
-        "MEMHUB_KB_AUTO_REBUILD",
         "MEMHUB_MCP_GRANTS",
         "MEMHUB_DATA_DIR",
     ):

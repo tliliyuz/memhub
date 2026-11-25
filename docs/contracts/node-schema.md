@@ -1,7 +1,7 @@
 # 知识节点 Schema
 
-> 版本: 0.3（时间字段统一归一为 UTC；真源为 PostgreSQL `kb_*`，ADR-0013）
-> 适用范围：知识库真源（PG `kb_nodes`）、API 返回、MCP 输出、图谱投影共用同一套枚举。
+> 版本: 0.4（时间字段统一归一为 UTC；真源为 PostgreSQL `kb_*`，ADR-0013；文件投影已移除）
+> 适用范围：知识库真源（PG `kb_nodes`）、API 返回、MCP 输出、图谱查询共用同一套枚举。
 > 不负责：检索与工具接口（见 [mcp-tools.md](mcp-tools.md)）、采集协议（见 [ingest-api.md](ingest-api.md)）。
 
 ## 1. 真源形态
@@ -107,10 +107,4 @@ UTC 后存储；API 与 MCP 输出统一为 `Z` 后缀。这样同一输入不�
 
 ## 6. 投影
 
-| 投影 | 来源 | 用途 |
-|---|---|---|
-| `kg.json` | `kb_nodes` + `kb_edges` | 只供旧 explorer 可视化与 `/api/v1/kb/projection` 状态展示；MCP 图遍历与管理台图谱直接查 PG，不读它 |
-
-关键词检索不再依赖 `fts.db` 投影：kb-api 在 SQL 侧过滤候选集后用应用层 BM25 排序（`matched` 为 `"bm25"`）。向量投影与混合检索按 ADR-0007 另案推进。
-
-投影可随时丢弃重建；真源只有 PG `kb_*` 表。
+真源只有 PG `kb_*` 表：图谱（管理台图谱页、`/api/v1/kb/graph`、MCP 图遍历）与检索都直接查询，不再生成 `kg.json` 等文件投影。关键词检索在 SQL 侧过滤候选集后由应用层 BM25 排序（`matched` 为 `"bm25"`）。向量检索按 ADR-0007 另案推进。

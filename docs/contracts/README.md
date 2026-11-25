@@ -1,4 +1,4 @@
-# 跨端契约（v0.11）
+# 跨端契约（v0.12）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -7,11 +7,11 @@
 
 | 文档 | 内容 | 主要读者 |
 |---|---|---|
-| [node-schema.md](node-schema.md) | 知识节点 kind/entity_kind/边枚举、`kb_nodes` 字段、tier 治理、投影 | 服务端、治理 agent、MCP |
+| [node-schema.md](node-schema.md) | 知识节点 kind/entity_kind/边枚举、`kb_nodes` 字段、tier 治理 | 服务端、治理 agent、MCP |
 | [source-registry.md](source-registry.md) | `sources.json` 本地源注册表、采集器行为、隐私边界 | 客户端、collector |
 | [ingest-api.md](ingest-api.md) | 游标、推送、心跳、错误码、限流、幂等 | 客户端、服务端 |
 | [mcp-tools.md](mcp-tools.md) | 检索组 + 治理组工具、错误码、不变式 | agent、治理 agent、服务端 |
-| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、投影重建、并发与错误码 | 服务端、管理台前端 |
+| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、并发与错误码 | 服务端、管理台前端 |
 
 ## 待定（阻塞项）
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.12 — 投影子系统下线（[kb-admin-api.md](kb-admin-api.md) 0.4、[node-schema.md](node-schema.md) 0.4）：删除 `kg.json` 文件投影、`GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `memhub project` / `memhub serve` 命令，图谱与检索直接查询 `kb_*` 真源；`healthz` 只报 `{ok, store, nodes}`。
 - 0.11 — 时间语义收口（[node-schema.md](node-schema.md) 0.3）：`NodeFrontmatter` 的六个时间字段在模型边界统一归一为 UTC——naive 值按 UTC 补齐，带偏移的换算到 UTC；输出统一 `Z` 后缀。此前 API/MCP 传裸日期会按会话时区（生产 +08）落库，与迁移侧哈希口径不一致。`source[].captured_at` 保留原始偏移文本，不在归一范围内。
 - 0.10 — 写入审计落库：MCP 三个写工具（[mcp-tools.md](mcp-tools.md) 0.6）与采集每次决策（[ingest-api.md](ingest-api.md) 0.8）都在 `kb_write_audit` 表记 `actor`/`project`/`node_id`/`action`/`result`，不含正文与 token；审计落库失败显式报错，不静默丢弃。
 - 0.9 — 真源改为 PostgreSQL `kb_*`（ADR-0013）：节点、边、知识库登记不再以 markdown 为真源，markdown 仅一次性迁移源；`matched` 为 `bm25`，`revision` 为每次写入重算的 16 位 hex；MCP 写工具返回的 `commit` 恒为 `null`；采集目标的「已登记且活动」改读 `kb_projects`（`ingest-api.md` 0.7）。
