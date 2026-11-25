@@ -5,7 +5,7 @@
 - `fix(migrate)`：`parse_tree` 产出的节点时间（`valid_from` / `valid_until` / `occurred_at` / `decided_at` / `created_at` / `updated_at`）与归档 `deleted_at` 统一先补成 UTC 再进写库计划。frontmatter 的裸日期（如 `valid_until: '2026-11-21'`）解析出 naive datetime；`timestamptz` 列会按**会话时区**解释 naive 值，生产迁移容器是 +08，落库变成 `2026-11-20T16:00:00Z`，而磁盘侧哈希按 UTC 零点算——`--verify-only` 对这类节点永远报内容不一致。规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) §3 的口径本来就是「所有时间 `timestamptz`，一律 UTC」，本次让写库侧遵守它。运行态写入路径（kb-api / MCP）不在本次范围。
 - `test`：`test_migrate_apply.py` 新增 `test_naive_frontmatter_time_is_written_as_utc`，用裸日期 fixture 并把会话时区显式钉成 `Asia/Shanghai`（不依赖跑测机器默认时区），断言 `kb_nodes.valid_until` 回读为 `2026-11-21T00:00:00Z` 且 `diff_plan` 无差异。
 - 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，按直连端点覆盖隧道口）：RED——新用例 1 failed，实际落库回读 `2026-11-20 16:00:00+00`；GREEN——同用例 1 passed。`tests/unit/test_migrate_knowledge.py`、`tests/unit/test_migrate_verify.py`、`tests/unit/test_cli_migrate_kb.py`、`tests/contract/test_migrate_apply.py`、`tests/contract/test_kb_migrations.py` 合计 56 passed。
-- 生产影响：修复只对**修复后的写库**生效。已经用旧代码写入的 `valid_until` 错位行需要一次受控数据订正（或从仍存在的 markdown 源重跑写入）；服务器上的 markdown 源已按授权删除，因此只能走「单行订正 + `pg_dump` 备份」并由负责人单独授权。该行是 `memhub/fact/knowledge-source-directory-structure-export-memhub`。
+- 生产影响：修复只对**修复后的写库**生效。已经用旧代码写入的 `valid_until` 错位行只有一条（`memhub/fact/knowledge-source-directory-structure-export-memhub`）；markdown 源已按授权删除，不能重写，只能单行订正。该订正已于 2026-11-25 15:30 按负责人指令在服务器执行（先落全库 `pg_dump` 备份，再 `UPDATE kb.kb_nodes SET valid_until = timestamptz '2026-11-21T00:00:00+00:00'`，`revision` 未改），随后对备份 tar 中的 728 个 md 重跑 `--verify-only`：`EXIT=0`，逐节点、逐边一致。728 个节点中只有这一条用了裸日期，其余时间均带 `Z`，不是普遍问题。
 
 ## 2026-11-25（Alembic 入口归一化 DSN 方言）
 
