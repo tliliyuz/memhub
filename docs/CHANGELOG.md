@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-25（模型边界统一把时间归一为 UTC）
+
+- `fix(contract)`：`NodeFrontmatter` 的 `created_at` / `updated_at` / `valid_from` / `valid_until` / `occurred_at` / `decided_at` 增加 UTC 归一校验：naive 值按 UTC 补齐，带偏移的换算到 UTC。此前 API/MCP/CLI 传入裸日期（如 `valid_until: '2026-11-21'`）会得到 naive datetime，写进 `timestamptz` 时按会话时区（生产 +08）解释，落成前一天 16:00Z——与迁移写库缺陷同源，只是入口不同。迁移侧的局部修复保留（解析行也要守同一口径），模型边界覆盖运行态。
+- `docs`：`node-schema.md` 升 0.3，新增「时间语义」小节；契约索引升 0.11。`source[].captured_at` 以原始文本存 JSONB，与既有行比对绑定，不在归一范围内。
+- `test`：`test_models.py` 新增 `test_naive_times_are_normalized_to_utc`（六个字段的 naive 补齐与偏移换算）；`test_kb_pgstore.py` 新增 `test_runtime_write_normalizes_naive_time_to_utc`（会话时区钉成 +08，裸日期经 `PgKnowledgeStore.write` 回读为 UTC 零点）。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 直连 `memhub_dev`）：RED——两个新用例 2 failed，PG 用例实际回读 `2026-11-20 16:00:00+00`；GREEN——`test_models.py` + `test_kb_pgstore.py` 合计 27 passed。
+
 ## 2026-11-25（迁移写库把 naive 时间钉成 UTC）
 
 - `fix(migrate)`：`parse_tree` 产出的节点时间（`valid_from` / `valid_until` / `occurred_at` / `decided_at` / `created_at` / `updated_at`）与归档 `deleted_at` 统一先补成 UTC 再进写库计划。frontmatter 的裸日期（如 `valid_until: '2026-11-21'`）解析出 naive datetime；`timestamptz` 列会按**会话时区**解释 naive 值，生产迁移容器是 +08，落库变成 `2026-11-20T16:00:00Z`，而磁盘侧哈希按 UTC 零点算——`--verify-only` 对这类节点永远报内容不一致。规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) §3 的口径本来就是「所有时间 `timestamptz`，一律 UTC」，本次让写库侧遵守它。运行态写入路径（kb-api / MCP）不在本次范围。

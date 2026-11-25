@@ -1,6 +1,6 @@
 # 知识节点 Schema
 
-> 版本: 0.2（真源改为 PostgreSQL `kb_*`，ADR-0013）
+> 版本: 0.3（时间字段统一归一为 UTC；真源为 PostgreSQL `kb_*`，ADR-0013）
 > 适用范围：知识库真源（PG `kb_nodes`）、API 返回、MCP 输出、图谱投影共用同一套枚举。
 > 不负责：检索与工具接口（见 [mcp-tools.md](mcp-tools.md)）、采集协议（见 [ingest-api.md](ingest-api.md)）。
 
@@ -44,6 +44,14 @@ supersedes: []                     # 取代了哪些 id
 superseded_by: null                # 被谁取代；没有替代节点时留空
 deprecated_reason: null            # tier=deprecated 且无替代节点时写原因
 ```
+
+### 时间语义
+
+`created_at` / `updated_at` / `valid_from` / `valid_until` / `occurred_at` / `decided_at`
+一律 UTC：写入时 naive 时间（如裸日期 `2026-11-21`）按 UTC 补齐，带偏移的换算到
+UTC 后存储；API 与 MCP 输出统一为 `Z` 后缀。这样同一输入不会因会话时区不同而落成
+不同时刻（生产库会话时区是 +08）。`source[].captured_at` 以原始文本存 JSONB，
+保留调用方给的偏移，不在这条归一范围内。
 
 ## 3. kind 枚举
 

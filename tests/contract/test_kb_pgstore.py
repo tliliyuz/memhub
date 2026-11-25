@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from memhub.contract import Kind, NodeFrontmatter, Predicate, SourceKind, SourceRef, Tier
 from memhub.kb.errors import TargetUnavailable
@@ -64,6 +64,46 @@ async def test_write_requires_registered_active_project(store: PgKnowledgeStore)
     await store.archive_project(PROJECT)
     with pytest.raises(ProjectMissing):
         await store.write("demo/fact/beta", _node("demo/fact/beta"), BODY)
+
+
+async def test_runtime_write_normalizes_naive_time_to_utc(kb_schema: str, test_dsn: str) -> None:
+    """API/MCP 传入裸日期时，运行态写入也必须落 UTC 零点。
+
+    会话时区钉成 +08 复现生产库；模型边界不归一就会存成前一天 16:00Z。
+    """
+    engine = create_async_engine(
+        test_dsn.replace("postgresql://", "postgresql+psycopg://", 1),
+        connect_args={"options": f"-csearch_path={kb_schema} -ctimezone=Asia/Shanghai"},
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = PgKnowledgeStore(create_sessionmaker(engine))
+        await store.register_project(PROJECT, name="演示库")
+        node = NodeFrontmatter.model_validate(
+            {
+                "id": "demo/fact/date-only",
+                "project": PROJECT,
+                "kind": "fact",
+                "title": "裸日期",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "valid_until": "2026-11-21",
+            }
+        )
+
+        await store.write("demo/fact/date-only", node, BODY)
+
+        async with AsyncSession(engine) as session:
+            stored = (
+                await session.execute(
+                    select(KbNode.valid_until).where(KbNode.id == "demo/fact/date-only")
+                )
+            ).scalar_one()
+        assert stored is not None
+        assert stored.astimezone(UTC) == datetime(2026, 11, 21, tzinfo=UTC)
+    finally:
+        await engine.dispose()
 
 
 async def test_node_round_trip_keeps_body_and_fields(store: PgKnowledgeStore) -> None:

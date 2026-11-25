@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -117,6 +117,27 @@ class NodeFrontmatter(BaseModel):
     occurred_at: datetime | None = None
     decided_at: datetime | None = None
     status: QuestionStatus | None = None
+
+    @field_validator(
+        "created_at",
+        "updated_at",
+        "valid_from",
+        "valid_until",
+        "occurred_at",
+        "decided_at",
+        mode="after",
+    )
+    @classmethod
+    def normalize_time_to_utc(cls, value: datetime | None) -> datetime | None:
+        """时间一律 UTC：naive 按 UTC 补齐，带偏移的换算到 UTC。
+
+        目标列是 `timestamptz`，PG 遇到 naive 值会按**会话时区**解释（生产 +08）；
+        裸日期不归一就会存成前一天 16:00Z。`source[].captured_at` 存在 JSONB 里，
+        与既有行的文本比对绑定，不在本条归一范围内。
+        """
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
     @model_validator(mode="after")
     def check_kind_requirements(self) -> NodeFrontmatter:

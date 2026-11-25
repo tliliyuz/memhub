@@ -55,6 +55,32 @@ def test_deprecated_requires_superseded_by_or_reason() -> None:
     assert reason_only.superseded_by is None
 
 
+def test_naive_times_are_normalized_to_utc() -> None:
+    """时间字段一律 UTC（node-schema §2）。
+
+    裸日期（`valid_until: '2026-11-21'`）解析出来是 naive datetime；若不归一，
+    写进 `timestamptz` 会按会话时区解释，API/MCP 输入与库里读回就不是同一时刻。
+    """
+    node = NodeFrontmatter(
+        **_base(
+            created_at="2026-11-18",
+            updated_at="2026-11-18T08:00:00+08:00",
+            valid_from="2026-11-01",
+            valid_until="2026-11-21",
+            occurred_at="2026-11-18T10:00:00",
+            decided_at="2026-11-18T09:00:00+08:00",
+        )
+    )
+
+    assert node.created_at == datetime(2026, 11, 18, tzinfo=UTC)
+    assert node.updated_at == datetime(2026, 11, 18, tzinfo=UTC)
+    assert node.valid_from == datetime(2026, 11, 1, tzinfo=UTC)
+    assert node.valid_until == datetime(2026, 11, 21, tzinfo=UTC)
+    assert node.occurred_at == datetime(2026, 11, 18, 10, tzinfo=UTC)
+    assert node.decided_at == datetime(2026, 11, 18, 1, tzinfo=UTC)
+    assert all(item.tzinfo is UTC for item in (node.created_at, node.updated_at, node.valid_until))
+
+
 def test_batch_file_rejects_reversed_offsets() -> None:
     with pytest.raises(ValidationError):
         BatchFile(
