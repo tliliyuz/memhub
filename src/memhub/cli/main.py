@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anyio import Path as AsyncPath
 
@@ -29,6 +30,9 @@ from memhub.worker.render import (
     render_session_blocks,
     truncate_blocks,
 )
+
+if TYPE_CHECKING:
+    from memhub.kb.migrate_db import VerifyDiff
 
 SKELETON_PAGES = {"schema.md", "log.md", "purpose.md"}
 DEVICE_ID_RE = re.compile(
@@ -129,6 +133,30 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--name", required=True)
     provision.add_argument("--platform", required=True)
 
+    migrate_kb = sub.add_parser(
+        "migrate-kb", help="一次性把 markdown 真源迁移到 PG（默认 dry-run，只读）"
+    )
+    migrate_kb.add_argument("--knowledge-dir", default=None)
+    migrate_kb.add_argument("--dsn", default=None, help="缺省取 MEMHUB_KB_DB_URL（运行时角色）")
+    migrate_kb.add_argument(
+        "--schema",
+        default=None,
+        help="目标 schema（search_path）；缺省不设，生产用专用 schema kb",
+    )
+    migrate_kb.add_argument("--dry-run", action="store_true", help="只解析与统计，不写库不删文件")
+    migrate_kb.add_argument("--verify-only", action="store_true", help="与库内数据逐项比对")
+    migrate_kb.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="校验通过且已备份后删除 markdown 真源（默认不删）",
+    )
+    migrate_kb.add_argument(
+        "--archives",
+        choices=["skip", "migrate"],
+        default="skip",
+        help="整库归档快照的处理方式；dry-run 下两者都只统计",
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -155,6 +183,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "api": _api,
         "kb": _kb,
         "provision-device": _provision_device,
+        "migrate-kb": _migrate_kb,
     }
     handler = handlers.get(args.command or "")
     if handler is None:
@@ -583,6 +612,117 @@ async def _run_server(
         )
     )
     await server.serve()
+
+
+async def _migrate_kb(args: argparse.Namespace) -> int:
+    """一次性迁移入口（规格 §5）：默认只 dry-run，写库需 DSN，删真源需校验通过。
+
+    前三步（解析、阻塞判定、差异清单）只读磁盘；`--verify-only` 与写库走
+    `memhub.kb.migrate_db`。任何「没做」都显式失败，不报告成通过。
+    """
+    from memhub.kb import migrate
+
+    root = Path(await AsyncPath(_knowledge_dir(args.knowledge_dir)).resolve())
+    if not await AsyncPath(root).is_dir():
+        print(f"知识库目录不存在: {root}", file=sys.stderr)
+        return 2
+    if args.delete_source and not args.verify_only:
+        print("--delete-source 必须与 --verify-only 同时使用", file=sys.stderr)
+        return 2
+
+    plan = await migrate.parse_tree(root)
+    diff = plan.diff.as_dict()
+    print(
+        f"解析结果: projects={len(plan.projects)} nodes={len(plan.nodes)} edges={len(plan.edges)}"
+    )
+    print(f"归档与回收站: archives={len(plan.archives)} trash_events={len(plan.trash_events)}")
+    if diff["unregistered_projects"]:
+        print(f"未登记库（将按目录导入）: {', '.join(diff['unregistered_projects'])}")
+    if diff["missing_projects"]:
+        print(f"已登记但目录不存在: {', '.join(diff['missing_projects'])}")
+    if diff["dangling_edges"]:
+        print(f"悬空边（原样迁入）: {len(diff['dangling_edges'])} 条")
+    for label, key in (
+        ("无效节点", "invalid_nodes"),
+        ("无效边", "invalid_edges"),
+        ("无效归档", "invalid_archives"),
+        ("无表列的字段", "unsupported_fields"),
+        ("无法识别的文件", "unknown_files"),
+        ("重复节点 id", "duplicate_ids"),
+    ):
+        if diff[key]:
+            print(f"{label}: {len(diff[key])} 处")
+
+    if plan.blocking:
+        reasons = []
+        if plan.diff.pending_archive:
+            reasons.append("存在未完成的归档事务（pending.json）")
+        if plan.diff.registry_error:
+            reasons.append(f"登记文件损坏：{plan.diff.registry_error}")
+        if plan.diff.duplicate_ids:
+            reasons.append("存在重复节点 id")
+        if plan.diff.invalid_archives:
+            reasons.append("归档数据损坏")
+        print(f"迁移被阻断：{'；'.join(reasons)}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        return 0
+
+    dsn = (args.dsn or os.environ.get("MEMHUB_KB_DB_URL", "")).strip()
+    if not dsn:
+        print("缺少 MEMHUB_KB_DB_URL（运行时角色 DSN），无法写库", file=sys.stderr)
+        return 2
+    from memhub.kb import migrate_db
+    from memhub.kb.session import create_engine_from_env
+
+    # 迁移工具按调用方给的 DSN 走，不强制生产 schema `kb`：目标 schema 由
+    # search_path 决定，测试/联调可以指向独立 schema。
+    engine = create_engine_from_env(dsn=dsn, schema=args.schema)
+    try:
+        if args.verify_only:
+            stored = await migrate_db.read_stored(engine)
+            report = migrate_db.diff_plan(plan, stored, archives=args.archives)
+            _print_verify_report(report)
+            if not report.ok:
+                return 1
+            print("校验通过：库内内容与磁盘真源逐节点、逐边一致")
+            if args.delete_source:
+                print(
+                    "--delete-source 的删除动作需负责人授权后在服务器执行；本次未删除任何文件",
+                    file=sys.stderr,
+                )
+                return 3
+            return 0
+        await migrate_db.apply_plan(engine, plan, archives=args.archives)
+        print(
+            f"写入完成: projects={len(plan.projects)} nodes={len(plan.nodes)} "
+            f"edges={len(plan.edges)} archives={len(plan.archives) if args.archives == 'migrate' else 0}"
+        )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+def _print_verify_report(report: VerifyDiff) -> None:
+    """逐项打印差异；空清单不占终端行。"""
+    payload = report.as_dict()
+    labels = {
+        "missing_projects": "库内缺少的知识库",
+        "extra_projects": "库内多出的知识库",
+        "changed_projects": "内容不一致的知识库",
+        "missing_nodes": "库内缺少的节点",
+        "extra_nodes": "库内多出的节点",
+        "changed_nodes": "内容不一致的节点",
+        "missing_edges": "库内缺少的边",
+        "extra_edges": "库内多出的边",
+        "archive_mismatches": "归档快照不一致",
+    }
+    for key, label in labels.items():
+        if payload[key]:
+            print(f"{label}: {len(payload[key])} 处", file=sys.stderr)
+            for item in payload[key]:
+                print(f"  {item}", file=sys.stderr)
 
 
 async def _kb(args: argparse.Namespace) -> int:

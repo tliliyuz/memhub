@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 import shutil
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ KB_NODE_COLUMNS = {
     "source",
     "valid_from",
     "valid_until",
+    "supersedes",
     "superseded_by",
     "deprecated_reason",
     "occurred_at",
@@ -153,8 +155,27 @@ async def test_revision_is_stable_16_hex_and_content_addressed(tmp_path: Path) -
     assert node_revision(changed) != alpha["revision"]
 
 
-async def test_supersedes_without_target_column_is_reported(tmp_path: Path) -> None:
-    """`NodeFrontmatter.supersedes` 在 `kb_nodes` 没有对应列：非空即数据损失，必须显性报出。"""
+def test_revision_is_identical_for_the_same_instant_in_any_offset() -> None:
+    """PG 按会话时区回读 `timestamptz`；同一条记录在磁盘与库内必须算出同一哈希。"""
+    disk = {
+        "id": "demo/fact/alpha",
+        "valid_from": datetime(2026, 1, 1, 8, 0, tzinfo=timezone(timedelta(hours=8))),
+    }
+    stored = {"id": "demo/fact/alpha", "valid_from": datetime(2026, 1, 1, 0, 0, tzinfo=UTC)}
+
+    assert node_revision(disk) == node_revision(stored)
+
+
+def test_revision_treats_naive_timestamp_as_utc() -> None:
+    """库里不带时区的时间按 UTC 存储；校验侧不能因为少了 `+00:00` 就判不一致。"""
+    naive = {"id": "demo/fact/alpha", "valid_from": datetime(2026, 1, 1, 0, 0)}
+    aware = {"id": "demo/fact/alpha", "valid_from": datetime(2026, 1, 1, 0, 0, tzinfo=UTC)}
+
+    assert node_revision(naive) == node_revision(aware)
+
+
+async def test_supersedes_maps_to_target_column_without_data_loss(tmp_path: Path) -> None:
+    """`supersedes` 在 `kb_nodes` 有正式列，必须原样落到行里且参与内容哈希。"""
     root = _tree(tmp_path)
     path = root / "demo" / "fact" / "alpha.md"
     path.write_text(
@@ -164,10 +185,10 @@ async def test_supersedes_without_target_column_is_reported(tmp_path: Path) -> N
 
     plan = await parse_tree(root)
 
-    assert plan.diff.unsupported_fields, "supersedes 非空必须出现在差异里"
-    entry = plan.diff.unsupported_fields[0]
-    assert entry["node_id"] == "demo/fact/alpha"
-    assert entry["field"] == "supersedes"
+    alpha = next(node for node in plan.nodes if node["id"] == "demo/fact/alpha")
+    assert alpha["supersedes"] == ["demo/fact/old"]
+    assert plan.diff.unsupported_fields == (), "已有正式列，不应再报数据损失"
+    assert node_revision({**alpha, "supersedes": []}) != alpha["revision"]
 
 
 async def test_trash_nodes_are_archived_not_dropped(tmp_path: Path) -> None:
@@ -185,6 +206,15 @@ async def test_trash_nodes_are_archived_not_dropped(tmp_path: Path) -> None:
     assert [node["id"] for node in archived] == ["demo/fact/alpha"]
     assert str(archived[0]["archived_at"]).startswith("20")
     assert plan.diff.invalid_trash == ()
+    # `.meta.json` 与节点文件同目录；不读它，删除审计（actor/reason）就丢了。
+    assert plan.trash_events == [
+        {
+            "node_id": "demo/fact/alpha",
+            "archived_at": archived[0]["archived_at"],
+            "actor": "ui:test",
+            "reason": "合成删除",
+        }
+    ]
 
 
 async def test_archive_snapshot_is_read_and_verified(tmp_path: Path) -> None:
@@ -259,6 +289,36 @@ async def test_pending_archive_blocks_migration(tmp_path: Path) -> None:
     assert plan.blocking is True
 
 
+async def test_projection_marker_alone_does_not_block(tmp_path: Path) -> None:
+    """`projection-dirty` 只表示投影待重建：迁移后投影整体退役，不该阻断写库。"""
+    root = _tree(tmp_path)
+    marker = root / "_kb_archives" / "projection-dirty"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+
+    plan = await parse_tree(root)
+
+    assert plan.diff.pending_archive is False
+    assert plan.blocking is False
+
+
+async def test_completed_archive_does_not_block(tmp_path: Path) -> None:
+    """整库归档成功后 `projection-dirty` 会留在盘上，直到投影重建。
+
+    归档本身已完成（`active.json` 与快照都在），迁移必须能继续；把这两个状态
+    混为一谈会让「归档过任何库」的服务器永远无法迁移。
+    """
+    root = _tree(tmp_path)
+    await catalog.delete_kb(KnowledgeStore(root), "demo", actor="ui:test")
+    assert (root / "_kb_archives" / "projection-dirty").exists()
+
+    plan = await parse_tree(root)
+
+    assert plan.diff.pending_archive is False
+    assert plan.blocking is False
+    assert len(plan.archives) == 1
+
+
 @pytest.mark.parametrize("name", ["demo", "orphan"])
 async def test_project_rows_are_deterministically_revised(tmp_path: Path, name: str) -> None:
     plan = await parse_tree(_tree(tmp_path))
@@ -273,6 +333,76 @@ async def test_nodes_of_unregistered_directory_keep_their_project(tmp_path: Path
 
     for node in plan.nodes:
         assert node["project"] in project_ids, node["id"]
+
+
+async def test_trashed_node_of_archived_kb_keeps_a_parent_project(tmp_path: Path) -> None:
+    """整库归档后目录与登记都消失，但回收站里的节点仍在盘上。
+
+    这些节点的 `project` 外键必须仍能指到行，否则写库时外键失败、迁移整体回滚。
+    归档库的行按 `kb_projects.archived_at` 复现（规格 §3.1），显示名取归档头。
+    """
+    root = _tree(tmp_path)
+    store = KnowledgeStore(root)
+    revision = await manage.node_revision(store, "demo/fact/alpha")
+    assert revision is not None
+    await manage.delete_node(
+        store, "demo/fact/alpha", expected_revision=revision, reason="合成删除", actor="ui:test"
+    )
+    await catalog.delete_kb(store, "demo", actor="ui:test")
+
+    plan = await parse_tree(root)
+
+    projects = {item["id"]: item for item in plan.projects}
+    assert "demo" in projects, "归档库也要建 project 行，否则回收站节点无主"
+    demo = projects["demo"]
+    assert demo["archived_at"] is not None
+    assert demo["name"] == "演示库"
+    assert "demo/fact/alpha" in {node["id"] for node in plan.nodes}
+    project_ids = {item["id"] for item in plan.projects}
+    for node in plan.nodes:
+        assert node["project"] in project_ids, node["id"]
+
+
+async def test_restored_archive_folder_does_not_block(tmp_path: Path) -> None:
+    """恢复会删掉 `active.json` 但留下 `snapshot.zip` 与目录。
+
+    归档是否仍然生效由 `active.json` 决定（`catalog.list_archives` 同口径）；
+    已恢复的归档只剩历史快照，不是坏包，把它报成 `invalid_archives` 会让
+    「归档过再恢复」的服务器永远无法迁移。
+    """
+    root = _tree(tmp_path)
+    store = KnowledgeStore(root)
+    archived = await catalog.delete_kb(store, "demo", actor="ui:test")
+    await catalog.restore_kb(store, archived["archive_id"])
+    assert not (root / "_kb_archives" / archived["archive_id"] / "active.json").exists()
+    assert (root / "_kb_archives" / archived["archive_id"] / "snapshot.zip").exists()
+
+    plan = await parse_tree(root)
+
+    assert plan.diff.invalid_archives == ()
+    assert plan.blocking is False
+    assert plan.archives == []
+    demo = next(item for item in plan.projects if item["id"] == "demo")
+    assert demo["archived_at"] is None
+
+
+async def test_project_timestamps_follow_its_nodes_not_scan_time(tmp_path: Path) -> None:
+    """登记里没有 `created_at` 时不能拿「扫描时刻」充数：那会让每次解析得出不同的
+    项目哈希，写库后 `--verify-only` 永远报内容不一致。"""
+    plan = await parse_tree(_tree(tmp_path))
+
+    demo = next(item for item in plan.projects if item["id"] == "demo")
+    assert demo["created_at"] == datetime(2026, 1, 2, 3, 4, 5, 6, tzinfo=UTC)
+    assert demo["updated_at"] == datetime(2026, 1, 4, 0, 0, 0, tzinfo=UTC)
+
+
+async def test_project_revision_is_stable_across_parses(tmp_path: Path) -> None:
+    first = await parse_tree(_tree(tmp_path))
+    second = await parse_tree(_tree(tmp_path, "knowledge-again"))
+
+    assert [item["revision"] for item in first.projects] == [
+        item["revision"] for item in second.projects
+    ]
 
 
 async def test_registry_entry_created_at_is_carried_over(tmp_path: Path) -> None:

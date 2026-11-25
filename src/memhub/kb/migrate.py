@@ -37,9 +37,10 @@ STAMP_RE = re.compile(r"\d{8}T\d{6}\d*")
 # `_trash/<stamp>/<node_id>.md` 里的 node_id 含 `/`，stamp 是纯数字段时间。
 NODE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}/[a-z0-9]+/[a-z0-9][a-z0-9-]{0,127}$")
 
-# 目标表没有对应列的 frontmatter 字段；非空出现即进 diff.unsupported_fields。
-# `id`/`project` 由路径与首段推导、迁移后是冗余列，`supersedes` 本轮无表列。
-UNSUPPORTED_FIELDS = ("supersedes",)
+# 契约里已有、但目标表暂无对应列的 frontmatter 字段；非空出现即数据损失，进
+# diff.unsupported_fields。`supersedes` 已补列（规格 §3.2），故当前为空；
+# 机制保留：将来 `node-schema.md` 新增字段而表未跟随时，迁移必须显性报出而不是静默丢。
+UNSUPPORTED_FIELDS: tuple[str, ...] = ()
 
 
 @dataclass
@@ -102,6 +103,22 @@ class MigrationPlan:
         )
 
 
+def _canonical(value: object) -> object:
+    """时间统一成 UTC ISO 文本；其余结构按原样递归。
+
+    PG 的 `timestamptz` 按会话时区回读，未带时区的一律按 UTC 存。哈希必须在
+    磁盘侧与库内侧得到同一个值，所以不能依赖 `datetime` 的 `str()` 拼法。
+    """
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).isoformat()
+    if isinstance(value, dict):
+        return {key: _canonical(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical(item) for item in value]
+    return value
+
+
 def node_revision(record: dict[str, Any]) -> str:
     """行内容哈希的前 16 位小写十六进制；与 `kb_nodes.revision` 同口径。
 
@@ -109,14 +126,12 @@ def node_revision(record: dict[str, Any]) -> str:
     同一个值；`snapshot_sha256` 这类解析期辅助键不参与。
     """
     payload = {
-        key: value for key, value in record.items() if key not in ("snapshot_sha256", "revision")
+        key: _canonical(value)
+        for key, value in record.items()
+        if key not in ("snapshot_sha256", "revision")
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _project_revision(kb_id: str, created_at: datetime, updated_at: datetime) -> str:
@@ -159,8 +174,10 @@ async def _registry(root: Path, diff: MigrationDiff) -> dict[str, dict[str, Any]
     return kbs
 
 
-def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str, Any]:
-    """`NodeFrontmatter` + 正文 → `kb_nodes` 行；列名对齐规格 §3.2。"""
+def _frontmatter_row(
+    node_id: str, node: NodeFrontmatter, body: str
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """`NodeFrontmatter` + 正文 → (`kb_nodes` 行, 无列字段清单)；列名对齐规格 §3.2。"""
     row: dict[str, Any] = {
         "id": node_id,
         "project": node.project,
@@ -174,6 +191,7 @@ def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str
         "source": [item.model_dump(mode="json") for item in node.source],
         "valid_from": node.valid_from,
         "valid_until": node.valid_until,
+        "supersedes": list(node.supersedes),
         "superseded_by": node.superseded_by,
         "deprecated_reason": node.deprecated_reason,
         "occurred_at": node.occurred_at,
@@ -187,10 +205,10 @@ def _frontmatter_row(node_id: str, node: NodeFrontmatter, body: str) -> dict[str
     unsupported = [
         {"node_id": node_id, "field": name} for name in UNSUPPORTED_FIELDS if getattr(node, name)
     ]
-    return row | {"_unsupported": unsupported}
+    return row, unsupported
 
 
-async def _trash_row(root: Path, relative: Path) -> dict[str, Any] | None:
+async def _trash_row(root: Path, relative: Path, diff: MigrationDiff) -> dict[str, Any] | None:
     """`_trash/<stamp>/<node_id>.md` → 软删节点行（`archived_at` = 删除时间）。"""
     stamp_match = STAMP_RE.fullmatch(relative.parts[1])
     node_id = Path(*relative.parts[2:]).with_suffix("").as_posix()
@@ -208,14 +226,15 @@ async def _trash_row(root: Path, relative: Path) -> dict[str, Any] | None:
         node = NodeFrontmatter.model_validate(metadata)
     except ValueError:
         return None
-    row = _frontmatter_row(node_id, node, post.content)
+    row, unsupported = _frontmatter_row(node_id, node, post.content)
+    diff.unsupported_fields = (*diff.unsupported_fields, *unsupported)
     row["archived_at"] = stamp
-    row["revision"] = ""
     return row
 
 
-async def _trash_meta(relative: Path) -> dict[str, Any]:
-    path = relative.with_suffix(".meta.json")
+async def _trash_meta(root: Path, relative: Path) -> dict[str, Any]:
+    """`_trash/<stamp>/<node_id>.meta.json` 与节点文件同目录；`relative` 相对 `root`。"""
+    path = root / relative.with_suffix(".meta.json")
     if not await AsyncPath(path).is_file():
         return {}
     try:
@@ -253,8 +272,8 @@ async def _scan_nodes(root: Path, diff: MigrationDiff) -> tuple[list[dict[str, A
                 {"node_id": node_id, "frontmatter_project": node.project},
             )
         projects.add(relative.parts[0])
-        row = _frontmatter_row(node_id, node, post.content)
-        diff.unsupported_fields = (*diff.unsupported_fields, *row.pop("_unsupported"))
+        row, unsupported = _frontmatter_row(node_id, node, post.content)
+        diff.unsupported_fields = (*diff.unsupported_fields, *unsupported)
         if node_id in seen:
             diff.duplicate_ids = (*diff.duplicate_ids, node_id)
             continue
@@ -271,7 +290,7 @@ async def _scan_nodes(root: Path, diff: MigrationDiff) -> tuple[list[dict[str, A
     return nodes, sorted(projects)
 
 
-def _edges(
+async def _edges(
     root: Path,
     projects: list[str],
     node_ids: set[str],
@@ -282,12 +301,14 @@ def _edges(
     seen: set[tuple[str, str, str]] = set()
     for project in projects:
         path = root / project / "_edges.jsonl"
-        if not path.is_file():
+        if not await AsyncPath(path).is_file():
             continue
+        stat = await AsyncPath(path).stat()
         # `_edges.jsonl` 每行没有时间；用文件 mtime 作为 `kb_edges.created_at`
         # （not null 列必须有值），并在文档里写清这是近似来源。
-        recorded_at = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        recorded_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
+        text = await AsyncPath(path).read_text(encoding="utf-8")
+        for lineno, line in enumerate(text.splitlines(), 1):
             if not line.strip():
                 continue
             try:
@@ -339,11 +360,11 @@ async def _scan_trash(
         return rows, events
     async for path in AsyncPath(base).rglob("*.md"):
         relative = Path(path).relative_to(root)
-        row = await _trash_row(root, relative)
+        row = await _trash_row(root, relative, diff)
         if row is None:
             diff.invalid_trash = (*diff.invalid_trash, relative.as_posix())
             continue
-        meta = await _trash_meta(relative)
+        meta = await _trash_meta(root, relative)
         events.append(
             {
                 "node_id": row["id"],
@@ -366,13 +387,18 @@ async def _scan_archives(root: Path, diff: MigrationDiff) -> list[dict[str, Any]
         if not archive.ARCHIVE_ID.fullmatch(folder.name):
             continue
         active = await archive.read_optional(root / archive.ARCHIVES / folder.name / "active.json")
+        if active is None:
+            # 归档是否生效以 `active.json` 为准（与 `catalog.list_archives` 同口径）：
+            # 恢复成功会删掉它、只留下 `snapshot.zip`，那是历史快照不是坏包，
+            # 报成 invalid_archives 会让「归档过再恢复」的服务器永远无法迁移。
+            continue
         snapshot = await archive.read_optional(
             root / archive.ARCHIVES / folder.name / "snapshot.zip"
         )
-        if active is None or snapshot is None:
+        if snapshot is None:
             diff.invalid_archives = (
                 *diff.invalid_archives,
-                {"archive_id": folder.name, "error": "active.json 或 snapshot.zip 缺失"},
+                {"archive_id": folder.name, "error": "active.json 在但 snapshot.zip 缺失"},
             )
             continue
         try:
@@ -419,48 +445,20 @@ async def _scan_archives(root: Path, diff: MigrationDiff) -> list[dict[str, Any]
 async def parse_tree(root: Path) -> MigrationPlan:
     """只读扫描 `root`，产出目标表行与差异清单；不做任何写入。"""
     root = Path(root)
-    diff = MigrationDiff(pending_archive=await archive.projection_dirty(root))
+    diff = MigrationDiff(pending_archive=await archive.pending_transaction(root))
     registry = await _registry(root, diff)
 
     active_nodes, dir_projects = await _scan_nodes(root, diff)
     trash_nodes, trash_events = await _scan_trash(root, diff)
-
-    projects: list[dict[str, Any]] = []
-    now = _utc_now()
-    registered = set(registry)
-    for kb_id in sorted(set(dir_projects) | registered):
-        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", kb_id):
-            diff.unknown_files = (*diff.unknown_files, kb_id)
-            continue
-        if kb_id not in dir_projects:
-            diff.missing_projects = (*diff.missing_projects, kb_id)
-            continue
-        meta = registry.get(kb_id, {})
-        if kb_id not in registered:
-            diff.unregistered_projects = (*diff.unregistered_projects, kb_id)
-        # 登记里的 created_at 是真源事实；未登记/缺值时用扫描时刻。
-        created = _parse_time(meta.get("created_at"), now)
-        projects.append(
-            {
-                "id": kb_id,
-                "name": str(meta.get("name") or kb_id),
-                "description": str(meta.get("description") or ""),
-                "revision": "",
-                "created_at": created,
-                "updated_at": created,
-                "archived_at": None,
-            }
-        )
-    for project in projects:
-        project["revision"] = _project_revision(
-            project["id"], project["created_at"], project["updated_at"]
-        )
-
-    node_ids = {row["id"] for row in (*active_nodes, *trash_nodes)}
-    edges = _edges(root, sorted(set(dir_projects)), node_ids, diff)
+    all_nodes = [*active_nodes, *trash_nodes]
     archives = await _scan_archives(root, diff)
 
-    all_nodes = [*active_nodes, *trash_nodes]
+    # 归档先扫：整库归档后目录与登记都没了，但 `_trash` 里的节点仍要落到
+    # `kb_projects` 之外还有外键指向的那一行，项目行必须能按归档头复现。
+    projects = _project_rows(registry, dir_projects, all_nodes, archives, diff)
+    node_ids = {row["id"] for row in all_nodes}
+    edges = await _edges(root, sorted(set(dir_projects)), node_ids, diff)
+
     for row in all_nodes:
         row["revision"] = node_revision(row)
 
@@ -473,3 +471,82 @@ async def parse_tree(root: Path) -> MigrationPlan:
         trash_events=trash_events,
         diff=diff,
     )
+
+
+def _latest_archives(archives: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """每个库取最后一次整库归档；同一库多次归档时以最晚 `deleted_at` 为准。"""
+    latest: dict[str, dict[str, Any]] = {}
+    for row in archives:
+        current = latest.get(row["project"])
+        if current is None or _later(row["deleted_at"], current["deleted_at"]):
+            latest[row["project"]] = row
+    return latest
+
+
+def _later(left: datetime | None, right: datetime | None) -> bool:
+    if right is None:
+        return left is not None
+    return left is not None and left > right
+
+
+def _project_rows(
+    registry: dict[str, dict[str, Any]],
+    dir_projects: list[str],
+    nodes: list[dict[str, Any]],
+    archives: list[dict[str, Any]],
+    diff: MigrationDiff,
+) -> list[dict[str, Any]]:
+    """登记 + 目录 + 归档 + 节点归属 → `kb_projects` 行。
+
+    任何节点行的 `project` 都必须有行：`kb_nodes.project` 有外键，漏建会让
+    写库整体回滚。整库归档后目录与登记都消失，归档头就是剩下的唯一事实来源
+    （`name`、`deleted_at` → `archived_at`，规格 §3.1/§3.5）。
+
+    时间来源必须是磁盘上的事实，不能用扫描时刻：否则每次解析得到不同的
+    `revision`，写库后 `--verify-only` 永远报「内容不一致」。登记缺
+    `created_at` 时回落到该库节点时间的极值；仍无节点时用纪元时间占位。
+    """
+    created_min: dict[str, datetime] = {}
+    updated_max: dict[str, datetime] = {}
+    for node_row in nodes:
+        project = node_row["project"]
+        created_min[project] = min(
+            created_min.get(project, node_row["created_at"]), node_row["created_at"]
+        )
+        updated_max[project] = max(
+            updated_max.get(project, node_row["updated_at"]), node_row["updated_at"]
+        )
+
+    registered = set(registry)
+    archived = _latest_archives(archives)
+    node_projects = set(created_min)
+    rows: list[dict[str, Any]] = []
+    for kb_id in sorted(set(dir_projects) | registered | set(archived) | node_projects):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", kb_id):
+            diff.unknown_files = (*diff.unknown_files, kb_id)
+            continue
+        archive_row = archived.get(kb_id)
+        if kb_id not in dir_projects and archive_row is None and kb_id not in node_projects:
+            diff.missing_projects = (*diff.missing_projects, kb_id)
+            continue
+        meta = registry.get(kb_id, {})
+        if kb_id in dir_projects and kb_id not in registered:
+            diff.unregistered_projects = (*diff.unregistered_projects, kb_id)
+        fallback = created_min.get(kb_id, datetime(1970, 1, 1, tzinfo=UTC))
+        created = _parse_time(meta.get("created_at"), fallback)
+        updated = max(created, updated_max.get(kb_id, created))
+        archived_at = archive_row["deleted_at"] if archive_row is not None else None
+        if archived_at is not None:
+            updated = max(updated, archived_at)
+        row: dict[str, Any] = {
+            "id": kb_id,
+            "name": str(meta.get("name") or (archive_row or {}).get("name") or kb_id),
+            "description": str(meta.get("description") or ""),
+            "revision": "",
+            "created_at": created,
+            "updated_at": updated,
+            "archived_at": archived_at,
+        }
+        row["revision"] = _project_revision(kb_id, created, updated)
+        rows.append(row)
+    return rows

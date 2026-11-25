@@ -34,7 +34,8 @@ pnpm typecheck
 构建产物 `dist/` 由 kb-api 托管：
 
 ```bash
-memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json --web-dist web/dist
+memhub kb --graph-out kb/kg.json --web-dist web/dist --data-dir data
+# 真源是 PostgreSQL（MEMHUB_KB_DB_URL，经 .env 注入）；没有 --knowledge-dir
 ```
 
 图谱数据来自 `GET /api/v1/kb/graph?project=<库>`：节点数 ≤60 时直接显示标签，更大的图只在枢纽/命中搜索/悬停邻域时显示标签；节点按 kind 上色、按度数定大小，支持类型过滤、隐藏废弃/孤立、搜索与重新布局。全局图谱（`/graph`）把各库子图合并显示，按知识库配色。
@@ -42,8 +43,8 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json --web-dist web/dist
 ## 与后端的分工
 
 - 前端不持有任何真源状态：列表/详情来自 kb-api，写操作带 `expected_revision`（冲突 409 / `1010` 时提示刷新）。
-- 删除是归档到 `_trash/`；「废弃」不删文件，只改 tier 与 `superseded_by`。
-- 投影（`kg.json`，供 MCP / semantica explorer 使用）由后端重建，前端只触发 `POST /api/v1/kb/rebuild`；管理台的图谱不依赖它，直接读 `/api/v1/kb/graph`。
+- 删除是软删（`kb_nodes.archived_at` + 修订快照）；「废弃」不删节点，只改 tier 与 `superseded_by`。
+- 投影（`kg.json`，仅供旧 semantica explorer 与投影状态接口）由后端重建，前端只触发 `POST /api/v1/kb/rebuild`；管理台图谱直读 `GET /api/v1/kb/graph`（PG `kb_*` 表），不依赖它。
 - 接口细节见 [../docs/contracts/kb-admin-api.md](../docs/contracts/kb-admin-api.md)。
 
 ## 目录速览

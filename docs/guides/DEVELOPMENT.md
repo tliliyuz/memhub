@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-21 |
+| 最后更新 | 2026-11-25 |
 | 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
 | 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../architecture.md) 与 [contracts](../contracts/README.md)） |
 
@@ -19,8 +19,8 @@
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer 依赖；验证 MCP HTTP 再追加 ,mcp-http
-cp .env.example .env
+python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
+cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
 ```
 
 ## 2. 目录分层与归属门禁
@@ -31,9 +31,10 @@ src/memhub/
   queue/      raw_store 落盘与配额（ingest 采集、kb 上传共用）
   ingest/     鉴权、游标、幂等、入队
   worker/     value_filter / extract / merge
-  kb/         真源读写、检索、投影重建
+  kb/         PG 存储（kb_*）、检索、投影重建
   mcp/        MCP 工具
   cli/        运维命令
+alembic/      kb_* 的 DDL 版本化（带外执行，门禁同样覆盖）
 tests/
   unit/      纯逻辑
   contract/  契约模型验收
@@ -41,7 +42,7 @@ tests/
 docs/
 scripts/      治理检查脚本
 deploy/       compose / nginx / systemd / daemon.json
-knowledge/    markdown 真源（git）
+knowledge/    markdown 真源的一次性迁移源（迁移后删除，见 §9.1；运行时不再读取）
 prompts/      各 source_type 的抽取 profile
 ```
 
@@ -65,13 +66,16 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|
 | 测试 | `pytest` |
 | 契约测试 | `pytest tests/contract` |
+| PG 契约测试 | 先让 `MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，再 `pytest tests/contract`。未设置时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
 | 检查 | `ruff check .` |
 | 格式 | `ruff format --check .` |
 | 类型 | `python -m mypy src` |
 | 环境键集 | `python scripts/check_env_example_keys.py` |
 | 文档链接与结构 | `python scripts/check_document_format.py` |
-| 启动依赖 | `docker compose -f deploy/compose.yaml up -d` |
+| 启动依赖 | `docker compose -f deploy/compose.yml up -d` |
 | 本机运行 | `memhub --version` |
+
+`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。单独导出这一个键即可，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
 
 本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
@@ -83,6 +87,7 @@ prompts/      各 source_type 的抽取 profile
 | 契约字段 | 契约测试 + 文档同步 |
 | ingest | 单元测试 + 契约测试 + 手工 curl 游标/推送 |
 | worker/kb | 单元测试 + 固定样本回归（同一输入产出同一节点集） |
+| kb 存储 / 迁移 / 契约夹具 | `MEMHUB_TEST_DB_URL` 已设置时的全量 `pytest`：PG 用例按 schema-per-test 建删 schema，未设置时整组 skip，视为**未验证** |
 | MCP 工具或入口 | `pytest tests/unit/test_mcp_read_tools.py tests/contract/test_mcp_http.py`；HTTP 用例需安装 `.[dev,mcp-http]`，未装时整组跳过 |
 | 部署文件 | `docker compose config` + 在临时目录验证 systemd unit 语法 |
 | 治理脚本 | 全部脚本 + 在临时仓库验证能检出目标违规 |
@@ -125,32 +130,59 @@ worktree 闭环（硬约束）：
 - 时间一律带时区 UTC。
 - LLM 调用参数（模型、max_tokens）从配置读，不写死在函数里。
 
-## 9. 端到端最小闭环（会话 → 真源 → 图谱页）
+## 9. 端到端最小闭环（会话 → PG 真源 → 管理台）
+
+前置：`.env` 里 `MEMHUB_KB_DB_URL` 指向一个可写的 `kb_*` 库（本地开发用 `memhub_dev` 的独立 schema，
+生产用 `memhub_prod` 的 `kb`）。缺该键时每个运行入口都抛 `KbDsnMissing` 直接失败——知识没有文件/内存退路
+（[ADR-0013](../decisions/ADR-0013-postgres-source-of-truth.md)）。
 
 ```bash
-# 1) 抽取：会话 jsonl → knowledge/<project>/<kind>/<slug>.md
+# 0) 建表：Alembic 用迁移角色带外执行（不在任何服务启动时跑）
+MEMHUB_KB_MIGRATE_DB_URL=<迁移角色 DSN> alembic -c alembic.ini upgrade head
+# 1) 抽取：会话 jsonl → kb_nodes / kb_edges（库必须已登记且未归档）
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main ingest \
-  --path .scratch/sessions --profile sessions --project memhub --limit 3
-# 2) 投影：markdown 真源 → semantica ContextGraph
+  --path .scratch/sessions --profile sessions --project memhub --limit 3 --create-project
+# 2) 投影：库里 → kg.json（只供旧 explorer 与 /api/v1/kb/projection 状态，管理台图谱页直读 PG）
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main project --out kb/kg.json
-# 3) 看图
-PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main serve --graph kb/kg.json --port 8011 --no-browser
-#    → http://127.0.0.1:8011/ ，页面加载后点 “Open Semantica Explorer”
+# 3) 管理台：http://127.0.0.1:8701/
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb \
+  --graph-out kb/kg.json --web-dist web/dist --data-dir data
 ```
 
-`serve` 只绑 `127.0.0.1`，并自动为子进程补齐 explorer 的运行环境：`PYTHONUTF8=1`、
-`PYTHONIOENCODING=utf-8`（否则 Windows GBK 在启动日志的 `✓` 上崩）、
-`SEMANTICA_ALLOW_ANONYMOUS=true`（否则 API 报 “Server is not configured for authentication”）。
-已显式设置的同名环境变量优先，不会被覆盖。
+- `ingest` 只写提取出的节点，来源是本地文件；真源本身仍是库。`--create-project` 等价于先在管理台建库。
+- `kb/kg.json` 是投影，随时可从库重建，不入库；MCP 与管理台都直读 `kb_*` 表，不读它。
+- `serve`（旧 semantica explorer）仍可用来看投影，但它是 ADR-0013 后果里标注的待删项，不作为验收入口；
+  管理台的 `/graph` 直接读 `GET /api/v1/kb/graph`，不受影响。
+- 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
 
-产物不入库：`kb/kg.json` 是投影，随时可从 PG `kb_*` 真源重建；`knowledge/` 下的 markdown 只作一次性迁移源。
-页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
+### 9.1 一次性迁移（markdown → PostgreSQL）与归档恢复
+
+```bash
+# 目标库由 --dsn 或 MEMHUB_KB_DB_URL 决定。生产角色在数据库侧已把默认 search_path 设为 kb，
+# 不传 --schema 即落 kb；--schema 只在测试/联调里覆盖 search_path（与 Alembic 同一口径）。
+# 1) 只读统计：不写库、不删文件
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
+  --knowledge-dir ./knowledge --dry-run
+# 2) 写库：单事务、按 id / 边三元组 upsert，可重复运行
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
+  --knowledge-dir ./knowledge --archives migrate
+# 3) 逐节点、逐边比对内容哈希；不一致非 0 退出
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
+  --knowledge-dir ./knowledge --archives migrate --verify-only
+```
+
+- `--archives migrate` 必须与第 2 步一致：迁移后 markdown 要删除，`kb_archives.snapshot` 是归档快照的唯一副本；
+  默认的 `skip` 只统计不迁，会让归档库在库里缺快照。`--dry-run` 下两种取值都只统计。
+- `--delete-source` 只接受与 `--verify-only` 同时使用，且校验通过后仍不执行删除（返回 3）：`pg_dump` 与
+  `knowledge/` 打包备份、删除动作都由负责人在服务器上执行或明确授权（ADR-0013 §9）。
+- 迁移前若 `knowledge/_kb_archives/pending.json` 存在，先用 `memhub recover-kb-archive --knowledge-dir ./knowledge`
+  续做未完成的归档事务；它没解决就不要开始迁移（迁移会显式阻断）。
 
 ## 10. MCP 检索服务（stdio 与 HTTP）
 
 ```bash
 # 直接跑：每行一条 JSON-RPC 2.0，stdout 只放协议，日志走 stderr
-# 必须先配 MEMHUB_KB_DB_URL（运行入口强制 PG，缺失启动失败）
+# 必须先配 MEMHUB_KB_DB_URL（运行入口强制 PG，缺失启动失败）；知识取自 kb_* 表，不再传 --knowledge-dir
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main mcp
 
 # 挂到 Claude Code（本机当前目录）
@@ -172,7 +204,7 @@ claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp
 python -m pip install -e ".[dev,mcp-http]"     # 官方 MCP Python SDK，只有 HTTP 入口需要
 MEMHUB_MCP_GRANTS='[{"sha256":"<令牌的 SHA-256>","scope":"mcp:read",
   "expires_at":"<UTC ISO 时间>","projects":["<库 id>"]}]' \
-  PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb
+  PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb --web-dist web/dist
 # 客户端：POST http://127.0.0.1:8701/mcp，Authorization: Bearer <原始令牌>
 ```
 
