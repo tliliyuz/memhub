@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-11-25（`.env.example` 键名同步到 `.env`）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增硬约束：`.env.example` 新增或重命名键名时，必须在同一次变更里把该键同步写入本机 `.env`，值未知就先留空（`KEY=`），不得猜测值或沿用其他键的值。`.env` 被 Git 忽略，值不进仓库。ADR 检查：未命中（只约束本机环境文件的维护动作，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。该规则只约束此后的变更，不回填既有缺口。
+
 ## 2026-11-25（投影子系统下线：图谱与检索直读 PG）
 
 - `refactor(kb)`：删除 `memhub/kb/projection.py` 与 `tests/contract/test_kb_projection_pg.py`；kb-api 去掉 `GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `_GraphRestarter`，`healthz` 改为只返回 `{ok, store, nodes}`（`store` 恒为 `pg`）。`archive.projection_dirty()` / `clear_projection_dirty()` 与 `PgKnowledgeStore.latest_write()` 一并移除；`archive.MARKER` 保留为历史 journal 的最后一个步骤，恢复流程按原样重放。
