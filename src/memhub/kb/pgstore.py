@@ -29,7 +29,7 @@ from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from memhub.contract import Edge, NodeFrontmatter, Predicate, valid_project
 from memhub.kb.errors import (
@@ -133,11 +133,25 @@ class PgKnowledgeStore:
 
     resolve_short_aliases = True
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], *, engine: AsyncEngine | None = None
+    ) -> None:
         self.sessions = sessions
+        self._engine = engine
         self._scope: ContextVar[AsyncSession | None] = ContextVar(
             f"kb_pg_scope_{id(self)}", default=None
         )
+
+    @property
+    def engine(self) -> AsyncEngine | None:
+        """运行入口持有的引擎；测试注入的 store 没有所有权。"""
+        return self._engine
+
+    async def aclose(self) -> None:
+        """释放连接池；幂等，供入口停机与测试收尾共用。"""
+        engine, self._engine = self._engine, None
+        if engine is not None:
+            await engine.dispose()
 
     # -- 事务作用域 ------------------------------------------------------
 

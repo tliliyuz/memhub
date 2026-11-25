@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.session import (
     KB_DSN_KEY,
     KB_SCHEMA,
@@ -13,6 +14,7 @@ from memhub.kb.session import (
     KbDsnMissing,
     connect_args_for,
     create_engine_from_env,
+    create_runtime_store,
     create_sessionmaker,
     kb_dsn,
     runtime_engine_kwargs,
@@ -74,3 +76,24 @@ def test_sessionmaker_does_not_expire_on_commit(engine: AsyncEngine) -> None:
 @pytest.fixture
 def engine() -> AsyncEngine:
     return create_engine_from_env(dsn="postgresql://kb@127.0.0.1:5432/memhub_prod")
+
+
+def test_runtime_store_requires_dsn() -> None:
+    """规格 §9.2.4：运行入口缺 `MEMHUB_KB_DB_URL` 就失败，不退回文件存储。"""
+    with pytest.raises(KbDsnMissing):
+        create_runtime_store(environ={})
+
+
+def test_runtime_store_builds_pg_store() -> None:
+    store = create_runtime_store(dsn="postgresql://kb@127.0.0.1:5432/memhub_prod")
+    assert isinstance(store, PgKnowledgeStore)
+    assert store.engine is not None
+
+
+async def test_runtime_store_closes_engine() -> None:
+    """运行入口必须能释放连接池：停机时不留悬空连接。"""
+    store = create_runtime_store(dsn="postgresql://kb@127.0.0.1:5432/memhub_prod")
+    assert store.engine is not None
+    await store.aclose()
+    assert store.engine is None
+    await store.aclose()  # 幂等：停机路径可能被重复触发

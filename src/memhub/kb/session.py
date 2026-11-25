@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from memhub.kb.pgstore import PgKnowledgeStore
+
 KB_DSN_KEY = "MEMHUB_KB_DB_URL"
 MIGRATE_DSN_KEY = "MEMHUB_KB_MIGRATE_DB_URL"
 KB_SCHEMA = "kb"
@@ -107,3 +109,17 @@ def create_engine_from_env(
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+def create_runtime_store(
+    *,
+    dsn: str | None = None,
+    schema: str | None = KB_SCHEMA,
+    environ: Mapping[str, str] | None = None,
+) -> PgKnowledgeStore:
+    """运行入口唯一的存储构造方式：强制 PG，缺 DSN 直接失败（规格 §9.2.4）。
+
+    不提供文件存储退路；`KnowledgeStore` 只留给测试夹具、迁移工具与迁移源。
+    """
+    engine = create_engine_from_env(dsn=dsn, schema=schema, environ=environ)
+    return PgKnowledgeStore(create_sessionmaker(engine), engine=engine)
