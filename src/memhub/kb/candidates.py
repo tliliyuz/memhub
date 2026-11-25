@@ -1,7 +1,8 @@
 """MCP 写候选：只创建 `tier=candidate` 节点，不动 canonical。
 
-第一阶段的写路径复用管理端的跨进程写锁、归档门禁与文件原子写，不新增第二个
-真源写者。拒绝都带稳定的 `data.reason`（见 `docs/contracts/mcp-tools.md` §3）：
+写路径复用存储对象的统一操作面（写作用域、归档门禁、原子写与提交），不新增
+第二个真源写者；文件版与 PG 版走同一份校验与拒绝码。拒绝都带稳定的
+`data.reason`（见 `docs/contracts/mcp-tools.md` §3）：
 
 - `slug_conflict_canonical` / `slug_conflict_candidate`：slug 已被占用，绝不覆盖。
 - `content_duplicate`：归一化正文哈希命中同项目已有候选。
@@ -23,19 +24,16 @@ from typing import Any
 from memhub.contract import ErrorCode, NodeFrontmatter, SourceKind, SourceRef, Tier
 from memhub.contract.mcp import DeprecateInput, UpdateCandidateInput, WriteCandidateInput
 from memhub.contract.models import KB_ID_RE
-from memhub.kb import archive, query, target_access
+from memhub.kb import query, target_access
+from memhub.kb.errors import NodeMissing, ProjectMissing
 from memhub.kb.manage import (
     ConflictError,
     ManageError,
     NotFoundError,
+    Storage,
     WriteDeferred,
-    commit_source,
-    guard_project_write,
     node_revision,
-    write_lock,
 )
-from memhub.kb.reader import ActiveReader
-from memhub.kb.store import KnowledgeStore
 
 DAILY_LIMIT = 50
 MIN_TITLE = 2
@@ -140,7 +138,7 @@ def _check_text(title: str, body: str) -> None:
 
 
 async def _check_evidence(
-    store: KnowledgeStore,
+    store: Storage,
     evidence: list[SourceRef],
     *,
     projects: frozenset[str] | None,
@@ -180,10 +178,10 @@ def _check_project(project: str, projects: frozenset[str] | None) -> None:
         raise _reject("project_unavailable", "该知识库不在授权范围")
 
 
-async def _existing_tier(store: KnowledgeStore, node_id: str) -> Tier | None:
+async def _existing_tier(store: Storage, node_id: str) -> Tier | None:
     try:
         node, _ = await store.read(node_id)
-    except FileNotFoundError:
+    except (FileNotFoundError, NodeMissing):
         return None
     return node.tier
 
@@ -204,26 +202,25 @@ def _daily_count(records: list[query.NodeRecord], grant_id: str, now: datetime) 
 
 
 async def _open_candidate(
-    store: KnowledgeStore,
+    store: Storage,
     node_id: str,
     *,
     projects: frozenset[str] | None,
 ) -> tuple[NodeFrontmatter, str, str]:
     """持锁后确认目标可用且仍是候选；返回 (frontmatter, 正文, 当前修订号)。
 
-    调用方必须已在 `write_lock` 内。越权与不存在一律按不存在处理，不泄露存在性。
+    调用方必须已在写作用域内。越权与不存在一律按不存在处理，不泄露存在性。
     """
     project = node_id.split("/", 1)[0]
     if projects is not None and project not in projects:
         raise NotFoundError(f"节点不存在: {node_id}")
     try:
-        await guard_project_write(store.root, project)
-    except WriteDeferred as exc:
+        await store.guard_write(project)
+    except (WriteDeferred, ProjectMissing) as exc:
         raise _reject("project_unavailable", "知识库已归档或正在归档，暂不能写入") from exc
     if not await target_access.registered_active(store, project):
         raise _reject("project_unavailable", "知识库未登记或不可用")
-    path = await archive.checked_path(store.root, f"{node_id}.md")
-    if await archive.path_kind(path) != "file":
+    if not await store.exists(node_id):
         raise NotFoundError(f"节点不存在: {node_id}")
     node, body = await store.read(node_id)
     if node.tier is not Tier.CANDIDATE:
@@ -245,7 +242,7 @@ def _require_revision(node_id: str, expected: str, current: str) -> None:
 
 
 async def _body_taken_by_other(
-    store: KnowledgeStore,
+    store: Storage,
     *,
     node_id: str,
     project: str,
@@ -253,7 +250,7 @@ async def _body_taken_by_other(
     projects: frozenset[str] | None,
 ) -> bool:
     """同项目内是否已有其它候选使用归一化后相同的正文。"""
-    records = await query.records(ActiveReader(store, projects))
+    records = await query.records(store.scoped_reader(projects))
     digest = _content_digest(body)
     return any(
         record.id != node_id
@@ -265,7 +262,7 @@ async def _body_taken_by_other(
 
 
 async def update_candidate(
-    store: KnowledgeStore,
+    store: Storage,
     draft: UpdateCandidateInput,
     *,
     grant_id: str,
@@ -273,7 +270,7 @@ async def update_candidate(
 ) -> dict[str, Any]:
     """按修订号更新自己的候选；只改标题、正文、标签与置信度。"""
     node_id = draft.id
-    async with write_lock(store.root, timeout=0):
+    async with store.write_scope(timeout=0):
         node, body, revision = await _open_candidate(store, node_id, projects=projects)
         _require_revision(node_id, draft.expected_revision, revision)
 
@@ -303,8 +300,7 @@ async def update_candidate(
             raise _reject("content_rejected", "更新后的元数据不满足节点契约") from exc
         await store.write(node_id, updated, new_body)
         new_revision = await node_revision(store, node_id)
-        commit = await commit_source(
-            store.root,
+        commit = await store.commit(
             f"kb: 更新候选 kb_update_candidate {node_id} mcp:{grant_id}",
             node_path=f"{node_id}.md",
         )
@@ -317,7 +313,7 @@ async def update_candidate(
 
 
 async def deprecate_candidate(
-    store: KnowledgeStore,
+    store: Storage,
     draft: DeprecateInput,
     *,
     grant_id: str,
@@ -326,7 +322,7 @@ async def deprecate_candidate(
     """把候选标为 deprecated 并保留文件；替代节点可省，原因必留。"""
     node_id = draft.id
     reason = draft.reason.strip()
-    async with write_lock(store.root, timeout=0):
+    async with store.write_scope(timeout=0):
         node, body, revision = await _open_candidate(store, node_id, projects=projects)
         _require_revision(node_id, draft.expected_revision, revision)
 
@@ -337,8 +333,7 @@ async def deprecate_candidate(
             successor_project = successor.split("/", 1)[0]
             if projects is not None and successor_project not in projects:
                 raise _reject("superseded_by_unavailable", "替代节点不在授权范围")
-            successor_path = await archive.checked_path(store.root, f"{successor}.md")
-            if await archive.path_kind(successor_path) != "file":
+            if not await store.exists(successor):
                 raise _reject("superseded_by_unavailable", "替代节点不存在")
 
         data = node.model_dump(mode="json")
@@ -358,8 +353,7 @@ async def deprecate_candidate(
                 raise _reject("content_rejected", f"追加废弃说明后正文超过 {MAX_BODY} 字符")
         await store.write(node_id, updated, new_body)
         new_revision = await node_revision(store, node_id)
-        commit = await commit_source(
-            store.root,
+        commit = await store.commit(
             f"kb: 废弃候选 kb_deprecate {node_id} mcp:{grant_id}",
             node_path=f"{node_id}.md",
         )
@@ -372,7 +366,7 @@ async def deprecate_candidate(
 
 
 async def create_candidate(
-    store: KnowledgeStore,
+    store: Storage,
     draft: WriteCandidateInput,
     *,
     grant_id: str,
@@ -383,21 +377,15 @@ async def create_candidate(
     _check_content(draft)
 
     node_id = f"{draft.project}/{draft.kind.value}/{draft.slug}"
-    async with write_lock(store.root, timeout=0):
+    async with store.write_scope(timeout=0):
         try:
-            await guard_project_write(store.root, draft.project)
-        except WriteDeferred as exc:
+            await store.guard_write(draft.project)
+        except (WriteDeferred, ProjectMissing) as exc:
             raise _reject("project_unavailable", "知识库已归档或正在归档，暂不能写入") from exc
         if not await target_access.registered_active(store, draft.project):
             raise _reject("project_unavailable", "知识库未登记或不可用")
 
         await _check_evidence(store, draft.evidence, projects=projects)
-        try:
-            path = await archive.checked_path(store.root, f"{node_id}.md")
-            if await archive.path_kind(path) not in {None, "file"}:
-                raise ConflictError("节点路径不是普通文件")
-        except ConflictError as exc:
-            raise _reject("project_unavailable", "目标节点路径不可用") from exc
 
         tier = await _existing_tier(store, node_id)
         if tier is Tier.CANONICAL or tier is Tier.DEPRECATED:
@@ -408,7 +396,7 @@ async def create_candidate(
             raise CandidateConflict(
                 "slug_conflict_candidate", f"slug 已有候选节点: {node_id}", {"id": node_id}
             )
-        reader = ActiveReader(store, projects)
+        reader = store.scoped_reader(projects)
         records = await query.records(reader)
         digest = _content_digest(draft.body)
         if any(
@@ -441,8 +429,7 @@ async def create_candidate(
         )
         await store.write(node_id, node, draft.body)
         revision = await node_revision(store, node_id)
-        commit = await commit_source(
-            store.root,
+        commit = await store.commit(
             f"kb: 写入候选 kb_write_candidate {node_id} mcp:{grant_id}",
             node_path=f"{node_id}.md",
         )

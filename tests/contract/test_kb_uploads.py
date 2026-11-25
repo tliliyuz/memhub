@@ -11,24 +11,29 @@ import pytest
 from fastapi.testclient import TestClient
 
 from memhub.kb.api import create_app
+from memhub.kb.session import KB_DSN_KEY
 
 
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, Path]]:
-    knowledge = tmp_path / "knowledge"
-    (knowledge / "memory-hub").mkdir(parents=True)
-    (knowledge / ".kbs.json").write_text('{"kbs":[{"id":"memory-hub"}]}', encoding="utf-8")
+def env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kb_pg_schema: str,
+    test_dsn: str,
+) -> Iterator[tuple[TestClient, Path]]:
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
 
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
+    monkeypatch.setenv(KB_DSN_KEY, test_dsn)
     monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
     monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data_dir))
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
     monkeypatch.delenv("MEMHUB_KB_GRAPH_PORT", raising=False)
 
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(schema=kb_pg_schema)) as client:
+        response = client.post("/api/v1/kb/projects", json={"id": "memory-hub"})
+        assert response.status_code == 201, response.text
         yield client, data_dir
 
 
@@ -158,16 +163,14 @@ def test_rejects_invalid_project_and_too_many_files(env: tuple[TestClient, Path]
     assert too_many.json()["code"] == 1012
 
 
-def test_unregistered_directory_is_not_upload_target(env: tuple[TestClient, Path]) -> None:
-    client, data_dir = env
-    (data_dir.parent / "knowledge" / "unregistered").mkdir()
+def test_unregistered_project_is_not_upload_target(env: tuple[TestClient, Path]) -> None:
+    client, _ = env
     response = client.post(
         "/api/v1/kb/uploads",
         data={"project": "unregistered"},
         files=[("files", ("a.md", b"# a", "text/plain"))],
     )
     assert response.status_code == 404
-    assert not list((data_dir / "raw_store").rglob("*.json"))
 
 
 def test_unknown_project_is_rejected(env: tuple[TestClient, Path]) -> None:
@@ -182,20 +185,24 @@ def test_unknown_project_is_rejected(env: tuple[TestClient, Path]) -> None:
     assert not (data_dir / "raw_store" / "kb-console" / "not-there").exists()
 
 
-def test_queue_full_returns_1013(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    knowledge = tmp_path / "knowledge"
-    (knowledge / "memory-hub").mkdir(parents=True)
-    (knowledge / ".kbs.json").write_text('{"kbs":[{"id":"memory-hub"}]}', encoding="utf-8")
+def test_queue_full_returns_1013(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kb_pg_schema: str,
+    test_dsn: str,
+) -> None:
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
+    monkeypatch.setenv(KB_DSN_KEY, test_dsn)
     monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
     monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data_dir))
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "1")
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
 
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(schema=kb_pg_schema)) as client:
+        created = client.post("/api/v1/kb/projects", json={"id": "memory-hub"})
+        assert created.status_code == 201, created.text
         response = client.post(
             "/api/v1/kb/uploads",
             data={"project": "memory-hub"},
@@ -217,16 +224,19 @@ def test_unknown_batch_and_missing_data_dir(env: tuple[TestClient, Path]) -> Non
     assert invalid_id.status_code == 404
 
 
-def test_upload_disabled_without_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
+def test_upload_disabled_without_data_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kb_pg_schema: str,
+    test_dsn: str,
+) -> None:
+    monkeypatch.setenv(KB_DSN_KEY, test_dsn)
     monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
     monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
 
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(schema=kb_pg_schema)) as client:
         response = client.post(
             "/api/v1/kb/uploads",
             data={"project": "memory-hub"},

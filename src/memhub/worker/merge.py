@@ -1,4 +1,4 @@
-"""把抽取结果合并进 markdown 真源。
+"""把抽取结果合并进知识真源（PG `kb_*`；文件存储仅测试夹具与迁移工具使用）。
 
 规则：
 - 自动写入一律 `tier=candidate`。
@@ -9,11 +9,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 
 from memhub.contract import (
     Edge,
@@ -23,9 +21,8 @@ from memhub.contract import (
     SourceRef,
     Tier,
 )
-from memhub.kb.manage import guard_project_write, write_lock
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
-from memhub.kb.target_access import TargetUnavailable
 from memhub.worker.schema import ExtractedNode, Extraction
 
 
@@ -41,19 +38,8 @@ class MergeReport:
         return len(self.created) + len(self.updated)
 
 
-@asynccontextmanager
-async def target_write_lock(root: Path, *, timeout: float) -> AsyncIterator[None]:
-    """读不到锁或事务标记时暂缓处理，不把输入当成坏记录。"""
-    async with AsyncExitStack() as stack:
-        try:
-            await stack.enter_async_context(write_lock(root, timeout=timeout))
-        except OSError as exc:
-            raise TargetUnavailable("write_lock_unavailable") from exc
-        yield
-
-
 async def merge(
-    store: KnowledgeStore,
+    store: KnowledgeStore | PgKnowledgeStore,
     extraction: Extraction,
     *,
     project: str,
@@ -66,17 +52,19 @@ async def merge(
     report = MergeReport()
     slug_to_id: dict[str, str] = {}
 
-    lock = target_write_lock if check_target is not None else write_lock
-    async with lock(store.root, timeout=lock_timeout):
+    # 一次写入 = 一个写作用域：文件版是跨进程锁，PG 版是一个事务。
+    async with store.write_scope(timeout=lock_timeout):
         if check_target is None:
-            await guard_project_write(store.root, project)
+            await store.guard_write(project)
         else:
             await check_target()
         for node in extraction.nodes:
             node_id = f"{project}/{node.kind.value}/{node.slug}"
             slug_to_id[node.slug] = node_id
             if not await store.exists(node_id):
-                await store.write(node_id, _new_node(node, project, source, moment), node.body)
+                await store.write(
+                    node_id, _new_node(node_id, node, project, source, moment), node.body
+                )
                 report.created.append(node_id)
                 continue
 
@@ -104,10 +92,10 @@ async def merge(
 
 
 def _new_node(
-    node: ExtractedNode, project: str, source: SourceRef, now: datetime
+    node_id: str, node: ExtractedNode, project: str, source: SourceRef, now: datetime
 ) -> NodeFrontmatter:
     return NodeFrontmatter(
-        id="",  # 由 store 覆盖
+        id=node_id,  # PG 版要求与写入 id 一致；文件版同样接受
         kind=node.kind,
         entity_kind=node.entity_kind,
         title=node.title,

@@ -8,6 +8,7 @@
 - **kb-api 取代 explorer**：图谱页由前端自带 cytoscape 渲染，数据来自 `kb/kg.json`；旧 explorer 容器保留为 compose `legacy` profile，不再默认启动。
 - `knowledge/`（markdown 真源）与 `data/`（raw_store）从本地同步到 `/var/lib/memhub/`，由 worker 继续提炼。
 - collector 仍在客户端（e4 负责），本版发布后联调 session 采集。
+- **下一版**把知识真源从 markdown 换成 PostgreSQL 的 `kb_*` 表（ADR-0013），`knowledge/` 只作一次性迁移源、迁移后删除；切换步骤见 §6「知识真源切换（markdown → PG，一次性）」。
 
 ### 采集目标授权：待发布分支的切换要求
 
@@ -98,7 +99,7 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 |:---|:---|
 | ingest-api | compose 常驻容器 `memhub/app:0.1.0`，`network_mode: host`，容器内绑 `127.0.0.1:8700`（**没有 `ports:`**，host 网络下端口映射无效） |
 | worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-02:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
-| kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/` |
+| kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/`。**连 PG**：`MEMHUB_KB_DB_URL`（运行时 DML 角色，`search_path=kb`）经**独立** `env_file` `/etc/memhub/env.kb` 注入，缺该键启动即失败，不退回 markdown；该文件不含 `MEMHUB_DB_URL` / `PGPASSWORD` / LLM 与设备凭据 |
 | explorer（旧） | 不再部署；需要时 `docker compose --profile legacy up -d explorer`，并把 nginx `/` 改回 8703 |
 | purge / rebuild | systemd timer 跑 `docker run --rm` 一次性子命令 |
 
@@ -114,12 +115,21 @@ docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）。
 
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
-`MEMHUB_DB_URL` 等密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
-schema 由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
+运行态密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。kb-api 例外：它用独立文件
+`/etc/memhub/env.kb`（同样 0600），只放 kb 进程实际读取的键（至少 `MEMHUB_KB_DB_URL`；`/mcp` 入口
+用 `MEMHUB_MCP_GRANTS`，按需再拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` /
+`MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`），避免受限容器拿到运行态全权 DSN 与 `PGPASSWORD`。
+运行态 5 表由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
 563fefe 未新增迁移（仍只有 `0001_state`），旧库启动即打印 `schema: already up to date`。
 
-**顺序约束**：kb-api 启动时会读 `kb/kg.json`（不存在也能起，只是图谱空）；首次部署先同步
-`knowledge/`，再起 kb，它在真源变化后自行重建投影。旧 explorer 才要求「先跑一次 rebuild 再起」。替换 nginx 配置时保持 `/api/v1/` 的尾斜杠与 `/api/v1/kb/` 的优先级（`^~`）。
+**知识表（`kb_*`）是另一套迁移**（ADR-0013 §4）：建在专用 schema `kb`，版本表 `alembic_version`，
+由迁移角色 `MEMHUB_KB_MIGRATE_DB_URL` **带外执行**，不在任何容器启动时跑。kb 镜像已烘入
+`alembic.ini` 与 `alembic/`，服务器上没有宿主 venv，按「知识真源切换」小节用一次性容器执行。
+
+**顺序约束**：真源切换到 PG 后，kb-api 只从 `MEMHUB_KB_DB_URL` 取知识，启动时读
+`kb/kg.json` 投影（不存在也能起，只是图谱空，真源变化后自行重建）。首次部署**不再**需要先同步
+`knowledge/`——它只在一次性迁移时用到；迁移前的旧版仍按原顺序（先 knowledge 后 kb）。替换 nginx
+配置时保持 `/api/v1/` 的尾斜杠与 `/api/v1/kb/` 的优先级（`^~`）。
 
 nginx 段（explorer 旧版）保留在上线记录里；563fefe 的完整 vhost 见
 `deploy/nginx/memhub.vhost.conf`（`/` 与 `/api/v1/kb/` → 8701，走 `auth_request /__memhub_auth`）。
@@ -140,7 +150,7 @@ kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查
 |:---|:---|:---|
 | `memhub purge-expired` | 删 25h 外批次记录 + 30 天外隔离文件 + 裁剪 processed_raw | 0 正常 / 2 配置错 |
 | `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
-| `memhub project --knowledge-dir ... --out ...` | 重建图谱投影 | 0 / 2 |
+| `memhub project --out ...` | 重建图谱投影（真源=PG，不再传 `--knowledge-dir`） | 0 / 2 |
 
 ### timer 完整参数（照抄）
 
@@ -173,7 +183,7 @@ docker run --rm --name memhub-rebuild \
   -v /var/lib/memhub:/var/lib/memhub \
   --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
   memhub/app-worker:0.1.0 \
-  memhub project --knowledge-dir /var/lib/memhub/knowledge --out /var/lib/memhub/kb/kg.json
+  memhub project --out /var/lib/memhub/kb/kg.json
 ```
 
 注意：
@@ -182,6 +192,71 @@ docker run --rm --name memhub-rebuild \
 - 退出码 1 表示部分失败，systemd 侧不要 `SuccessExitStatus=1` 掩盖它。
 
 timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控，不需要 timer。
+
+### 知识真源切换（markdown → PG，一次性）
+
+本节覆盖 ADR-0013 的一次性上线：`knowledge/` 从真源降为迁移源，迁移校验通过后删除。
+**第 1、3、5、6 步都是生产变更，全部需负责人授权**；本仓库只给出命令与判定标准，不在开发侧代跑。
+
+1. **建对象与角色**（带外、只执行一次；判定见 ADR-0013 §6）
+   - 在生产 `memhub_prod` 建 schema `kb`，以及两个角色：`memhub_kb_owner`（对 `kb_*` 有 DDL，Alembic 用）与
+     `memhub_kb_app`（只对 `kb_*` 做 DML，kb-api 运行时用）。两者 `search_path` 固定 `kb`，**不授予 `public` 的
+     `USAGE`**——运行态 5 表在 `public` 里，PG 15+ 默认对 `PUBLIC` 授 `USAGE`，只靠「另建角色」挡不住。
+   - 连接配额建议：`memhub_kb_app` 限 4（连接池 2+2，ADR-0013 §6 的最小可行值），`memhub_kb_owner` 限 2
+     （带外 `alembic` 与 `migrate-kb` 各占一条）。加上运行态现有 2+3（ingest）与 1+1（worker），都在
+     `max_connections=60` 内。
+   - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）与
+     `MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）。值只经该文件注入；文档与提交信息只写键名。
+   - 另建 `/etc/memhub/env.kb`（0600，归属同前）：kb 容器的独立 env_file，只放 kb 进程读取的键。
+     至少 `MEMHUB_KB_DB_URL=` 同一值，且 **DSN 必须自带口令**（`postgresql://memhub_kb_app:<口令>@127.0.0.1:5432/memhub_prod`）：
+     独立文件里没有 `PGPASSWORD`，仍按「DSN 不写口令 + PGPASSWORD」写法会直接认证失败。
+     `/mcp` 入口需要时一并拷 `MEMHUB_MCP_GRANTS`，以及
+     `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`
+     中实际设置过的项。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
+     kb 用受限角色，只该看到知识表的 DML 权限。
+2. **停写**：`docker compose stop kb worker`，等正在跑的 `worker --once` 结束并禁用 rebuild timer。
+   ingest 可以继续跑（只写 `raw_store/` 队列，不碰 `knowledge/`）。
+3. **建表**（Alembic 带外执行，不在任何容器启动时跑）：
+   ```bash
+   docker run --rm --network=host --env-file /etc/memhub/env \
+     memhub/app-kb:<tag> alembic -c /app/alembic.ini upgrade head
+   ```
+   迁移角色只认 `MEMHUB_KB_MIGRATE_DB_URL`，不读 `MEMHUB_DB_URL`。这一步只建 `kb_*` 六表与
+   `alembic_version`；运行态 5 表仍由 ingest 启动时自管，两套版本表互不相干。
+   **待负责人裁决**：上面用的是「烘进镜像的 alembic + 一次性容器」。备选是服务器上装宿主 venv 跑
+   `alembic -c alembic.ini upgrade head`——但机上只有容器、没有宿主 Python，选它要额外维护一套 venv，
+   且与镜像的 alembic 版本可能漂移。两种写法都可行，裁决前不要二选一固化到运维脚本。
+4. **迁移与校验**（同一镜像，挂载只读的真源）：
+   ```bash
+   # 4.1 只读统计：不写库、不删文件
+   docker run --rm --network=host --env-file /etc/memhub/env \
+     -v /var/lib/memhub:/var/lib/memhub:ro --entrypoint memhub memhub/app-kb:<tag> \
+     migrate-kb --knowledge-dir /var/lib/memhub/knowledge --schema kb --archives migrate --dry-run
+   # 4.2 写库：单事务、按 id 与边三元组 upsert，可重复运行
+   ... 同上，去掉 --dry-run
+   # 4.3 逐节点、逐边比对内容哈希；不一致非 0 退出
+   ... 同上，改用 --verify-only
+   ```
+   `--archives migrate` 必须与写入一致：`knowledge/` 删掉后，`kb_archives.snapshot` 是归档快照的唯一副本，
+   默认的 `skip` 会让迁移后无处可取。`--dry-run` 下两种取值都只统计、不写。
+5. **备份**（负责人授权后执行）：`pg_dump -Fc memhub_prod` + `tar` 打包 `/var/lib/memhub/knowledge`，
+   存到数据卷之外。这是删除 markdown 与回滚的唯一依据；缺任何一份都不进入第 6 步。
+6. **删除 markdown**（负责人授权后执行）：`--delete-source` 只与 `--verify-only` 同用，校验通过也只返回 3、
+   不动文件——删除由负责人在服务器执行。删的是整个 `knowledge/`（含 `.kbs.json`、`_trash/`、`_kb_archives/`），
+   不是逐文件清理。
+7. **切换容器**：三个服务都强制 PG（缺 `MEMHUB_KB_DB_URL` 启动即失败，不退回 markdown），须一起换新镜像：
+   ```bash
+   docker compose up -d --force-recreate ingest worker kb
+   ```
+   `MEMHUB_KNOWLEDGE_DIR` 只剩一次性迁移与 `recover-kb-archive` 读取，可以从运行环境撤掉。
+   **切换前**若存在 `_kb_archives/pending.json`，先用新 worker 镜像跑
+   `memhub recover-kb-archive --knowledge-dir /var/lib/memhub/knowledge`；它没解决就不要开始迁移。
+8. **回滚**：旧镜像只认 markdown。回滚 = 停新容器 → 从第 5 步的 `knowledge` 备份恢复 → 起旧镜像与旧 timer。
+   切换后 worker / kb 的写入都在 PG 里，回滚会丢掉这部分写入；所以在验收完成（第 9 步）前不要恢复采集与全量写入，
+   也别删 PG 表——两套真源短暂并存时，markdown 备份不代表新数据。
+9. **验收**：`curl -s 127.0.0.1:8701/healthz` 返回 `ok`；管理台列表与 `GET /api/v1/kb/search` 能查到迁移后的库
+   （`matched=bm25`）；`psql -c 'select count(*) from kb.kb_nodes'` 与第 4.3 步报告的节点数一致；图谱页能渲染。
+   归档/恢复只用临时样本验收，不要归档线上库做冒烟。
 
 ### 整库归档版本升级与回滚
 
@@ -194,7 +269,7 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 
 1. 改 daemon.json → reload docker
 2. 同步 `knowledge/` 与 `data/` 到 `/var/lib/memhub/`（先 knowledge 后 data）
-3. 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
+3. 确认 `/etc/memhub/env.kb` 已按第 1 步建好（compose 在解析阶段就校验所有服务的 env_file，文件缺失时连 `docker compose up -d ingest worker` 也会失败）→ 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
 4. 写 nginx vhost（保留 acme webroot）→ `nginx -t` → reload
 5. 装 systemd timer（purge / rebuild）
 6. 冒烟：`ss -lntp` 只见 127.0.0.1 的 8700/8701/4180；容器内 `/healthz` 200；未登录 `curl -i /api/v1/kb/stats` 得 401 JSON；浏览器 `/` 跳 GitHub 登录后能看到全部知识库概览

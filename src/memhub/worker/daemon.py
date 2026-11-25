@@ -34,7 +34,8 @@ import anyio
 from anyio import Path as AsyncPath
 
 from memhub.contract import SourceKind, SourceRef, explicit_project
-from memhub.kb.manage import WriteDeferred, guard_project_write
+from memhub.kb.manage import WriteDeferred
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetRegistry, TargetUnavailable
 from memhub.queue.rawstore import (
@@ -45,7 +46,7 @@ from memhub.queue.rawstore import (
 )
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
 from memhub.worker.llm import LLMClient, LLMError
-from memhub.worker.merge import merge, target_write_lock
+from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 from memhub.worker.render import (
     render_jsonl_events,
@@ -68,7 +69,7 @@ class AuthorizationDenied(ValueError):
 @dataclass
 class WorkerConfig:
     data_dir: Path
-    knowledge_dir: Path
+    store: KnowledgeStore | PgKnowledgeStore
     model: str
     max_chars: int = 12000
     max_input_chars: int = 60000
@@ -86,7 +87,7 @@ class WorkerConfig:
     is_registered: Callable[[str], Awaitable[bool]] | None = None
 
     def registry(self) -> TargetRegistry:
-        return self.target_registry or TargetRegistry(self.knowledge_dir)
+        return self.target_registry or TargetRegistry(self.store)
 
     @property
     def raw_root(self) -> Path:
@@ -400,7 +401,7 @@ async def _authorize(config: WorkerConfig, registry: TargetRegistry, target: Que
     if not await registry.active(target.project):
         raise AuthorizationDenied("target_inactive")
     try:
-        await guard_project_write(config.knowledge_dir, target.project)
+        await config.store.guard_write(target.project)
     except WriteDeferred as exc:
         if exc.reason == "archived":
             raise AuthorizationDenied("target_inactive") from None
@@ -430,7 +431,7 @@ async def process_file(
         await _authorize(config, registry, target)
 
     # 空输入也要授权；等待模型时不持写真源的锁。
-    async with target_write_lock(config.knowledge_dir, timeout=0):
+    async with config.store.write_scope(timeout=0):
         await check_target()
 
     file_path = payload.get("path")
@@ -481,7 +482,7 @@ async def process_file(
         )
     kind = SourceKind.SESSION if is_session else SourceKind.WIKI
     report = await merge(
-        KnowledgeStore(config.knowledge_dir),
+        config.store,
         extraction,
         project=target.project,
         source=SourceRef(type=kind, ref=file_path, device=target.device_id),

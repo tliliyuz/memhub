@@ -13,10 +13,14 @@ from pathlib import Path
 import anyio
 import pytest
 from anyio import Path as AsyncPath
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from memhub.contract import BatchFile, IngestRequest
+from memhub.contract import BatchFile, IngestRequest, Tier
 from memhub.ingest.store import MemoryStore
 from memhub.kb import catalog, manage
+from memhub.kb.models import Base, KbArchive
+from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.session import create_sessionmaker
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetRegistry
 from memhub.queue.rawstore import batch_dir, save_batch
@@ -85,10 +89,10 @@ async def _config(tmp_path: Path, **kwargs: object) -> WorkerConfig:
     state = MemoryStore()
     await state.register_device("dev-1")
     kwargs.setdefault("is_registered", state.is_registered)
-    kwargs.setdefault("target_registry", TargetRegistry(knowledge_dir))
+    kwargs.setdefault("target_registry", TargetRegistry(KnowledgeStore(knowledge_dir)))
     return WorkerConfig(
         data_dir=tmp_path,
-        knowledge_dir=knowledge_dir,
+        store=KnowledgeStore(knowledge_dir),
         model="test-model",
         **kwargs,  # type: ignore[arg-type]
     )
@@ -140,6 +144,29 @@ async def _push(
             tmp_path, request, producer="console" if device_id == "kb-console" else "collector"
         )
     return target
+
+
+def _knowledge_dir(config: WorkerConfig) -> Path:
+    """本文件的 worker 用例跑文件夹具；真源目录只存在于文件实现。"""
+    assert isinstance(config.store, KnowledgeStore)
+    return config.store.root
+
+
+@pytest.fixture
+async def pg_store(kb_engine: AsyncEngine) -> PgKnowledgeStore:
+    async with kb_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return PgKnowledgeStore(create_sessionmaker(kb_engine))
+
+
+def _pg_config(tmp_path: Path, store: PgKnowledgeStore, **kwargs: object) -> WorkerConfig:
+    kwargs.setdefault("is_registered", _always_registered)
+    kwargs.setdefault("target_registry", TargetRegistry(store))
+    return WorkerConfig(data_dir=tmp_path, store=store, model="test-model", **kwargs)  # type: ignore[arg-type]
+
+
+async def _always_registered(_device: str) -> bool:
+    return True
 
 
 def _sleeper(sleeps: list[float]) -> Callable[[float], Awaitable[None]]:
@@ -224,7 +251,7 @@ async def test_round_extracts_and_marks_processed(tmp_path: Path) -> None:
 
     assert (report.processed, report.failed, report.created) == (1, 0, 1)
     assert client.calls == 1
-    knowledge_files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
+    knowledge_files = [item async for item in AsyncPath(_knowledge_dir(config)).rglob("*.md")]
     assert len(knowledge_files) == 1
     assert await iter_pending(config.raw_root, config.processed_root) == []
     processed = [item async for item in AsyncPath(config.processed_root).rglob("*.json")]
@@ -261,7 +288,7 @@ async def test_archived_inputs_quarantined_without_starving_active_projects(tmp_
     await AsyncPath(config.failures_path).write_text(json.dumps(attempts), encoding="utf-8")
     await _set_mtime(blocked, 1)
     await _push(tmp_path, EVIDENCE, project="active")
-    marker = AsyncPath(config.knowledge_dir / "_kb_archives" / "blocked" / "archived")
+    marker = AsyncPath(_knowledge_dir(config) / "_kb_archives" / "blocked" / "archived")
     await marker.parent.mkdir(parents=True)
     await marker.touch()
     client = FakeClient()
@@ -275,7 +302,7 @@ async def test_archived_inputs_quarantined_without_starving_active_projects(tmp_
     assert await iter_pending(config.raw_root, config.processed_root) == []
     assert (config.pending_root / blocked.relative_to(config.raw_root)).read_bytes() == original
     assert json.loads(config.failures_path.read_text(encoding="utf-8")) == {}
-    assert not list((config.knowledge_dir / "archived").iterdir())
+    assert not list((_knowledge_dir(config) / "archived").iterdir())
 
 
 @pytest.mark.parametrize(
@@ -287,11 +314,11 @@ async def test_archive_started_during_extraction_blocks_worker_merge(
     raw = await _push(tmp_path, EVIDENCE, project="demo")
     original = raw.read_bytes()
     config = await _config(tmp_path, max_attempts=1)
-    marker = AsyncPath(config.knowledge_dir / archive_state)
+    marker = AsyncPath(_knowledge_dir(config) / archive_state)
 
     class ArchivingClient(FakeClient):
         async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
-            async with manage.write_lock(config.knowledge_dir):
+            async with manage.write_lock(_knowledge_dir(config)):
                 await marker.parent.mkdir(parents=True)
                 await marker.touch()
             return await super().complete(prompt, model=model, max_tokens=max_tokens)
@@ -301,7 +328,7 @@ async def test_archive_started_during_extraction_blocks_worker_merge(
 
     assert client.calls == 1
     assert (report.processed, report.failed, report.created) == (0, 0, 0)
-    assert not list((config.knowledge_dir / "demo").iterdir())
+    assert not list((_knowledge_dir(config) / "demo").iterdir())
     assert not config.failures_path.exists()
     if archive_state.endswith("pending.json"):
         assert not config.pending_root.exists()
@@ -321,7 +348,7 @@ async def test_busy_writer_defers_worker_before_extraction(tmp_path: Path) -> No
     config = await _config(tmp_path, max_attempts=1)
     client = FakeClient()
 
-    async with manage.write_lock(config.knowledge_dir):
+    async with manage.write_lock(_knowledge_dir(config)):
         with anyio.fail_after(2):
             report = await run_round(client, config)
 
@@ -347,9 +374,9 @@ async def test_round_writes_into_the_project_chosen_by_the_client(tmp_path: Path
     config = await _config(tmp_path)
 
     assert (await run_round(FakeClient(), config)).processed == 1
-    files = [item async for item in AsyncPath(config.knowledge_dir).rglob("*.md")]
+    files = [item async for item in AsyncPath(_knowledge_dir(config)).rglob("*.md")]
     assert len(files) == 1
-    parts = Path(files[0]).relative_to(config.knowledge_dir).parts
+    parts = Path(files[0]).relative_to(_knowledge_dir(config)).parts
     assert parts[0] == "sdp-tag", "选了库就不能再写到 source_id 目录下"
 
 
@@ -370,7 +397,7 @@ async def test_legacy_ambiguous_or_invalid_target_is_quarantined(
     assert not raw.exists()
     assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
     assert not config.processed_root.exists()
-    assert not list((config.knowledge_dir / "cc-sessions").iterdir())
+    assert not list((_knowledge_dir(config) / "cc-sessions").iterdir())
     assert report.errors == ["project_required"]
     assert not config.failures_path.exists()
 
@@ -394,7 +421,7 @@ async def test_legacy_unknown_device_is_not_authorized_by_explicit_project(tmp_p
     assert (await run_round(client, config)).processed == 0
     assert client.calls == 0
     assert len(list(config.pending_root.rglob("*.json"))) == 1
-    assert not (config.knowledge_dir / "unapproved").exists()
+    assert not (_knowledge_dir(config) / "unapproved").exists()
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -483,7 +510,7 @@ async def test_registry_unavailability_preserves_raw_and_existing_failures(
     kwargs = {"is_registered": unavailable} if problem == "registration" else {}
     config = await _config(tmp_path, max_attempts=1, **kwargs)
     if problem == "registry":
-        (config.knowledge_dir / ".kbs.json").write_text("broken JSON", encoding="utf-8")
+        (_knowledge_dir(config) / ".kbs.json").write_text("broken JSON", encoding="utf-8")
     config.failures_path.parent.mkdir()
     failures = json.dumps({str(raw.relative_to(config.raw_root)): 1}).encode()
     config.failures_path.write_bytes(failures)
@@ -500,7 +527,7 @@ async def test_registry_unavailability_preserves_raw_and_existing_failures(
 async def test_registered_directory_without_catalog_entry_is_denied(tmp_path: Path) -> None:
     raw = await _push(tmp_path, EVIDENCE, project="orphan")
     config = await _config(tmp_path)
-    orphan = config.knowledge_dir / "orphan"
+    orphan = _knowledge_dir(config) / "orphan"
     orphan.mkdir()
     client = FakeClient()
 
@@ -521,7 +548,7 @@ async def test_target_archived_during_model_call_is_quarantined_without_merge(
 
     class ArchivingClient(FakeClient):
         async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
-            await catalog.delete_kb(KnowledgeStore(config.knowledge_dir), "cc-sessions")
+            await catalog.delete_kb(KnowledgeStore(_knowledge_dir(config)), "cc-sessions")
             return await super().complete(prompt, model=model, max_tokens=max_tokens)
 
     client = ArchivingClient()
@@ -530,7 +557,7 @@ async def test_target_archived_during_model_call_is_quarantined_without_merge(
     assert (report.processed, report.failed, report.quarantined, client.calls) == (0, 0, 1, 1)
     assert report.errors == ["target_inactive"]
     # 库已归档：既不能写进新节点，也不能把目录重建回来。
-    assert not await AsyncPath(config.knowledge_dir / "cc-sessions").exists()
+    assert not await AsyncPath(_knowledge_dir(config) / "cc-sessions").exists()
     assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
     assert not config.processed_root.exists()
     assert not config.failures_path.exists()
@@ -547,7 +574,7 @@ async def test_unparseable_jsonl_and_unevidenced_output_do_not_merge(tmp_path: P
     report = await run_round(client, config)
 
     assert (report.processed, report.created, client.calls) == (2, 0, 1)
-    assert not list((config.knowledge_dir / "cc-sessions").iterdir())
+    assert not list((_knowledge_dir(config) / "cc-sessions").iterdir())
 
 
 async def test_round_keeps_failed_file_for_retry(tmp_path: Path) -> None:
@@ -708,3 +735,68 @@ async def test_prune_processed_raw_drops_files_past_retention(tmp_path: Path) ->
     assert removed == 1
     assert not await AsyncPath(old).exists()
     assert await AsyncPath(fresh).exists()
+
+
+# -- 运行入口接线（规格 §9.2.4）：worker 写 PG 真源，不写 markdown ----------
+
+
+async def test_round_writes_candidates_into_pg(tmp_path: Path, pg_store: PgKnowledgeStore) -> None:
+    await pg_store.register_project("cc-sessions", name="会话提炼")
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
+    config = _pg_config(tmp_path, pg_store)
+
+    report = await run_round(FakeClient(), config)
+
+    assert (report.processed, report.failed, report.created) == (1, 0, 1)
+    node, body = await pg_store.read("cc-sessions/fact/retry-backoff")
+    assert node.tier is Tier.CANDIDATE
+    assert "指数退避" in body
+    assert not (tmp_path / "knowledge").exists(), "不得再落 markdown 真源"
+
+
+async def test_archived_project_in_pg_is_quarantined(
+    tmp_path: Path, pg_store: PgKnowledgeStore
+) -> None:
+    await pg_store.register_project("cc-sessions", name="会话提炼")
+    await pg_store.archive_project("cc-sessions")
+    raw = await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
+    original = raw.read_bytes()
+    config = _pg_config(tmp_path, pg_store)
+
+    report = await run_round(FakeClient(), config)
+
+    assert (report.processed, report.failed, report.quarantined) == (0, 0, 1)
+    assert report.errors == ["target_inactive"]
+    assert (config.pending_root / raw.relative_to(config.raw_root)).read_bytes() == original
+    assert not await pg_store.exists("cc-sessions/fact/retry-backoff")
+
+
+async def test_pending_archive_in_pg_defers_worker_without_quarantine(
+    tmp_path: Path, pg_store: PgKnowledgeStore
+) -> None:
+    """归档事务未完成（`kb_archives.status=pending`）时整轮暂缓，原始文件保留。"""
+    await pg_store.register_project("cc-sessions", name="会话提炼")
+    async with pg_store.sessions() as session:
+        session.add(
+            KbArchive(
+                archive_id="p" * 32,
+                project="cc-sessions",
+                status="pending",
+                snapshot=b"",
+                archived_count=0,
+                removed_edges=0,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+    raw = await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
+    config = _pg_config(tmp_path, pg_store)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert report == RoundReport()
+    assert client.calls == 0
+    assert raw.exists()
+    assert not config.pending_root.exists()
+    assert not config.failures_path.exists()

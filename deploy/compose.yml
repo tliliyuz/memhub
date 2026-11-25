@@ -82,11 +82,18 @@ services:
   kb:
     <<: *defaults
     # 管理台：静态前端 + /api/v1/kb/*。图谱页由前端 cytoscape 渲染，
-    # 数据来自 /var/lib/memhub/kb/kg.json（由本服务在真源变更后重建）。
+    # 数据来自 /api/v1/kb/graph（直读 PG kb_* 表）；kg.json 投影只供旧 explorer。
+    # **独立 env_file（默认的 /etc/memhub/env 只给 ingest / worker / oauth2-proxy）**：
+    # kb 用受限角色连知识表，不该看到运行态全权 DSN（MEMHUB_DB_URL）、PGPASSWORD、
+    # LLM 凭据与设备 token 密钥。文件至少写 MEMHUB_KB_DB_URL；MCP HTTP 入口（/mcp）
+    # 用 MEMHUB_MCP_GRANTS，按需再拷 MEMHUB_LOG_LEVEL / MEMHUB_KB_AUTO_REBUILD /
+    # MEMHUB_QUEUE_MAX_BYTES / MEMHUB_KB_HTTP_PORT。
+    env_file: /etc/memhub/env.kb
     image: memhub/app-kb:0.1.0
     container_name: memhub-kb
     # 上传接口把文件写进 /var/lib/memhub/data（raw_store），worker 轮询同一个卷。
-    # 不连数据库：kb 只读 markdown 真源 + 文件队列，鉴权靠 nginx 的 oauth2-proxy。
+    # 连 PG：MEMHUB_KB_DB_URL（运行时 DML 角色）经 env_file 注入，缺失启动即失败（ADR-0013）。
+    # 鉴权靠 nginx 的 oauth2-proxy。
     # kb-api 代码固定绑 127.0.0.1:8701（无 --allow-non-loopback 之类的开关）。
     # 实测：投影重建（437 节点 / 2631 边）峰值 ~143MB，384m 是 2.5 倍余量。
     mem_limit: 384m

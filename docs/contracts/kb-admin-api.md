@@ -7,15 +7,15 @@
 ## 1. 定位
 
 - **只绑回环地址、无鉴权**：kb-api 与 worker、collector、浏览器在同一台机器上；公网入口（如果将来有）由 nginx + oauth2-proxy 负责，不在本层做会话。
-- **markdown 是真源**：所有写操作都落到 `knowledge/` 下的 markdown + `_edges.jsonl`，写完可选触发投影重建（`kg.json`）。API 不直接改投影。
-- **单机写入互斥**：管理端、worker 合并、CLI 合并与投影发布共用 OS 持有的 `.memhub-write-v2.lock`。进程退出释放锁；不要删除或替换锁文件。归档中的库禁止普通写入，worker 保留队列文件并推迟处理，不计失败。
-- 真源在 git 仓库内时，每次写成功尝试提交一次（非致命：提交失败不影响写操作返回）。
-- **上传是唯一不直接写真源的入口**：它把文件送进提炼队列（raw_store），由 worker 异步提炼成 markdown；接口返回只代表「已收到并排队」。
+- **PostgreSQL 是唯一真源**：所有写操作都落到 `kb_*` 表（`kb_nodes` / `kb_edges` / `kb_projects` / `kb_archives`），写完可选触发投影重建（`kg.json`）。API 不直接改投影。
+- **单机写入互斥**：每次写入是一个 PG 事务，事务级 advisory lock 串行化跨进程写入；进程退出即释放。归档中的库禁止普通写入，worker 保留队列文件并推迟处理，不计失败。
+- 每次写入在同一事务内追加 `kb_node_revisions`（含完整快照）；不再产生 git 提交。
+- **上传是唯一不直接写真源的入口**：它把文件送进提炼队列（raw_store），由 worker 异步提炼后写入 `kb_*`；接口返回只代表「已收到并排队」。
 
-启动：
+启动（必须先配 `MEMHUB_KB_DB_URL`；运行入口不再接受 `--knowledge-dir`）：
 
 ```bash
-memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
+memhub kb --graph-out kb/kg.json \
           --web-dist web/dist --spawn-graph --graph-port 8703  # 端口默认 8701
 ```
 
@@ -31,7 +31,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 |:---|:---|:---|
 | `1010` KB_CONFLICT | 409 | 修订号不匹配（乐观并发） |
 | `1011` KB_NOT_FOUND | 404 | 节点 / 回收站条目 / 接口不存在 |
-| `1012` KB_INVALID | 400 / 422 | 请求字段非法、frontmatter 校验失败（`data.errors` 给出 `loc/msg/type`）；上传整批无可用文件时 `data.rejected` 给出逐文件原因 |
+| `1012` KB_INVALID | 400 / 422 | 请求字段非法、节点字段校验失败（`data.errors` 给出 `loc/msg/type`）；上传整批无可用文件时 `data.rejected` 给出逐文件原因 |
 | `1013` KB_QUEUE_FULL | 503 | 提炼队列已满（`data:{used,limit,incoming}`），稍后重试；上传专用，与采集端的 `1008` 语义相同但属于本 API 的错误码区间 |
 | `2001` INTERNAL | 500 | 投影重建等内部错误 |
 
@@ -39,9 +39,9 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 ## 3. 并发控制
 
-- 每个节点的修订号 = 该文件字节的 `sha256[:16]`（内容寻址）。读取时返回 `revision`。
+- 每个节点的修订号 = 每次写入重新生成的 16 位小写十六进制（`kb_nodes.revision`）。读取时返回 `revision`。
 - 更新/删除必须带 `expected_revision`（更新在 body，删除在 query）。不匹配 → 409/`1010`，客户端刷新后重试。
-- 保存成功返回新 `revision`；同一内容重写会产生新的 `updated_at`，因此修订号也会变。
+- 保存成功返回新 `revision`；同一内容重写也会产生新 `revision`（与契约 §3「同一内容重写也产生新 revision」一致）。
 
 ## 4. 接口
 
@@ -49,7 +49,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/healthz`、`/api/v1/kb/healthz` | `{ok, knowledge_dir, nodes, projection}` |
+| GET | `/healthz`、`/api/v1/kb/healthz` | `{ok, store, nodes, projection}`；`store` 为 `pg`（运行入口固定 PG，文件存储仅测试与迁移工具） |
 | GET | `/api/v1/kb/stats` | `{nodes, edges, unresolved_edges, orphans, by_kind, by_tier, by_project}` |
 
 ### 4.2 节点
@@ -57,11 +57,11 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
 | GET | `/api/v1/kb/nodes` | query：`project`、`kind`、`tier`、`q`、`tag`、`limit`(≤500)、`offset`；返回 `{items, total, offset, limit}`，按 `updated_at` 倒序 |
-| POST | `/api/v1/kb/nodes` | 201；body 见 §4.2.1；返回 `{id, revision, commit, node}` |
+| POST | `/api/v1/kb/nodes` | 201；body 见 §4.2.1；返回 `{id, revision, commit, node}`（`commit` 恒为 `null`） |
 | GET | `/api/v1/kb/nodes/{node_id}` | `id` 可含 `/`（`{node_id:path}`）；返回 `{id, revision, frontmatter, body, truncated, edges:{out,in}, source}` |
 | PUT | `/api/v1/kb/nodes/{node_id}` | 部分更新；必填 `expected_revision`，其余字段同创建（`title/body/tags/tier/confidence/status/valid_*/occurred_at/decided_at/superseded_by`） |
-| POST | `/api/v1/kb/nodes/{node_id}/deprecate` | `{superseded_by, reason, actor}`：tier → `deprecated`、写 `superseded_by`、正文追加 `## 废弃说明`；不删文件。管理台这条路径仍要求给出替代节点；只记原因的废弃目前只经 MCP 的 `kb_deprecate` 提供 |
-| DELETE | `/api/v1/kb/nodes/{node_id}?revision=&reason=&actor=` | 移入 `_trash/<UTC 时间戳>/<node_id>.md` + `.meta.json`，并移除相连边；返回 `{id, trash, removed_edges, commit}` |
+| POST | `/api/v1/kb/nodes/{node_id}/deprecate` | `{superseded_by, reason, actor}`：tier → `deprecated`、写 `superseded_by`、正文追加 `## 废弃说明`；不删节点。管理台这条路径仍要求给出替代节点；只记原因的废弃目前只经 MCP 的 `kb_deprecate` 提供 |
+| DELETE | `/api/v1/kb/nodes/{node_id}?revision=&reason=&actor=` | 软删（`kb_nodes.archived_at`）+ 写删除快照，并移除相连边；返回 `{id, trash, removed_edges, commit}`，`trash` 为 `<UTC 时间戳>/<node_id>` 恢复令牌 |
 
 #### 4.2.1 创建 body
 
@@ -83,8 +83,8 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 - `kind` 与 `tier` 取 [node-schema.md](node-schema.md) 的枚举；`kind=entity` 必须给 `entity_kind`，否则 `1012`。
 - `tier=deprecated` 必须给 `superseded_by` 或 `deprecated_reason` 至少一项（走 deprecate 接口更合适）：有替代节点就指向它，结论被证伪则只记原因。管理台 `PUT` 与 `/deprecate` 目前只写 `superseded_by`，`deprecated_reason` 由 MCP 写工具写入。
-- `slug` 缺省由标题生成 kebab-case；中文标题生成不出 slug 时回退 `n-<随机 4 字节 hex>`。同目录重名 → `1012`。
-- 写入路径：`<knowledge>/<project>/<kind>/<slug>.md`。
+- `slug` 缺省由标题生成 kebab-case；中文标题生成不出 slug 时回退 `n-<随机 4 字节 hex>`。同库同 kind 重名 → `1012`。
+- 写入落 `kb_nodes` 一行（`id=<project>/<kind>/<slug>`），正文存 `body` 列；同一事务追加 `kb_node_revisions`。
 
 ### 4.3 边
 
@@ -105,7 +105,7 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 - `limit` 1–500（默认 100），`offset` ≥ 0；`project` 按库过滤，`q` 匹配标题或 id（不区分大小写）。
 - `total` 是**过滤后**总数，`total_all` 是过滤前总数——页面要显示「共 N 条（全部 M 条）」时需要两个值。
-- 排序仍是归档路径字符串（时间戳 + id）倒序，同一时间戳内按 id 倒序，不按 `deleted_at` 排序。
+- 排序按 `(archived_at, id)` 倒序；`trash` 令牌由 `archived_at` 生成，恢复时必须匹配，防止误恢复同名重建的节点。
 
 删除的边不会随恢复回来；需要重新编辑。
 
@@ -113,21 +113,20 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/v1/kb/search?q=&project=&kinds=a,b&tier=all&limit=` | `{results:[{id, kind, tier, title, score, matched, snippet}]}` |
+| GET | `/api/v1/kb/search?q=&project=&kinds=a,b&tier=all&limit=` | `{results:[{id, kind, tier, title, score, matched, snippet}]}`；`matched` 固定为 `bm25`，`score` 归一化到 0–1 且只在本次结果内可比（真源为 `kb_*` 表，应用层 BM25Okapi 排序） |
 | GET | `/api/v1/kb/audit?limit=&offset=` | `{issues:[{type, target, …}], total, offset, limit}` |
 
 审计 issue 类型：`contradiction`（矛盾）、`broken_link`（断链 / 未解析边）、`orphan`（孤立节点）、`low_confidence`（置信度低）、`stale`（长期未更新）。修复入口都是节点编辑。
 
 ### 4.6 知识库（project）与子图
 
-真源按 `<knowledge>/<project>/` 隔离，**project 就是知识库**：`sdp-tag`、`memory-hub`
-各自一批节点，边文件也是每个库一份（`<project>/_edges.jsonl`），天然不会混库。
+真源的库边界是 `kb_projects.id` 与 `kb_nodes.project`：`sdp-tag`、`memory-hub` 各自一批节点，边按 `kb_edges.project` 归属，天然不会混库。
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/v1/kb/projects` | `{items:[{id, name, description, nodes, edges, updated_at, created_at}], total}`；扫描真源一级目录，并合并 `.kbs.json` 里的显示名/描述 |
-| POST | `/api/v1/kb/projects` | 201；`{id, name?, description?}`；`id` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$` 且目录不存在，否则 `1012` |
-| PATCH | `/api/v1/kb/projects/{project}` | `{name?, description?}`；只改 `.kbs.json` 元数据，不动 markdown；库不存在 → `1011` |
+| GET | `/api/v1/kb/projects` | `{items:[{id, name, description, nodes, edges, updated_at, created_at}], total}`；读 `kb_projects` 并聚合节点/边计数 |
+| POST | `/api/v1/kb/projects` | 201；`{id, name?, description?}`；`id` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$` 且库不存在，否则 `1012` |
+| PATCH | `/api/v1/kb/projects/{project}` | `{name?, description?}`；只改 `kb_projects` 元数据，不动节点；库不存在 → `1011` |
 | DELETE | `/api/v1/kb/projects/{project}?actor=` | 整库归档；返回 `{id, archive_id, archived_count, removed_edges, commit}`；库不存在 → `1011` |
 | GET | `/api/v1/kb/trash/projects` | `{items, total}`；每项含 `archive_id, id, name, deleted_at, archived_count, removed_edges` |
 | POST | `/api/v1/kb/trash/projects/restore` | `{archive_id}`；返回 `{id, archive_id, restored_count, restored_edges, commit}` |
@@ -135,16 +134,16 @@ memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json \
 
 - `graph` 只返回该库自己的节点；边端点按完整 id 或「库内唯一 slug」解析，解析不到的计入 `unresolved_edges`，不影响其他边。
 - `degree` 双向计数，节点按 `(-degree, id)` 排序，方便画图时先看枢纽。
-- 这个接口直接读 markdown 真源，**不依赖 `kg.json` 投影**；管理台的图谱页就用它（不再内联 semantica explorer）。
-- `.kbs.json` 存库的显示名和描述等登记信息，写操作同样走 `.memhub-write-v2.lock`。
+- 这个接口直接读 `kb_nodes` / `kb_edges`，**不依赖 `kg.json` 投影**；管理台的图谱页就用它（不再内联 semantica explorer）。
+- 库的显示名与描述存 `kb_projects.name` / `description`，写操作与其他节点写入共用 PG 写作用域。
 
 #### 4.6.1 归档删除一个知识库
 
-整库删除是**可恢复归档**。在共享写锁内验证库目录、登记信息和关系，先保存带校验的快照，再从活跃真源移除项目。快照保存原始 Markdown、完整库登记信息（或未登记状态）、库内边和受影响的跨库边；空库也生成归档。快照不参与节点和边扫描。
+整库删除是**可恢复归档**。在 PG 写作用域内验证库、节点与边，先把带校验的快照写入 `kb_archives.snapshot`（bytea），再按 `kb_nodes` / `kb_edges` 移除活跃数据并置 `kb_projects.archived_at`。空库也生成归档。`kb_archives.status=pending` 表示事务未完成，阻断普通写入。
 
-恢复到原项目 ID。库已存在、外部库或应恢复的端点已不存在、关系有冲突、短别名会改变指向、路径异常或快照损坏时返回 `409/1010`，不覆盖已有资源。跨库关系合并到当前文件，保留归档期间无关修改。
+恢复到原项目 ID。库已存在、外部库或应恢复的端点已不存在、关系有冲突、短别名会改变指向、路径异常或快照损坏时返回 `409/1010`，不覆盖已有资源。跨库关系按快照恢复，保留归档期间无关修改。
 
-这不是跨文件事务。持久记录操作意图；异常时保留快照，若操作未完成，暂停普通写入及投影重建，待本机恢复命令核对并续做后再开放。成功归档或恢复会使投影重新生成。
+归档/恢复的意图与状态由 `kb_archives` 行承载（`status` 为 `pending` / `active` / `restoring`），失败时事务整体回滚；不再需要文件版 journal 与反向补偿。若操作未完成（`pending`），普通写入返回 `busy/pending` 等价错误，待本机恢复命令核对并续做后再开放。成功归档或恢复会使投影重新生成。
 
 历史单节点归档仍使用原有 `/trash` 和 `/trash/restore`，不补造历史上未归档的关系。
 
@@ -193,7 +192,7 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 
 ## 5. 不变式
 
-1. 任何写操作都不直接改 `kg.json`；投影永远可由真源重建。
-2. 删除只做归档（`_trash/`），不 `unlink` 真源；需要物理清理时人工处理 `_trash/`。
-3. 一次写操作 = 一次锁持有；锁内不做 git 提交以外的长任务（git 超时 60s，失败不阻塞返回）。
-4. `git add` 只针对真源目录，并排除 `.memhub-write.lock`（运行时状态不进历史）。
+1. 任何写操作都不直接改 `kg.json`；投影永远可由 `kb_*` 真源重建。
+2. 删除只做软删（`kb_nodes.archived_at` + `kb_node_revisions` 快照），不物理删除节点行；整库归档另存 `kb_archives`。
+3. 一次写操作 = 一个 PG 事务（事务级 advisory lock）；事务内不做模型调用或长任务。
+4. 修订历史只进 `kb_node_revisions`；不再产生 git 提交（`commit` 字段恒为 `null`，保留仅为兼容旧客户端）。

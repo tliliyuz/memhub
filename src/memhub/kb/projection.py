@@ -1,6 +1,6 @@
-"""markdown 真源 → semantica ContextGraph 投影（异步 IO）。
+"""真源 → semantica ContextGraph 投影（异步 IO）。
 
-投影可随时丢弃重建；只读 markdown 与 `_edges.jsonl`，不反向写回真源。
+投影可随时丢弃重建；只读真源的节点与边（PG 表或迁移期的 markdown），不反向写回。
 semantica 只有同步 API，`save_to_file` 用 `anyio.to_thread` 放到线程里执行；
 核心数据读取与组装仍是异步实现。
 """
@@ -16,6 +16,7 @@ import anyio
 from anyio import Path as AsyncPath
 
 from memhub.kb import archive, manage
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 
 MAX_CONTENT = 4000
@@ -28,7 +29,9 @@ class ProjectionReport:
     unresolved: list[str] = field(default_factory=list)
 
 
-async def build_graph(store: KnowledgeStore) -> tuple[Any, ProjectionReport]:
+async def build_graph(
+    store: KnowledgeStore | PgKnowledgeStore,
+) -> tuple[Any, ProjectionReport]:
     from semantica.context import ContextGraph  # type: ignore[import-untyped]
 
     graph = ContextGraph(advanced_analytics=False)
@@ -62,30 +65,37 @@ async def build_graph(store: KnowledgeStore) -> tuple[Any, ProjectionReport]:
         candidates = slug_index.get(reference, [])
         return candidates[0] if len(candidates) == 1 else None
 
-    paths = [Path(path) async for path in AsyncPath(store.root).rglob("_edges.jsonl")]
-    for edges_path in sorted(paths, key=str):
-        text = await AsyncPath(edges_path).read_text(encoding="utf-8")
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            source = resolve(str(record["source"]))
-            target = resolve(str(record["target"]))
-            if source is None or target is None:
-                report.unresolved.append(
-                    f"{record['source']} -{record['predicate']}-> {record['target']}"
-                )
-                continue
-            if graph.add_edge(source, target, str(record["predicate"])):
-                report.edges += 1
+    async for line in store.edge_lines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        source = resolve(str(record["source"]))
+        target = resolve(str(record["target"]))
+        if source is None or target is None:
+            report.unresolved.append(
+                f"{record['source']} -{record['predicate']}-> {record['target']}"
+            )
+            continue
+        if graph.add_edge(source, target, str(record["predicate"])):
+            report.edges += 1
 
     return graph, report
 
 
 async def save_projection(
-    store: KnowledgeStore, output: Path, *, clear_archive_dirty: bool = False
+    store: KnowledgeStore | PgKnowledgeStore,
+    output: Path,
+    *,
+    clear_archive_dirty: bool = False,
 ) -> ProjectionReport:
-    # 与真源写者互斥，且有未完成归档时不发布新投影。
+    # 文件真源：与写者互斥，且有未完成归档时不发布新投影。
+    # PG 真源：写入是事务，投影只是缓存，读取期间无需再拿跨进程文件锁。
+    if isinstance(store, PgKnowledgeStore):
+        graph, report = await build_graph(store)
+        await AsyncPath(output.parent).mkdir(parents=True, exist_ok=True)
+        await anyio.to_thread.run_sync(graph.save_to_file, output)
+        return report
+
     async with manage.write_lock(store.root):
         graph, report = await build_graph(store)
         await AsyncPath(output.parent).mkdir(parents=True, exist_ok=True)

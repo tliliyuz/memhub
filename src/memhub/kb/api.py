@@ -1,8 +1,9 @@
 """知识库管理 API（kb-api，全异步 IO）。
 
 本地单用户管理台的后端：列表/搜索/详情/新增/编辑/废弃/归档删除/边编辑/审计，
-外加投影重建与知识库上传。所有写操作落到 markdown 真源（见 `memhub.kb.manage`），
-写完可选自动重建 `kg.json` 投影。
+外加投影重建与知识库上传。写操作落 PG 真源 `kb_*` 表（见 `memhub.kb.pgstore`），
+写完可选自动重建 `kg.json` 投影。启动时强制要求 `MEMHUB_KB_DB_URL`，没有文件
+存储退路（规格 §9.2.4）。
 
 上传（`/api/v1/kb/uploads`）把文件直接送进提炼队列：落盘走 `memhub.queue.rawstore`，
 与 `/ingest/raw` 共用同一套 raw_store 布局与配额，不经过采集协议（见 `memhub.kb.uploads`）。
@@ -13,7 +14,7 @@
 
 启动：
 
-    memhub kb --knowledge-dir ./knowledge --graph-out kb/kg.json
+    memhub kb --graph-out kb/kg.json
 """
 
 from __future__ import annotations
@@ -41,7 +42,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, QuestionStatus, Tier
 from memhub.kb import archive, catalog, manage, proc, query
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.projection import save_projection
+from memhub.kb.session import KB_SCHEMA, create_runtime_store
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetUnavailable, registered_active
 from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
@@ -208,17 +211,17 @@ class _RebuildState:
 
 
 class KnowledgeApi:
-    """API 运行时状态：真源目录、投影输出、防抖重建。"""
+    """API 运行时状态：真源存储、投影输出、防抖重建。"""
 
     def __init__(
         self,
-        knowledge_dir: Path,
+        store: KnowledgeStore | PgKnowledgeStore,
         graph_out: Path,
         *,
         auto_rebuild: bool = True,
         on_rebuilt: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        self.store = KnowledgeStore(knowledge_dir)
+        self.store = store
         self.graph_out = graph_out
         self.auto_rebuild = auto_rebuild
         self.on_rebuilt = on_rebuilt
@@ -282,12 +285,22 @@ class KnowledgeApi:
         }
 
     async def projection_stale(self) -> bool:
-        """归档删除可能不留下较新的 Markdown，需检查持久标记。"""
-        if await archive.projection_dirty(self.store.root):
+        """投影是否落后于真源。
+
+        文件真源靠 mtime 与归档标记；PG 真源没有文件 mtime，改比 `latest_write`。
+        """
+        if not isinstance(self.store, PgKnowledgeStore) and await archive.projection_dirty(
+            self.store.root
+        ):
             return True
         if not await AsyncPath(self.graph_out).is_file():
+            if isinstance(self.store, PgKnowledgeStore):
+                return True
             return await AsyncPath(self.store.root).is_dir()
         graph_mtime = (await AsyncPath(self.graph_out).stat()).st_mtime
+        if isinstance(self.store, PgKnowledgeStore):
+            latest = await self.store.latest_write()
+            return latest is not None and latest.timestamp() > graph_mtime
         for node_id in await self.store.list_ids():
             try:
                 if (await AsyncPath(self.store.path_for(node_id)).stat()).st_mtime > graph_mtime:
@@ -335,15 +348,27 @@ def _error_response(exc: manage.ManageError) -> JSONResponse:
     )
 
 
-def create_app() -> FastAPI:
-    knowledge_dir = Path(os.environ.get("MEMHUB_KNOWLEDGE_DIR", "./knowledge"))
+def create_app(
+    *,
+    store: KnowledgeStore | PgKnowledgeStore | None = None,
+    schema: str | None = KB_SCHEMA,
+) -> FastAPI:
+    """组装 kb-api；默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储（规格 §9.2.4）。
+
+    `store` 与 `schema` 仅供测试注入独立 schema；生产入口不留文件存储退路，
+    `search_path` 固定为 `kb`。
+    """
     graph_out = Path(os.environ.get("MEMHUB_KB_GRAPH", DEFAULT_GRAPH))
     web_dist_raw = os.environ.get("MEMHUB_KB_WEB_DIST", "")
     web_dist = Path(web_dist_raw) if web_dist_raw else None
     auto_rebuild = os.environ.get("MEMHUB_KB_AUTO_REBUILD", "1") not in {"0", "off", "false"}
     graph_restarter = _GraphRestarter.from_env()
+    owned: PgKnowledgeStore | None = None
+    if store is None:
+        owned = create_runtime_store(schema=schema)
+        store = owned
     api = KnowledgeApi(
-        knowledge_dir,
+        store,
         graph_out,
         auto_rebuild=auto_rebuild,
         on_rebuilt=graph_restarter.restart if graph_restarter else None,
@@ -361,10 +386,16 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if graph_restarter is not None and await AsyncPath(graph_out).is_file():
             await graph_restarter.start()
-        if await archive.projection_dirty(api.store.root):
+        if not isinstance(api.store, PgKnowledgeStore) and await archive.projection_dirty(
+            api.store.root
+        ):
             api.schedule_rebuild()
-        async with mcp.lifespan():
-            yield
+        try:
+            async with mcp.lifespan():
+                yield
+        finally:
+            if owned is not None:
+                await owned.aclose()
 
     app = FastAPI(title="memhub kb-api", version="0.1.0", lifespan=lifespan)
     app.state.kb = api
@@ -431,7 +462,7 @@ def create_app() -> FastAPI:
     async def healthz() -> dict[str, Any]:
         return {
             "ok": True,
-            "knowledge_dir": str(api.store.root),
+            "store": "pg" if isinstance(api.store, PgKnowledgeStore) else "files",
             "nodes": len(await api.store.list_ids()),
             "projection": await api.rebuild_status(),
         }

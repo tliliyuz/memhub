@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """机械门禁：数据访问禁止手写 SQL（ADR-0005）。
 
-扫描 `src/` 下 Python 文件，命中以下任一即失败：
+扫描 `src/` 与 `alembic/` 下的 Python 文件，命中以下任一即失败：
 
 - 调用 SQLAlchemy 的 `text(...)`（裸 SQL 片段）；
 - 把 SQL 字符串/拼接串直接传给 `execute(...)` / `exec_driver_sql(...)`。
+
+`alembic/` 本不在 `src/` 内，但 ADR-0013 的知识表迁移写在这里；不扫它，
+「迁移体不写裸 SQL」就是一句没人守的承诺。
 
 允许的例外只有 `src/memhub/ingest/migrations.py`——迁移 DDL 是冻结基线，
 不是运行时数据访问。新增例外必须在 ADR 里说明理由，不能在这里悄悄放宽。
@@ -21,6 +24,8 @@ import re
 from pathlib import Path
 
 ALLOWED = {Path("src/memhub/ingest/migrations.py")}
+# 扫描根：`alembic/` 不存在时跳过（未引入 Alembic 的分支不受影响）。
+SCAN_ROOTS = ("src", "alembic")
 SQL_KEYWORDS = re.compile(
     r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|WITH)\b",
     re.IGNORECASE,
@@ -74,13 +79,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
     failed = False
-    for path in sorted((root / "src").rglob("*.py")):
-        relative = path.relative_to(root)
-        if relative in ALLOWED:
+    for scan_root in SCAN_ROOTS:
+        base = root / scan_root
+        if not base.is_dir():
             continue
-        for lineno, message in find_violations(path.read_text(encoding="utf-8"), str(relative)):
-            print(f"{relative}:{lineno}: {message}")
-            failed = True
+        for path in sorted(base.rglob("*.py")):
+            relative = path.relative_to(root)
+            if relative in ALLOWED:
+                continue
+            for lineno, message in find_violations(path.read_text(encoding="utf-8"), str(relative)):
+                print(f"{relative}:{lineno}: {message}")
+                failed = True
     if failed:
         print("禁止手写 SQL：请用 ORM/Core 表达（例外需在 ADR 登记）", flush=True)
         return 1

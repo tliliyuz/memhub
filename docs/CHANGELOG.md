@@ -1,18 +1,82 @@
 # CHANGELOG
 
-## 未发布（MCP 候选区闭环）
+## 2026-11-25（kb 容器独立 env_file，隔离运行态凭据）
+
+- `fix(deploy)`：`compose.yml` 的 kb 服务改用独立 `/etc/memhub/env.kb`，不再继承默认 `/etc/memhub/env`——受限的 kb 容器不应拿到 `MEMHUB_DB_URL`（运行态全权角色）、`PGPASSWORD`、LLM 凭据与设备 token 密钥。`env.kb` 至少写 `MEMHUB_KB_DB_URL`；`/mcp` 入口需要 `MEMHUB_MCP_GRANTS`，另按需拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`。
+- `docs(deploy)`：README 运行形态表与「知识真源切换」第 1 步补充 `env.kb` 的建法与键范围；部署顺序第 3 步加入前置确认。
+- 验证（2026-11-25，本地）：`docker compose config` 以临时 stub env_file 通过，解析后 kb 的 environment 只含 stub 中的 `MEMHUB_KB_DB_URL`（证明不再继承共享文件）；`check_document_format.py` / `check_document_ownership.py` / `check_agent_entrypoints_sync.py` 通过。本项为配置与文档变更，无法制造业务 RED，按 SDD 例外处理。
+
+## 2026-11-25（Alembic 版本表显式落 `kb` schema）
+
+- `fix(alembic)`：`alembic/env.py` 给所有 `context.configure(...)` 显式传 `version_table_schema`——生产路径（未注入连接，`MEMHUB_KB_MIGRATE_DB_URL` 带外执行）固定 `kb`，不再依赖角色 `search_path` 兜底；注入连接（测试隔离、`migrate-kb`）跟随该连接当前 schema，隔离用例不写进 `kb`（ADR-0013 §6）。
+- `fix(alembic)`：`--sql` 离线模式优先使用调用方注入的 `sqlalchemy.url`，再退回 `MEMHUB_KB_MIGRATE_DB_URL`。
+- `test`：`test_kb_migrations.py` 新增离线 SQL 断言（`kb.alembic_version` 出现、`public.alembic_version` 不出现）。
+- 验证（2026-11-25，本地）：`pytest tests/contract/test_kb_migrations.py` 4 passed；全量 `pytest` 545 passed / 1 skipped；`ruff check`、`ruff format --check`、`mypy src`（48 files）、`check_no_raw_sql.py`、`check_async_io.py` 全绿。
+
+## 2026-11-25（写入审计落 `kb_write_audit`）
+
+- `feat(kb)`：`PgKnowledgeStore` 新增 `record_write_audit()`，向 `kb_write_audit` 写一条不含正文与 token 的审计（规格 §3.6）；审计自成事务，落库失败按原路径上抛，不静默丢记录。
+- `feat(mcp)`：三个写工具（`kb_write_candidate` / `kb_update_candidate` / `kb_deprecate`）每次写尝试（含被拒的）落一行审计：`actor=mcp:<grant_id>`、`project`、`node_id`、`action`（create/update/deprecate）、`result=ok` 或拒绝原因码；文件存储（测试夹具）仍只留日志。
+- `feat(ingest)`：每次采集决策（接受、拒绝与重放）落一行审计：`actor=device:<device_id>`、`project`、`action=ingest`、`result=ok` 或拒绝原因码；原 `memhub.ingest.audit` 日志保留为运维旁路。
+- `docs`：`mcp-tools.md` 0.6 与 `ingest-api.md` 0.8 记审计落库语义，契约索引升到 0.10。
+- `test`：新增 `tests/contract/test_kb_write_audit.py`（三写工具的成功/拒绝/越权审计与内容不泄漏）与采集审计落库断言。
+
+## 2026-11-25（运行时强制 PG：投影、MCP、CLI、worker 接线）
+
+- `feat(kb)`：运行入口统一经 `create_runtime_store()` 从 `MEMHUB_KB_DB_URL` 构造 `PgKnowledgeStore`；kb-api、MCP、worker、CLI 缺 DSN 时抛 `KbDsnMissing`，不再退回 `knowledge/` 文件存储。`KnowledgeStore` 保留给测试夹具、迁移工具与一次性迁移源。
+- `feat(kb)`：投影改为存储无关——`build_graph` 经 `edge_lines()` 读节点与边，PG 版 `save_projection` 跳过文件锁与脏标记；投影过期判断改用 `latest_write()`（取 `kb_node_revisions` / `kb_edges` 的最大时间），不再依赖文件 mtime。
+- `feat(worker)`：`WorkerConfig` 持有存储对象而非真源目录；merge 的锁与目标校验改用 `store.write_scope()` / `store.guard_write()`，PG 版一次写入即一个事务；新建节点显式带上完整 id，满足 PG 写入的 id 一致性校验。
+- `feat(cli)`：`ingest` / `project` / `mcp` / `kb` / `worker` 去掉 `--knowledge-dir`，完成输出与冒烟日志改为 `真源=PG（schema kb）`；`recover-kb-archive` 仍保留目录参数（文件版归档是迁移期工具）。
+- `feat(kb)`：`TargetRegistry` 改为接收登记状态来源（文件或 PG 存储），worker 与采集共用同一判据。
+- `feat(ingest)`：采集目标的「已登记且活动」改为读 `kb_projects`（存在行且 `archived_at` 为空），不再读 `MEMHUB_KNOWLEDGE_DIR` 的目录与 `.kbs.json`；`create_app` 经 `create_runtime_store()` 构造 PG 存储，缺 `MEMHUB_KB_DB_URL` 启动即抛 `KbDsnMissing`，应用自建引擎在 lifespan 关闭。`/ingest/raw` 与 `/ingest/projects` 共用同一判据；归档事务 `pending` 时仍返回通用 `500/2001`。采集侧只读该表，不写知识真源。
+- `test(kb)`：新增 PG boot / 投影 / worker 接线用例（缺 DSN 启动失败、worker 写库不落 markdown、PG 归档与 pending 事务的暂缓与隔离）；采集契约用例改用独立 PG schema 登记目标，覆盖归档后重放拒绝与未完成归档事务的通用错误；PG 夹具上移到 `tests/conftest.py` 供 unit 与 contract 共用。
+- `docs`：`ENVIRONMENT` 更新 `MEMHUB_KNOWLEDGE_DIR` 的读取方（仅迁移/恢复工具）与 `MEMHUB_KB_DB_URL` 的适用范围（含 ingest）；`ingest-api` 契约升到 0.7，说明登记判据改读 `kb_projects`。
+## 2026-11-25（部署与锁文件对齐 PG 真源）
+
+- `feat(deploy)`：`Dockerfile.kb` 改装 `memhub[postgres,engine,mcp-http]`，移除 `--knowledge-dir`，烘入 `alembic.ini` 与 `alembic/`——Alembic 由一次性容器带外执行（ADR-0013 §4，不在容器启动时跑），运行入口只认 `MEMHUB_KB_DB_URL`。
+- `docs(deploy)`：README 新增「知识真源切换（markdown → PG，一次性）」小节：建对象与角色 → 停写 → Alembic 建表（一次性容器，运行位置留有备选宿主 venv 的待负责人裁决项）→ `migrate-kb` dry-run/写库/`--verify-only`（强制 `--archives migrate`）→ 备份 → 负责人授权删 markdown → 强制重建三容器 → 回滚与验收；`project` 等 timer 命令去掉 `--knowledge-dir`，kb-api 条目补连 PG 说明。
+- `chore(deploy)`：`lock-ingest.txt`（23→28 项）与 `lock-worker.txt`（55→60 项）补 `alembic 1.20.1` / `SQLAlchemy 2.0.58` / `greenlet 3.5.6` / `Mako 1.4.3` / `MarkupSafe 3.0.4`，纯增不改既有版本。注意：本机 Docker daemon 未运行，锁由离线 `pip install --target`（多 `--platform` 标签）仿真生成；**权威锁仍须发版时在镜像内 `pip freeze` 重出**，同时 `deploy/dist` 的 wheelhouse 需补上述 3 个 wheel 并按最终发布提交重打 memhub wheel 与 `SHA256SUMS`/`MANIFEST`。
+- `docs(compose)`：kb 服务注释改为「连 PG：`MEMHUB_KB_DB_URL` 经 env_file 注入，缺失启动即失败」，图谱页数据来源改为 `/api/v1/kb/graph` 直读 PG。
+- `docs(guides)`：DEVELOPMENT §1/§2/§3/§9/§9.1/§10 按运行态 PG 重写（安装 extra、目录分层、PG 契约测试命令、端到端闭环走 `--create-project`/`project --out`、一次性迁移与归档恢复命令、MCP 不再传 `--knowledge-dir`）。
+- 验证（2026-11-25，本地）：`docker compose -f deploy/compose.yml config` 通过（临时 stub `env_file`，验后删除）；锁文件为离线 `pip install --target`（ingest 侧 29 wheel、worker 侧 78 wheel 的安装产物，去掉 win32 专属的 `colorama` / `win32_setctime` 与 ingest 的 `tzdata`）导出，SQLAlchemy 保持 2.0.58（下载器给出的 2.1.9 被弃用，符合 `<2.1` 上限）。本次未改 Python，`ruff` 不适用；`check_document_format.py --staged`、`check_document_ownership.py --staged`、`check_env_example_keys.py`（29 键一致）与 pre-commit 全钩子通过。全量 pytest 未在本机重跑（避免与 peer 并发共用测试库），以 peer 分支 `d954c3b`/`ecd380a` 的 504 passed/1 skipped 为准。
+
+## 2026-11-24（kb 迁移工具：写库半段与逐节点校验）
+
+- `feat(migrate-kb)`：新增 `src/memhub/kb/migrate_db.py`，把解析出的迁移计划写进 `kb_projects` / `kb_nodes` / `kb_edges` / `kb_archives`，并回写回收站的删除留痕到 `kb_node_revisions`。写入顺序固定为项目 → 节点 → 边 → 归档（可选）→ 修订，单事务提交；`kb_projects` 先于 `kb_nodes`，因为 ORM 模型之间没有 relationship、flush 顺序不由依赖推断。`apply_plan` 按主键 / `(source, predicate, target)` 三元组 upsert，重复运行计数不变（规格 §5 第 9 步）。
+- `feat(migrate-kb)`：`--verify-only` 改为逐节点、逐边比对（规格 §5 第 7 步）：`read_stored` 回读库内全部行，`diff_plan` 用与解析侧同一个 `node_revision` 重算内容哈希后比对，差异分九类（项目缺失/多余/变更、节点缺失/多余/变更、边缺失/多余、归档快照不符）逐项打印，不一致非 0 退出。归档快照默认不比，`--archives migrate` 时才对 `bytea` 快照的 sha256。悬空边原样写入并参与比对，不因校验丢弃。
+- `feat(cli)`：`memhub migrate-kb` 新增 `--schema`，目标 schema 由 `search_path` 决定，缺省不设（生产用专用 schema `kb`，测试可指向独立 schema）。`--delete-source` 仍不执行删除：校验通过后打印需负责人授权、返回 3，源文件不动（ADR-0013 §9）。
+- `fix(migrate)`：内容哈希按 UTC 归一。`timestamptz` 按会话时区回读，磁盘侧的 `+08:00` 与库侧的 `+00:00` 表示同一时刻，不归一就会让同一条记录在两侧算出不同 `revision`；不带时区的时间按 UTC 处理。
+- `fix(migrate)`：项目行的时间取磁盘事实而非扫描时刻。登记缺 `created_at` 时回落到该库节点时间的极值（无节点才用纪元时间），`updated_at` 取 `created_at` 与节点极大值的较大者；原先用扫描时刻会让每次解析都得到不同的项目哈希，`--verify-only` 永远报内容不一致。
+- `fix(migrate)`：回收站 `.meta.json` 改为相对知识库根解析。原先按进程 CWD 拼路径，文件永远找不到，删除审计（`actor` / `reason`）静默丢失，而迁移后 `kb_node_revisions` 是唯一的删除留痕。
+- `fix(migrate)`：归档行带解析侧的辅助键（`snapshot_sha256`、`name`），直接进 upsert 会因不存在该列而编译失败；写库前按目标表的真实列名过滤。
+- `fix(migrate)`：迁移的「未完成归档事务」判定只认 `_kb_archives/pending.json`。原先复用了 `archive.projection_dirty`，它把 `pending.json` 与 `projection-dirty` 一并算作阻断；而整库归档**成功后**也会留下 `projection-dirty` 直到投影重建，结果是归档过任何库的服务器永远报「存在未完成的归档事务」而无法迁移。新增 `archive.pending_transaction` 区分两者，`projection_dirty` 的既有调用方不变。
+- `fix(migrate)`：整库归档后目录与登记都已消失，但 `_trash` 里的节点还在盘上；这些节点的 `project` 外键指向的行原先不建，写库直接 `kb_nodes_project_fkey` 失败并整体回滚。现在按归档头复现归档库的 `kb_projects` 行（`name` 取归档头显示名，`archived_at` 取 `deleted_at`，`updated_at` 不早于归档时间），并保证任何节点行引用的库都有对应行；解析顺序改为先扫归档再建项目行。仅登记无目录、无节点、无归档的库仍只进 `missing_projects`，不建行。
+- `fix(migrate)`：已恢复的归档目录不再算坏包。恢复成功会删掉 `active.json`、留下 `snapshot.zip` 与目录，归档是否生效以 `active.json` 为准（与 `catalog.list_archives` 同口径）；原先把它报进 `invalid_archives` 并阻断写库，「归档过再恢复」的服务器因此永远无法迁移。`active.json` 在而快照缺失仍按坏包阻断。
+- `docs(guides)`：开发指南 §3 新增 PG 契约测试命令，说明 `MEMHUB_TEST_DB_URL` 未设置时用例 skip、skip 不计为通过，且只单独导出该键、不整份 source 环境文件（会顺带覆盖运行态 `MEMHUB_DB_URL` 与 `PG*`，测试结果不可信）；§4 验证矩阵新增「kb 存储 / 迁移 / 契约夹具」一行；§9 增补一次性迁移的端到端命令。
+- 迁移态（记录见本条，规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) 为当次权威）：
+  - 当前真实形态：知识仍以 markdown 为运行时真源（`KnowledgeStore`、跨进程写锁、`.kbs.json` 登记），`kb_*` 六张表已建好、迁移工具可写可校验，但运行时读写尚未切换。
+  - 最终目标：PostgreSQL 的 `kb_*` 为唯一真源（ADR-0013），服务器 markdown 迁移后删除，仓库只留 `tests/fixtures`。
+  - 迁移步骤与依赖：建表（Alembic 基线）→ `migrate-kb` 写库 → `--verify-only` 逐节点通过 → `pg_dump` 与 `knowledge/` 打包备份 → 负责人授权后删除 markdown → 运行时切到 PG 存储层 → 删除文件退路。
+  - Consumer：kb-api 与 MCP 读取、worker 提炼写入、管理台删除/归档、采集目标校验；切换点由存储层的 `PgKnowledgeStore` 决定，逐个 consumer 改由同一存储协议承接。
+  - 兼容调用量：迁移工具在 dev 库 `memhub_dev` 上实测通过；生产 `knowledge/` 的节点量、逐库边数与悬空边数须在服务器上以 `--dry-run` 现场统计，本仓库无该数据。
+  - 退出门禁与删除时点：逐节点、逐边哈希全部一致 + `pg_dump` 与 markdown 打包备份完成（ADR-0013 §9）；删除动作由负责人在服务器执行或明确授权，本仓库不做。
+- 验证（2026-11-24，本地，只单独导出 `MEMHUB_TEST_DB_URL`，未写进任何文件）：`pytest -q` 全量 `445 passed, 1 skipped`（136.96s；skip 为 Windows 下无法建符号链接的既有用例）；同一命令不设该键时 `407 passed, 35 skipped`，PG 用例整组 skip、按规格 §8.10 不计为通过。`ruff check src tests scripts alembic deploy` 与 `ruff format --check` 通过（98 文件）；`mypy src` 无问题（45 个源文件）；七个治理门禁通过。`memhub migrate-kb` 对 dev 库实测（含「先软删节点、再整库归档」的合成树，Alembic 基线建出的全新 schema）：写入 → 校验通过 → 再写入 → 再校验通过 → `--delete-source` 返回 3 且源文件不动；库内该归档库的 `kb_projects.archived_at` 非空、显示名取归档头，回收站节点与归档快照均落库。上面均为本地结果，不含生产数据与服务器操作。
+
+## 2026-11-24（MCP 写候选与候选区闭环）
 
 - `feat(mcp)`：新增 `kb_update_candidate` 与 `kb_deprecate`（ADR-0012），补齐候选区写闭环，仍然不碰 canonical。两者都要求 `mcp:write` 与 `expected_revision`（取自 `kb_read` 新增返回的 `revision`）；检查与写入在同一把跨进程写锁内完成，不符返回 `409/1010` `revision_conflict`，目标不是 `tier=candidate` 返回 `409/1010` `not_candidate` 且不改文件。更新只允许 `title/body/tags/confidence`，并对更新后的标题与正文重跑内容门槛与同项目正文哈希去重；废弃保留文件、`reason` 写入 `deprecated_reason` 并追加 `## 废弃说明`，`superseded_by` 可选（指向自己或不存在分别返回 `superseded_by_invalid` / `superseded_by_unavailable`）。
 - `feat(contract)`：`NodeFrontmatter` 新增可选字段 `deprecated_reason`；`tier=deprecated` 的约束从「必须有 `superseded_by`」放宽为「`superseded_by` 或 `deprecated_reason` 至少一项」。已存在且不含该字段的节点不受影响。
 - `feat(mcp)`：`kb_read` 返回 `revision`，作为两个写工具的前置条件来源；`tools/list` 对 `mcp:write` 由五个工具变为七个（`mcp:read` 仍是四个）。三个写工具的审计日志共用一条记录格式。
 - `docs`：MCP 契约升到 0.4（候选区闭环）；跨端契约索引升到 v0.8；`node-schema` 补 `deprecated_reason`；新增 ADR-0012 并在 ADR 索引登记。
+- 发布（2026-11-24，回滚目录 `memhub-release-62bd6fb-20261124-095911`）：release 提交为 merge `62bd6fb`（父 `b8bd53c` + `ed3c4ec`），内容含 `25f3bb6`、`ec74c07`、`2b2889e`、`7536c96`；发布前线上为 `7536c96`（三容器，`backup-62bd6fb-pre` 标签镜像构建于 11-23 11:32 CST），`2b2889e` 与 `25f3bb6` 均属本次首发；`main` 与 `dev`（`ed3c4ec`）均已推送 `origin`。`deploy/dist` 按 `62bd6fb` 重建：wheel `0f3b1f08…`，`SHA256SUMS` 共 162 项，本地与服务器均 162/162 通过；wheelhouse-ingest 26 个 wheel、wheelhouse-worker 75 个（补入 `mcp` 2.3.0 及其 Linux 依赖）、web-dist 61 个文件。三镜像 `memhub/app:62bd6fb`（`9c43009a281d…`）、`app-worker:62bd6fb`（`4ed186b2be22…`）、`app-kb:62bd6fb`（`c88245f69d32…`）以 `--network=none` 离线构建，2026-11-24T02:33Z（CST 10:33）以新镜像启动，回滚标签 `backup-62bd6fb-pre`。nginx vhost 换为 `62bd6fb` 版本（新增精确 `location = /mcp`，16 KiB 上限、不挂 `auth_request`），`nginx -t` 通过后 reload。`MEMHUB_MCP_GRANTS` 单条记录 scope 由 `mcp:read` 改为 `mcp:write`，摘要、到期与 8 个库不变。线上 compose 含本地增量（oauth-egress 容器、代理环境变量），只替换三个 image 标签，未整份覆盖；knowledge/data 内容、配额与 `memhub-rebuild.timer` 未动。
+- 验收（2026-11-24）：生产 kb/ingest `healthz` 200、portal `/` 200、`/mcp` 无凭据 401，三容器 healthy，worker 窗口外休眠。隔离夹具（合成 alpha/beta、独立端口、验收后销毁）：`mcp:write` 凭据 `tools/list`=7 且 `readOnlyHint` 为 `[T,T,T,T,F,F,F]`，`mcp:read` 凭据 `tools/list`=4 且看不到写工具；写链路 `kb_write_candidate` → `kb_read` 取 `revision` → `kb_update_candidate` 成功 → 旧 `revision` 再更新得 `1010 revision_conflict` → `kb_deprecate` 后 `tier=deprecated` 且 `deprecated_reason` 有值。`GET /ingest/projects` 在隔离夹具上实测返回 `writable_only: true`，契约 0.6 生效。生产写侧未做探针（未用生产 token、未临时加摘要），生产 `tools/list`=7 待用户以自己持有的凭据确认。以上部署与夹具验收由云主机运维会话执行并报告，本仓库未复跑。
 
-## 未发布（MCP 写候选）
+## 2026-11-24（MCP 写候选）
 
 - `feat(mcp)`：开放第一个写工具 `kb_write_candidate`（ADR-0011）。新增 `mcp:write` 作用域（隐含读），`tools/list` 按作用域裁剪；只创建 `tier=candidate`，slug 命中 canonical/deprecated 返回 `slug_conflict_canonical`、命中已有 candidate 返回 `slug_conflict_candidate`、归一化正文哈希命中返回 `content_duplicate`。证据必填，复用 `SourceRef` 形状，做结构与归属校验（拒绝绝对路径、`..` 穿越、指向未授权库、敏感串形态）；不做可解析性校验。内容门槛覆盖可机械识别的垃圾（过短、寒暄/确认集合、日志倾倒）；每日上限 50 次/凭据/UTC 日，按新节点 `source` 中的 `mcp:<grant_id>` 标记现算。写成功自动 git commit，message 含工具名与调用者。canonical 修改与治理组其余工具仍关闭。
 - `docs`：MCP 契约升到 0.3（写候选）；跨端契约索引升到 v0.7；环境键说明更新 `MEMHUB_MCP_GRANTS` 的 scope 取值。
 
-## 未发布（采集目标校验与会话候选门禁）
+## 2026-11-24（采集目标校验与会话候选门禁）
 
 - `docs(governance)`：分支与发版规则调整：`main` 为稳定分支，只有负责人明确允许后才能合入，发版只从 `main` 出；`dev` 为日常集成分支，worktree 从 `dev` 创建，验收后合回 `dev` 并清理；同步 `AGENTS.md`、`CLAUDE.md` 与开发指南 §6。
 - `fix(ingest)`：采集写的目标边界收敛为「显式 + 已登记 + 活动」，按 `data.reason`（missing/reserved/invalid/unregistered/inactive/target_conflict）区分拒绝；不再按来源命名兜底建库，每次采集写一条不含正文与 token 的审计。列表只返回已登记且活动的目标；拒绝不推进游标，也不追加重放内容。

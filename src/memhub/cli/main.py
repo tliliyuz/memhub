@@ -8,13 +8,16 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from anyio import Path as AsyncPath
 
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
 from memhub.kb import archive, catalog, manage, proc, target_access
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.projection import save_projection
+from memhub.kb.session import create_runtime_store
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
@@ -27,6 +30,9 @@ from memhub.worker.render import (
     render_session_blocks,
     truncate_blocks,
 )
+
+if TYPE_CHECKING:
+    from memhub.kb.migrate_db import VerifyDiff
 
 SKELETON_PAGES = {"schema.md", "log.md", "purpose.md"}
 DEVICE_ID_RE = re.compile(
@@ -55,13 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         help="目标知识库未登记时，在本次抽取前显式建库（默认只写已登记且活动的库）",
     )
     ingest.add_argument("--limit", type=int, default=0)
-    ingest.add_argument("--knowledge-dir", default=None)
     ingest.add_argument("--max-chars", type=int, default=12000)
     ingest.add_argument("--max-input-chars", type=int, default=0, help="截断输入（0 表示不截断）")
     ingest.add_argument("--dry-run", action="store_true")
 
     project_cmd = sub.add_parser("project", help="重建 semantica 图谱投影")
-    project_cmd.add_argument("--knowledge-dir", default=None)
     project_cmd.add_argument("--out", default="kb/kg.json")
 
     recover = sub.add_parser("recover-kb-archive", help="核对并续做未完成的整库归档或恢复")
@@ -72,8 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--no-browser", action="store_true")
 
-    mcp = sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
-    mcp.add_argument("--knowledge-dir", default=None)
+    sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
 
     purge = sub.add_parser(
         "purge-expired", help="删掉重放窗口（24h）外的批次记录，供 systemd timer 调用"
@@ -102,7 +105,6 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--interval", type=float, default=300.0, help="轮询间隔秒数")
     worker.add_argument("--limit", type=int, default=20, help="每轮最多处理文件数")
     worker.add_argument("--data-dir", default=None)
-    worker.add_argument("--knowledge-dir", default=None)
     worker.add_argument(
         "--dry-run", action="store_true", help="只校验目录/配置并打印计划后退出（冒烟用）"
     )
@@ -111,7 +113,6 @@ def main(argv: list[str] | None = None) -> int:
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
 
     kb = sub.add_parser("kb", help="启动知识库管理 API（本地管理台后端 + 静态前端）")
-    kb.add_argument("--knowledge-dir", default=None)
     kb.add_argument("--graph-out", default=None, help="投影输出路径（默认 kb/kg.json）")
     kb.add_argument("--port", type=int, default=None, help="默认 8701（MEMHUB_KB_HTTP_PORT）")
     kb.add_argument("--web-dist", default=None, help="前端构建产物目录（含 index.html）")
@@ -131,6 +132,30 @@ def main(argv: list[str] | None = None) -> int:
     provision.add_argument("--device-id", required=True, help="客户端生成的 UUID v4")
     provision.add_argument("--name", required=True)
     provision.add_argument("--platform", required=True)
+
+    migrate_kb = sub.add_parser(
+        "migrate-kb", help="一次性把 markdown 真源迁移到 PG（默认 dry-run，只读）"
+    )
+    migrate_kb.add_argument("--knowledge-dir", default=None)
+    migrate_kb.add_argument("--dsn", default=None, help="缺省取 MEMHUB_KB_DB_URL（运行时角色）")
+    migrate_kb.add_argument(
+        "--schema",
+        default=None,
+        help="目标 schema（search_path）；缺省不设，生产用专用 schema kb",
+    )
+    migrate_kb.add_argument("--dry-run", action="store_true", help="只解析与统计，不写库不删文件")
+    migrate_kb.add_argument("--verify-only", action="store_true", help="与库内数据逐项比对")
+    migrate_kb.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="校验通过且已备份后删除 markdown 真源（默认不删）",
+    )
+    migrate_kb.add_argument(
+        "--archives",
+        choices=["skip", "migrate"],
+        default="skip",
+        help="整库归档快照的处理方式；dry-run 下两者都只统计",
+    )
 
     args = parser.parse_args(argv)
     if args.version:
@@ -158,6 +183,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "api": _api,
         "kb": _kb,
         "provision-device": _provision_device,
+        "migrate-kb": _migrate_kb,
     }
     handler = handlers.get(args.command or "")
     if handler is None:
@@ -167,6 +193,17 @@ async def _dispatch(args: argparse.Namespace) -> int:
 
 def _knowledge_dir(override: str | None) -> Path:
     return Path(override or os.environ.get("MEMHUB_KNOWLEDGE_DIR", "./knowledge"))
+
+
+def _runtime_store(args: argparse.Namespace) -> PgKnowledgeStore:
+    """运行入口统一构造 PG 存储；缺 `MEMHUB_KB_DB_URL` 直接抛 `KbDsnMissing`。
+
+    `store` 属性只给测试注入独立 schema 用，命令行不会传。
+    """
+    injected = getattr(args, "store", None)
+    if isinstance(injected, PgKnowledgeStore):
+        return injected
+    return create_runtime_store()
 
 
 def _llm_client() -> tuple[AnthropicClient, str]:
@@ -199,7 +236,7 @@ async def _ingest(args: argparse.Namespace) -> int:
         return 0
 
     project = args.project or source_path.name
-    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    store = _runtime_store(args)
     if args.create_project and not args.dry_run:
         try:
             await catalog.create_kb(store, kb_id=project)
@@ -295,13 +332,13 @@ async def _ingest(args: argparse.Namespace) -> int:
 
     print(
         f"\n完成: {created} 新建 / {updated} 更新 / {skipped} 跳过(canonical) / {failed} 失败；"
-        f"真源目录 {store.root}"
+        "真源=PG（schema kb）"
     )
     return 1 if failed else 0
 
 
 async def _project(args: argparse.Namespace) -> int:
-    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    store = _runtime_store(args)
     out = Path(args.out)
     report = await save_projection(store, out)
     print(f"投影已写入 {out}: {report.nodes} 节点 / {report.edges} 边")
@@ -363,11 +400,11 @@ async def _serve(args: argparse.Namespace) -> int:
 
 
 async def _mcp(args: argparse.Namespace) -> int:
-    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
-    if not await AsyncPath(store.root).is_dir():
-        print(f"知识库目录不存在: {store.root}", file=sys.stderr)
-        return 2
-    return await serve_mcp(store)
+    store = _runtime_store(args)
+    try:
+        return await serve_mcp(store)
+    finally:
+        await store.aclose()
 
 
 async def _purge_expired(args: argparse.Namespace) -> int:
@@ -429,20 +466,21 @@ async def _worker(args: argparse.Namespace) -> int:
     )
 
     data_dir = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
-    knowledge_dir = args.knowledge_dir or os.environ.get("MEMHUB_KNOWLEDGE_DIR", "")
-    if not data_dir or not knowledge_dir:
-        print("缺少 MEMHUB_DATA_DIR / MEMHUB_KNOWLEDGE_DIR", file=sys.stderr)
+    if not data_dir:
+        print("缺少 MEMHUB_DATA_DIR", file=sys.stderr)
         return 2
+    store = _runtime_store(args)
     if args.dry_run:
-        # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰文件。
+        # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰真源。
         raw_root = Path(data_dir) / "raw_store"
         exists = await AsyncPath(raw_root).is_dir()
         print(
-            f"[dry-run] data={data_dir} knowledge={knowledge_dir} "
+            f"[dry-run] data={data_dir} 真源=PG "
             f"raw_root={'exists' if exists else 'missing'} "
             f"window={args.window or 'all-day'} once={args.once}",
             flush=True,
         )
+        await store.aclose()
         return 0
     base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
@@ -487,7 +525,7 @@ async def _worker(args: argparse.Namespace) -> int:
     client, model = _llm_client()
     config = WorkerConfig(
         data_dir=Path(data_dir),
-        knowledge_dir=Path(knowledge_dir),
+        store=store,
         model=model,
         max_tokens=max_tokens,
         window=args.window or None,
@@ -508,6 +546,7 @@ async def _worker(args: argparse.Namespace) -> int:
             close = getattr(state, "close", None)
             if close is not None:
                 await close()
+            await store.aclose()
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -575,16 +614,123 @@ async def _run_server(
     await server.serve()
 
 
+async def _migrate_kb(args: argparse.Namespace) -> int:
+    """一次性迁移入口（规格 §5）：默认只 dry-run，写库需 DSN，删真源需校验通过。
+
+    前三步（解析、阻塞判定、差异清单）只读磁盘；`--verify-only` 与写库走
+    `memhub.kb.migrate_db`。任何「没做」都显式失败，不报告成通过。
+    """
+    from memhub.kb import migrate
+
+    root = Path(await AsyncPath(_knowledge_dir(args.knowledge_dir)).resolve())
+    if not await AsyncPath(root).is_dir():
+        print(f"知识库目录不存在: {root}", file=sys.stderr)
+        return 2
+    if args.delete_source and not args.verify_only:
+        print("--delete-source 必须与 --verify-only 同时使用", file=sys.stderr)
+        return 2
+
+    plan = await migrate.parse_tree(root)
+    diff = plan.diff.as_dict()
+    print(
+        f"解析结果: projects={len(plan.projects)} nodes={len(plan.nodes)} edges={len(plan.edges)}"
+    )
+    print(f"归档与回收站: archives={len(plan.archives)} trash_events={len(plan.trash_events)}")
+    if diff["unregistered_projects"]:
+        print(f"未登记库（将按目录导入）: {', '.join(diff['unregistered_projects'])}")
+    if diff["missing_projects"]:
+        print(f"已登记但目录不存在: {', '.join(diff['missing_projects'])}")
+    if diff["dangling_edges"]:
+        print(f"悬空边（原样迁入）: {len(diff['dangling_edges'])} 条")
+    for label, key in (
+        ("无效节点", "invalid_nodes"),
+        ("无效边", "invalid_edges"),
+        ("无效归档", "invalid_archives"),
+        ("无表列的字段", "unsupported_fields"),
+        ("无法识别的文件", "unknown_files"),
+        ("重复节点 id", "duplicate_ids"),
+    ):
+        if diff[key]:
+            print(f"{label}: {len(diff[key])} 处")
+
+    if plan.blocking:
+        reasons = []
+        if plan.diff.pending_archive:
+            reasons.append("存在未完成的归档事务（pending.json）")
+        if plan.diff.registry_error:
+            reasons.append(f"登记文件损坏：{plan.diff.registry_error}")
+        if plan.diff.duplicate_ids:
+            reasons.append("存在重复节点 id")
+        if plan.diff.invalid_archives:
+            reasons.append("归档数据损坏")
+        print(f"迁移被阻断：{'；'.join(reasons)}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        return 0
+
+    dsn = (args.dsn or os.environ.get("MEMHUB_KB_DB_URL", "")).strip()
+    if not dsn:
+        print("缺少 MEMHUB_KB_DB_URL（运行时角色 DSN），无法写库", file=sys.stderr)
+        return 2
+    from memhub.kb import migrate_db
+    from memhub.kb.session import create_engine_from_env
+
+    # 迁移工具按调用方给的 DSN 走，不强制生产 schema `kb`：目标 schema 由
+    # search_path 决定，测试/联调可以指向独立 schema。
+    engine = create_engine_from_env(dsn=dsn, schema=args.schema)
+    try:
+        if args.verify_only:
+            stored = await migrate_db.read_stored(engine)
+            report = migrate_db.diff_plan(plan, stored, archives=args.archives)
+            _print_verify_report(report)
+            if not report.ok:
+                return 1
+            print("校验通过：库内内容与磁盘真源逐节点、逐边一致")
+            if args.delete_source:
+                print(
+                    "--delete-source 的删除动作需负责人授权后在服务器执行；本次未删除任何文件",
+                    file=sys.stderr,
+                )
+                return 3
+            return 0
+        await migrate_db.apply_plan(engine, plan, archives=args.archives)
+        print(
+            f"写入完成: projects={len(plan.projects)} nodes={len(plan.nodes)} "
+            f"edges={len(plan.edges)} archives={len(plan.archives) if args.archives == 'migrate' else 0}"
+        )
+        return 0
+    finally:
+        await engine.dispose()
+
+
+def _print_verify_report(report: VerifyDiff) -> None:
+    """逐项打印差异；空清单不占终端行。"""
+    payload = report.as_dict()
+    labels = {
+        "missing_projects": "库内缺少的知识库",
+        "extra_projects": "库内多出的知识库",
+        "changed_projects": "内容不一致的知识库",
+        "missing_nodes": "库内缺少的节点",
+        "extra_nodes": "库内多出的节点",
+        "changed_nodes": "内容不一致的节点",
+        "missing_edges": "库内缺少的边",
+        "extra_edges": "库内多出的边",
+        "archive_mismatches": "归档快照不一致",
+    }
+    for key, label in labels.items():
+        if payload[key]:
+            print(f"{label}: {len(payload[key])} 处", file=sys.stderr)
+            for item in payload[key]:
+                print(f"  {item}", file=sys.stderr)
+
+
 async def _kb(args: argparse.Namespace) -> int:
     """本地知识库管理台：kb-api + （可选）explorer 子进程。
 
     只绑回环：这是单用户管理面，没有公网入口。前端构建产物缺失时纯 API 运行，
     开发期用 Vite 的 5173 端口直连。
     """
-    knowledge = Path(await AsyncPath(_knowledge_dir(args.knowledge_dir)).resolve())
-    if not await AsyncPath(knowledge).is_dir():
-        print(f"知识库目录不存在: {knowledge}", file=sys.stderr)
-        return 2
     graph_out = Path(
         await AsyncPath(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
     )
@@ -593,14 +739,13 @@ async def _kb(args: argparse.Namespace) -> int:
     if data_dir_raw:
         # 上传要落 raw_store：解析成绝对路径再交给 create_app，避免受启动目录影响。
         os.environ["MEMHUB_DATA_DIR"] = str(await AsyncPath(data_dir_raw).resolve())
-    os.environ["MEMHUB_KNOWLEDGE_DIR"] = str(knowledge)
     os.environ["MEMHUB_KB_GRAPH"] = str(graph_out)
     if web_dist:
         os.environ["MEMHUB_KB_WEB_DIST"] = str(await AsyncPath(web_dist).resolve())
     if args.spawn_graph:
         os.environ["MEMHUB_KB_GRAPH_PORT"] = str(args.graph_port)
     port = args.port or int(os.environ.get("MEMHUB_KB_HTTP_PORT", "8701"))
-    print(f"memhub kb-api: http://127.0.0.1:{port}/  真源={knowledge}", flush=True)
+    print(f"memhub kb-api: http://127.0.0.1:{port}/  真源=PG（schema kb）", flush=True)
     if await AsyncPath(graph_out).is_file():
         print(f"投影: {graph_out}", flush=True)
     if args.spawn_graph:

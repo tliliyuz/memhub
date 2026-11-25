@@ -9,11 +9,26 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from memhub.ingest.app import create_app
 from memhub.ingest.store import MemoryStore
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.models import Base
+from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.session import create_sessionmaker
 from memhub.worker.daemon import WorkerConfig, run_round
+
+PROJECTS = ("fixture-left", "fixture-right", "fixture-denied")
+
+
+@pytest.fixture
+async def store(kb_engine: AsyncEngine) -> PgKnowledgeStore:
+    async with kb_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    pg = PgKnowledgeStore(create_sessionmaker(kb_engine))
+    for project in PROJECTS[:2]:
+        await pg.register_project(project)
+    return pg
 
 
 class Fake:
@@ -42,21 +57,13 @@ class Fake:
 
 
 async def test_selected_target_is_the_only_landing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: PgKnowledgeStore
 ) -> None:
-    root = tmp_path / "knowledge"
-    for name in ("fixture-left", "fixture-right", "fixture-denied"):
-        (root / name).mkdir(parents=True)
-    # fixture-denied 目录存在但未登记：这正是当初被隐式建库的事故形态。
-    (root / ".kbs.json").write_text(
-        json.dumps({"kbs": [{"id": name} for name in ("fixture-left", "fixture-right")]}),
-        encoding="utf-8",
-    )
     data = tmp_path / "data"
     device = str(uuid.uuid4())
     monkeypatch.setenv("MEMHUB_ENV", "dev")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data))
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(root))
+    # `fixture-denied` 未登记：这正是当初被隐式建库的事故形态；目标只认 `kb_projects`。
     # 随机测试凭据仅留在本地进程内；不用任何操作系统已保存凭据。
     token = uuid.uuid4().hex
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", token)
@@ -96,7 +103,7 @@ async def test_selected_target_is_the_only_landing(
         ],
     }
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=create_app(state)),
+        transport=httpx.ASGITransport(app=create_app(state, kb_store=store)),
         base_url="http://127.0.0.1",
         headers={"Authorization": f"Bearer {token}"},
         trust_env=False,
@@ -110,10 +117,9 @@ async def test_selected_target_is_the_only_landing(
         assert accepted.status_code == 200
     fake = Fake()
     report = await run_round(
-        fake, WorkerConfig(data, root, "fake", is_registered=state.is_registered)
+        fake, WorkerConfig(data, store, "fake", is_registered=state.is_registered)
     )
     assert (report.processed, report.created, report.failed, fake.calls) == (1, 1, 0, 1)
-    store = KnowledgeStore(root)
     assert await store.list_ids() == ["fixture-right/procedure/separate-boards-during-drying"]
     node, _ = await store.read("fixture-right/procedure/separate-boards-during-drying")
     assert node.tier == "candidate"

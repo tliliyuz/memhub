@@ -25,6 +25,7 @@ from anyio import Path as AsyncPath
 from memhub.contract import KB_ID_RE
 from memhub.kb import archive, manage, query
 from memhub.kb.manage import ConflictError, InvalidError, NotFoundError, write_lock
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 
 REGISTRY_NAME = ".kbs.json"
@@ -80,13 +81,15 @@ async def _dirs(store: KnowledgeStore) -> list[str]:
     return sorted(names)
 
 
-async def exists(store: KnowledgeStore, kb_id: str) -> bool:
-    """轻量存在性判断：真源根下一级目录即知识库（与 `_dirs` 的判定一致）。
+async def exists(store: KnowledgeStore | PgKnowledgeStore, kb_id: str) -> bool:
+    """轻量存在性判断：文件版看真源根下一级目录，PG 版看 `kb_projects` 登记。
 
     不给上传路径用 `list_kbs`：它会逐库扫全部节点，只为判断一个 id 不值当。
     """
     if kb_id.startswith(("_", ".")):
         return False
+    if isinstance(store, PgKnowledgeStore):
+        return await store.project_exists(kb_id)
     return await AsyncPath(store.root / kb_id).is_dir()
 
 
@@ -108,7 +111,9 @@ async def _edges(store: KnowledgeStore, project: str) -> list[dict[str, Any]]:
     return edges
 
 
-async def list_kbs(store: KnowledgeStore) -> dict[str, Any]:
+async def list_kbs(store: KnowledgeStore | PgKnowledgeStore) -> dict[str, Any]:
+    if isinstance(store, PgKnowledgeStore):
+        return await store.list_projects()
     registry = await _load(store)
     items: list[dict[str, Any]] = []
     for kb_id in await _dirs(store):
@@ -133,10 +138,16 @@ async def list_kbs(store: KnowledgeStore) -> dict[str, Any]:
 
 
 async def create_kb(
-    store: KnowledgeStore, *, kb_id: str, name: str = "", description: str = ""
+    store: KnowledgeStore | PgKnowledgeStore,
+    *,
+    kb_id: str,
+    name: str = "",
+    description: str = "",
 ) -> dict[str, Any]:
     if not KB_ID_RE.fullmatch(kb_id):
         raise InvalidError("知识库 id 只能用小写字母/数字/./_/-，且以字母或数字开头", {"id": kb_id})
+    if isinstance(store, PgKnowledgeStore):
+        return await store.create_project(kb_id, name=name, description=description)
     async with write_lock(store.root):
         await manage.guard_project_write(store.root, kb_id)
         await archive.ensure_missing(await archive.checked_path(store.root, kb_id))
@@ -153,8 +164,14 @@ async def create_kb(
 
 
 async def update_kb(
-    store: KnowledgeStore, kb_id: str, *, name: str | None = None, description: str | None = None
+    store: KnowledgeStore | PgKnowledgeStore,
+    kb_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
 ) -> dict[str, Any]:
+    if isinstance(store, PgKnowledgeStore):
+        return await store.update_project(kb_id, name=name, description=description)
     async with write_lock(store.root):
         if kb_id not in await _dirs(store):
             raise NotFoundError(f"知识库不存在: {kb_id}")
@@ -223,10 +240,14 @@ async def _edge_bytes(store: KnowledgeStore) -> AsyncIterator[tuple[str, bytes]]
             yield name, data
 
 
-async def delete_kb(store: KnowledgeStore, kb_id: str, *, actor: str = "ui") -> dict[str, Any]:
+async def delete_kb(
+    store: KnowledgeStore | PgKnowledgeStore, kb_id: str, *, actor: str = "ui"
+) -> dict[str, Any]:
     """保存可校验的整库快照，再摘除活跃节点、关系和登记。"""
     if not KB_ID_RE.fullmatch(kb_id):
         raise InvalidError("知识库 id 不合法")
+    if isinstance(store, PgKnowledgeStore):
+        return await store.archive_project_kb(kb_id, actor=actor)
     async with write_lock(store.root):
         root = await archive.checked_path(store.root, kb_id)
         root_dir = AsyncPath(root)
@@ -321,7 +342,9 @@ async def delete_kb(store: KnowledgeStore, kb_id: str, *, actor: str = "ui") -> 
     return {**header, "commit": commit}
 
 
-async def list_archives(store: KnowledgeStore) -> dict[str, Any]:
+async def list_archives(store: KnowledgeStore | PgKnowledgeStore) -> dict[str, Any]:
+    if isinstance(store, PgKnowledgeStore):
+        return await store.list_archives()
     if not await AsyncPath(store.root).is_dir():
         return {"items": [], "total": 0}
     async with write_lock(store.root):
@@ -364,7 +387,9 @@ def _archive_index(raw: bytes, archive_id: str) -> tuple[dict[str, Any], str]:
     return header, digest
 
 
-async def restore_kb(store: KnowledgeStore, archive_id: str) -> dict[str, Any]:
+async def restore_kb(store: KnowledgeStore | PgKnowledgeStore, archive_id: str) -> dict[str, Any]:
+    if isinstance(store, PgKnowledgeStore):
+        return await store.restore_project_kb(archive_id)
     if not archive.ARCHIVE_ID.fullmatch(archive_id):
         raise NotFoundError("知识库归档不存在")
     async with write_lock(store.root):
@@ -509,11 +534,18 @@ def _archive_metadata(
     return entry, dirs, captured
 
 
-async def graph(store: KnowledgeStore, project: str) -> dict[str, Any]:
+async def graph(store: KnowledgeStore | PgKnowledgeStore, project: str) -> dict[str, Any]:
     """知识库子图：节点 + 已解析边 + 度数。用于管理台自绘，不碰 kg.json。"""
-    if project not in await _dirs(store):
-        raise NotFoundError(f"知识库不存在: {project}")
-    records = await query.records(store, project)
+    if isinstance(store, PgKnowledgeStore):
+        if not await store.project_exists(project):
+            raise NotFoundError(f"知识库不存在: {project}")
+        records = await query.records(store, project)
+        edge_records = await store.edges(project)
+    else:
+        if project not in await _dirs(store):
+            raise NotFoundError(f"知识库不存在: {project}")
+        records = await query.records(store, project)
+        edge_records = await _edges(store, project)
     ids = {record.id for record in records}
     slug_index: dict[str, list[str]] = {}
     for node_id in ids:
@@ -528,7 +560,7 @@ async def graph(store: KnowledgeStore, project: str) -> dict[str, Any]:
     degree: dict[str, int] = dict.fromkeys(ids, 0)
     edges: list[dict[str, str]] = []
     unresolved = 0
-    for record in await _edges(store, project):
+    for record in edge_records:
         source = resolve(str(record["source"]))
         target = resolve(str(record["target"]))
         if source is None or target is None:

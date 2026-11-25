@@ -60,3 +60,72 @@ def test_async_path_usage_passes(checker: ModuleType) -> None:
 def test_allowlisted_proc_module_passes(checker: ModuleType) -> None:
     source = "import subprocess\n\n\ndef f():\n    return subprocess.run(['git'], check=False)\n"
     assert checker.find_violations(source, "src/memhub/kb/proc.py") == []
+
+
+def test_alembic_dir_is_scanned(checker: ModuleType, tmp_path: Path) -> None:
+    """Alembic 迁移代码在 src/ 之外，同步 I/O 同样不能漏过门禁。"""
+    (tmp_path / "src").mkdir()
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "0001_kb.py").write_text(
+        "import time\n\n\ndef upgrade():\n    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    assert checker.main(["--root", str(tmp_path)]) == 1
+
+
+def test_alembic_dir_clean_passes(checker: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "0001_kb.py").write_text(
+        "from alembic import op\n\n\ndef upgrade():\n    op.create_table('kb_nodes')\n",
+        encoding="utf-8",
+    )
+    assert checker.main(["--root", str(tmp_path)]) == 0
+
+
+def test_path_binop_receiver_is_flagged(checker: ModuleType) -> None:
+    """`root / "x"` 得到的是同步 Path，直接调阻塞方法是同一类违规。"""
+    source = (
+        'from pathlib import Path\n\n\ndef f(root: Path):\n    return (root / "x").read_text()\n'
+    )
+    assert checker.find_violations(source, "x.py")
+
+
+def test_variable_bound_to_path_binop_is_flagged(checker: ModuleType) -> None:
+    """绑定到变量的同步 Path 不能因为中间多一步就漏过门禁。"""
+    source = (
+        "from pathlib import Path\n\n\n"
+        "def f(root: Path):\n"
+        '    path = root / "x"\n'
+        "    return path.read_text()\n"
+    )
+    assert checker.find_violations(source, "x.py")
+
+
+def test_variable_bound_to_path_call_is_flagged(checker: ModuleType) -> None:
+    source = 'from pathlib import Path\n\n\ndef f():\n    p = Path("x")\n    return p.is_file()\n'
+    assert checker.find_violations(source, "x.py")
+
+
+def test_anyio_path_variable_passes(checker: ModuleType) -> None:
+    """`AsyncPath`/anyio 的 Path 是异步实现，不能误报。"""
+    source = (
+        "from anyio import Path as AsyncPath\n\n\n"
+        "async def f(root: AsyncPath):\n"
+        '    path = root / "x"\n'
+        "    return await path.read_text(encoding='utf-8')\n"
+    )
+    assert checker.find_violations(source, "x.py") == []
+
+
+def test_async_iteration_over_async_path_passes(checker: ModuleType) -> None:
+    """`async for path in AsyncPath(...).rglob(...)` 里的 path 是异步 Path。"""
+    source = (
+        "from anyio import Path as AsyncPath\n\n\n"
+        "async def f(root):\n"
+        '    async for path in AsyncPath(root).rglob("*.md"):\n'
+        "        await path.read_text(encoding='utf-8')\n"
+    )
+    assert checker.find_violations(source, "x.py") == []

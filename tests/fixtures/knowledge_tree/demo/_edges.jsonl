@@ -1,0 +1,2 @@
+{"source": "demo/fact/alpha", "predicate": "related_to", "target": "demo/procedure/beta", "source_doc": "demo/fact/alpha"}
+{"source": "demo/fact/alpha", "predicate": "about", "target": "nowhere", "source_doc": "demo/fact/alpha"}
