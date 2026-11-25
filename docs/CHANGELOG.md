@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-25（Alembic 入口归一化 DSN 方言）
+
+- `fix(alembic)`：`alembic/env.py` 把 DSN 归一化成 psycopg 3 方言（复用 `memhub.kb.session` 的同一函数，公开为 `psycopg_dsn`）。此前 `postgresql://` 直接交给 `engine_from_config`，SQLAlchemy 会按默认方言去找 psycopg2；镜像里只有 psycopg 3，`alembic upgrade head` 在连库前即以 `ModuleNotFoundError: psycopg2` 失败。生产切换时是用 `postgresql+psycopg://` 临时绕过的；修复后 `deploy/README.md` 的一次性容器命令按原样可用。运行态异步引擎行为不变。
+- `test`：`test_kb_migrations.py` 新增 `test_online_path_normalizes_plain_dsn_to_psycopg3`，在 `engine_from_config` 处截获交给 SQLAlchemy 的 URL，断言已带 `+psycopg` 且不连库；先观察 RED（原始 URL 断言失败）再实施。
+- `docs`：`ENVIRONMENT.md` 说明该 DSN 可写 `postgresql://`，由入口归一化。
+- 验证（2026-11-25，本地）：RED——`pytest ... -k online_path` 1 failed，断言打印未归一化的 `postgresql://`；GREEN——同命令 1 passed，`test_kb_migrations.py` 与 `test_kb_session.py` 合计 13 passed / 3 skipped（无 `MEMHUB_TEST_DB_URL`，PG 用例按约定 skip）。
+
 ## 2026-11-25（kb 容器独立 env_file，隔离运行态凭据）
 
 - `fix(deploy)`：`compose.yml` 的 kb 服务改用独立 `/etc/memhub/env.kb`，不再继承默认 `/etc/memhub/env`——受限的 kb 容器不应拿到 `MEMHUB_DB_URL`（运行态全权角色）、`PGPASSWORD`、LLM 凭据与设备 token 密钥。`env.kb` 至少写 `MEMHUB_KB_DB_URL`；`/mcp` 入口需要 `MEMHUB_MCP_GRANTS`，另按需拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`。

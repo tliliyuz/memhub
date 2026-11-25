@@ -21,7 +21,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
 
 from memhub.kb.models import Base
-from memhub.kb.session import KB_SCHEMA, migrate_dsn
+from memhub.kb.session import KB_SCHEMA, migrate_dsn, psycopg_dsn
 
 config = context.config
 
@@ -42,7 +42,7 @@ def _injected_schema(connection: Connection) -> str:
 
 def run_migrations_offline() -> None:
     """`--sql` 模式：只生成语句，不连库。"""
-    url = config.get_main_option("sqlalchemy.url") or migrate_dsn(environ=os.environ)
+    url = psycopg_dsn(config.get_main_option("sqlalchemy.url") or migrate_dsn(environ=os.environ))
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -63,6 +63,7 @@ def run_migrations_online() -> None:
     section = config.get_section(config.config_ini_section, {})
     if not section.get("sqlalchemy.url"):
         section["sqlalchemy.url"] = migrate_dsn(environ=os.environ)
+    section["sqlalchemy.url"] = psycopg_dsn(section["sqlalchemy.url"])
     engine = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
     with engine.connect() as connection:
         _run_with(connection, schema=KB_SCHEMA)
