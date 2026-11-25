@@ -7,7 +7,7 @@
 - `chore(deploy)`：`lock-ingest.txt`（23→28 项）与 `lock-worker.txt`（55→60 项）补 `alembic 1.20.1` / `SQLAlchemy 2.0.58` / `greenlet 3.5.6` / `Mako 1.4.3` / `MarkupSafe 3.0.4`，纯增不改既有版本。注意：本机 Docker daemon 未运行，锁由离线 `pip install --target`（多 `--platform` 标签）仿真生成；**权威锁仍须发版时在镜像内 `pip freeze` 重出**，同时 `deploy/dist` 的 wheelhouse 需补上述 3 个 wheel 并按最终发布提交重打 memhub wheel 与 `SHA256SUMS`/`MANIFEST`。
 - `docs(compose)`：kb 服务注释改为「连 PG：`MEMHUB_KB_DB_URL` 经 env_file 注入，缺失启动即失败」，图谱页数据来源改为 `/api/v1/kb/graph` 直读 PG。
 - `docs(guides)`：DEVELOPMENT §1/§2/§3/§9/§9.1/§10 按运行态 PG 重写（安装 extra、目录分层、PG 契约测试命令、端到端闭环走 `--create-project`/`project --out`、一次性迁移与归档恢复命令、MCP 不再传 `--knowledge-dir`）。
-- 验证（2026-11-25，本地）：`docker compose -f deploy/compose.yml config` 通过（stub env_file）；锁文件为离线 `pip install --target`（ingest=29 wheel、worker=78 wheel 安装产物去 win32 项）导出，SQLAlchemy 保持 2.0.58（拒绝 2.1.9，符合 `<2.1` 钉子）；`ruff check`/`ruff format --check` 对 `deploy` 通过。全量 pytest 未在本机重跑（避免与 peer 并发共用测试库），以 peer 分支 `d954c3b`/`ecd380a` 的 504 passed/1 skipped 为准。
+- 验证（2026-11-25，本地）：`docker compose -f deploy/compose.yml config` 通过（临时 stub `env_file`，验后删除）；锁文件为离线 `pip install --target`（ingest 侧 29 wheel、worker 侧 78 wheel 的安装产物，去掉 win32 专属的 `colorama` / `win32_setctime` 与 ingest 的 `tzdata`）导出，SQLAlchemy 保持 2.0.58（下载器给出的 2.1.9 被弃用，符合 `<2.1` 上限）。本次未改 Python，`ruff` 不适用；`check_document_format.py --staged`、`check_document_ownership.py --staged`、`check_env_example_keys.py`（29 键一致）与 pre-commit 全钩子通过。全量 pytest 未在本机重跑（避免与 peer 并发共用测试库），以 peer 分支 `d954c3b`/`ecd380a` 的 504 passed/1 skipped 为准。
 
 ## 2026-11-24（kb 迁移工具：写库半段与逐节点校验）
 
