@@ -41,7 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, QuestionStatus, Tier
-from memhub.kb import archive, catalog, manage, proc, query
+from memhub.kb import archive, catalog, manage, proc, query, trace_query
 from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.projection import save_projection
 from memhub.kb.session import KB_SCHEMA, create_runtime_store
@@ -664,6 +664,49 @@ def create_app(
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
         return await query.audit_list(api.store, limit=limit, offset=offset)
+
+    # ---- MCP 调用轨迹（ADR-0014） ----
+
+    def _traces_unavailable() -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": int(ErrorCode.INTERNAL),
+                "message": "调用轨迹只在 PG 存储上可用",
+                "data": {},
+            },
+        )
+
+    @app.get("/api/v1/kb/mcp-traces", response_model=None)
+    async def list_mcp_traces(
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        tool: str | None = None,
+        status: str | None = None,
+        credential: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(api.store, PgKnowledgeStore):
+            return _traces_unavailable()
+        return await trace_query.mcp_traces(
+            api.store,
+            limit=limit,
+            offset=offset,
+            tool=tool,
+            status=status,
+            credential=credential,
+            since=since,
+            until=until,
+        )
+
+    @app.get("/api/v1/kb/mcp-traces/summary", response_model=None)
+    async def mcp_traces_summary(
+        days: int = Query(default=7, ge=1, le=30),
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(api.store, PgKnowledgeStore):
+            return _traces_unavailable()
+        return await trace_query.mcp_traces_summary(api.store, days=days)
 
     # ---- 投影 ----
 

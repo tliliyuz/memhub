@@ -149,3 +149,38 @@ class KbWriteAudit(Base):
     action: Mapped[str] = mapped_column(Text, nullable=False)
     result: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = _timestamp()
+
+
+class KbMcpTrace(Base):
+    """MCP 调用轨迹（ADR-0014）；只记元数据，不含参数原文、正文与 token。
+
+    `trace_id` 每次记录一个 UUID4 hex，重试与 spool 补投复用同一值，
+    配合唯一约束实现幂等写入。不设外键：调用可能发生在任何库都存在之前。
+    """
+
+    __tablename__ = "kb_mcp_trace"
+    __table_args__ = (
+        UniqueConstraint("trace_id", name="uq_kb_mcp_trace_trace_id"),
+        Index("ix_kb_mcp_trace_called_at", "called_at"),
+        Index("ix_kb_mcp_trace_tool", "tool", "called_at"),
+        Index("ix_kb_mcp_trace_credential", "credential_id", "called_at"),
+        Index("ix_kb_mcp_trace_status", "status", "called_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rpc_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    called_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    credential_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    http_status: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    args_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    projects: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    client: Mapped[str | None] = mapped_column(Text, nullable=True)

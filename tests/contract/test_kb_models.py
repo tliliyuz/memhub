@@ -1,4 +1,4 @@
-"""`kb_*` 六张表的结构契约（规格 §3，验收条件 §8.2/§8.7 的存储侧）。
+"""`kb_*` 表的结构契约（规格 §3，验收条件 §8.2/§8.7 的存储侧；`kb_mcp_trace` 见 ADR-0014）。
 
 每个用例在独立 schema 内用 `Base.metadata.create_all` 建表；Alembic 迁移与模型的一致性
 由单独的迁移测试负责。
@@ -60,11 +60,12 @@ def _node(node_id: str = "demo/fact/alpha", project: str = "demo") -> KbNode:
     )
 
 
-def test_exactly_six_kb_tables() -> None:
+def test_exactly_the_kb_tables() -> None:
     """知识表自成一套 metadata：不得夹带运行态 5 表，否则 Alembic 会接管它们。"""
     assert sorted(Base.metadata.tables) == [
         "kb_archives",
         "kb_edges",
+        "kb_mcp_trace",
         "kb_node_revisions",
         "kb_nodes",
         "kb_projects",

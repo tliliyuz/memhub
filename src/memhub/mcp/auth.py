@@ -23,6 +23,7 @@ class Grant(BaseModel):
     scope: Literal["mcp:read", "mcp:write"]
     expires_at: datetime
     projects: Annotated[frozenset[Project], Field(min_length=1, max_length=128)]
+    name: Annotated[str | None, Field(default=None, min_length=1, max_length=64)]
 
     @field_validator("expires_at")
     @classmethod
@@ -30,6 +31,16 @@ class Grant(BaseModel):
         if value.utcoffset() != timedelta(0):
             raise ValueError("必须使用 UTC 有效期")
         return value
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or any(ord(ch) < 32 for ch in stripped):
+            raise ValueError("name 不得为空或含控制字符")
+        return stripped
 
 
 _GRANTS = TypeAdapter(Annotated[list[Grant], Field(max_length=128)])
@@ -51,11 +62,12 @@ def load_grants(raw: str) -> dict[str, Grant]:
 
 @dataclass(frozen=True, slots=True)
 class Credential:
-    """一次 HTTP 请求的鉴权结果：项目范围、是否可写、凭据标识。"""
+    """一次 HTTP 请求的鉴权结果：项目范围、是否可写、凭据标识与展示名。"""
 
     projects: frozenset[str]
     writable: bool
     grant_id: str
+    name: str | None = None
 
 
 def authorize(grants: dict[str, Grant], authorization: str) -> Credential | None:
@@ -70,4 +82,5 @@ def authorize(grants: dict[str, Grant], authorization: str) -> Credential | None
         projects=grant.projects,
         writable=grant.scope == "mcp:write",
         grant_id=digest[:12],
+        name=grant.name,
     )

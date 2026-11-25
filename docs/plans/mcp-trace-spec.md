@@ -52,7 +52,7 @@
 | `projects` | text[] null | 凭据授权项目范围的快照 |
 | `client` | text null | `User-Agent`，截断至 256 字符 |
 
-索引：`ix_kb_mcp_trace_called_at (called_at desc)`；`ix_kb_mcp_trace_tool (tool, called_at desc)`；`ix_kb_mcp_trace_credential (credential_id, called_at desc)`；`ix_kb_mcp_trace_status (status, called_at desc)`。
+索引：`ix_kb_mcp_trace_called_at (called_at)`；`ix_kb_mcp_trace_tool (tool, called_at)`；`ix_kb_mcp_trace_credential (credential_id, called_at)`；`ix_kb_mcp_trace_status (status, called_at)`。实现上均为升序 B-tree；列表的 `ORDER BY called_at DESC` 由 Postgres 反向扫描满足，无需显式 `DESC` 索引。
 
 约束：不设外键；`status` 用应用层枚举，库内不建 CHECK（与既有表的取值约束口径一致）。
 
@@ -165,6 +165,7 @@
 `GET /api/v1/kb/mcp-traces/summary?days=7`
 
 - `days`：1–30，默认 7。
+- `avg_ms`：该工具 `ok` 与 `error` 调用的 `duration_ms` 平均值（四舍五入取整）；`rejected` 不参与，无可算调用时为 0。
 - 返回：
 
 ```json

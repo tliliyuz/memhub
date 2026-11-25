@@ -42,8 +42,17 @@ from memhub.kb.errors import (
     TargetUnavailable,
     WriteDeferred,
 )
-from memhub.kb.models import KbArchive, KbEdge, KbNode, KbNodeRevision, KbProject, KbWriteAudit
+from memhub.kb.models import (
+    KbArchive,
+    KbEdge,
+    KbMcpTrace,
+    KbNode,
+    KbNodeRevision,
+    KbProject,
+    KbWriteAudit,
+)
 from memhub.kb.store import TrashEntry
+from memhub.mcp.trace import TraceEntry
 
 REVISION_RE = re.compile(r"^[0-9a-f]{16}$")
 _PROJECT_SEP = "/"
@@ -1107,6 +1116,39 @@ class PgKnowledgeStore:
                     created_at=_now(),
                 )
             )
+
+    # -- MCP 调用轨迹（ADR-0014） ------------------------------------------
+
+    async def record_mcp_trace(self, entry: TraceEntry) -> None:
+        """一行调用轨迹；`trace_id` 冲突视为重放，直接忽略保证幂等。"""
+        statement = pg_insert(KbMcpTrace).values(
+            trace_id=entry.trace_id,
+            request_id=entry.request_id,
+            rpc_id=entry.rpc_id,
+            called_at=entry.called_at,
+            credential_id=entry.credential_id,
+            credential_name=entry.credential_name,
+            tool=entry.tool,
+            status=entry.status,
+            http_status=entry.http_status,
+            error_code=entry.error_code,
+            error_kind=entry.error_kind,
+            duration_ms=entry.duration_ms,
+            result_bytes=entry.result_bytes,
+            args_digest=entry.args_digest,
+            projects=entry.projects,
+            client=entry.client,
+        )
+        statement = statement.on_conflict_do_nothing(index_elements=["trace_id"])
+        async with self._session() as session:
+            await session.execute(statement)
+
+    async def cleanup_mcp_traces(self, cutoff: datetime) -> int:
+        """删除 `cutoff` 之前的轨迹明细，返回删除行数。"""
+        async with self._session() as session:
+            result = await session.execute(delete(KbMcpTrace).where(KbMcpTrace.called_at < cutoff))
+            rowcount = getattr(result, "rowcount", 0)
+            return int(rowcount or 0)
 
 
 __all__ = [

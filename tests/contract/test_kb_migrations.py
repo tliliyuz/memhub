@@ -30,6 +30,7 @@ KB_TABLES = {
     "kb_node_revisions",
     "kb_archives",
     "kb_write_audit",
+    "kb_mcp_trace",
 }
 
 
