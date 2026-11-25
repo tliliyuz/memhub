@@ -83,6 +83,12 @@ services:
     <<: *defaults
     # 管理台：静态前端 + /api/v1/kb/*。图谱页由前端 cytoscape 渲染，
     # 数据来自 /api/v1/kb/graph（直读 PG kb_* 表）；kg.json 投影只供旧 explorer。
+    # **独立 env_file（默认的 /etc/memhub/env 只给 ingest / worker / oauth2-proxy）**：
+    # kb 用受限角色连知识表，不该看到运行态全权 DSN（MEMHUB_DB_URL）、PGPASSWORD、
+    # LLM 凭据与设备 token 密钥。文件至少写 MEMHUB_KB_DB_URL；MCP HTTP 入口（/mcp）
+    # 用 MEMHUB_MCP_GRANTS，按需再拷 MEMHUB_LOG_LEVEL / MEMHUB_KB_AUTO_REBUILD /
+    # MEMHUB_QUEUE_MAX_BYTES / MEMHUB_KB_HTTP_PORT。
+    env_file: /etc/memhub/env.kb
     image: memhub/app-kb:0.1.0
     container_name: memhub-kb
     # 上传接口把文件写进 /var/lib/memhub/data（raw_store），worker 轮询同一个卷。

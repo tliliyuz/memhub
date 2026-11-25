@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-25（kb 容器独立 env_file，隔离运行态凭据）
+
+- `fix(deploy)`：`compose.yml` 的 kb 服务改用独立 `/etc/memhub/env.kb`，不再继承默认 `/etc/memhub/env`——受限的 kb 容器不应拿到 `MEMHUB_DB_URL`（运行态全权角色）、`PGPASSWORD`、LLM 凭据与设备 token 密钥。`env.kb` 至少写 `MEMHUB_KB_DB_URL`；`/mcp` 入口需要 `MEMHUB_MCP_GRANTS`，另按需拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`。
+- `docs(deploy)`：README 运行形态表与「知识真源切换」第 1 步补充 `env.kb` 的建法与键范围；部署顺序第 3 步加入前置确认。
+- 验证（2026-11-25，本地）：`docker compose config` 以临时 stub env_file 通过，解析后 kb 的 environment 只含 stub 中的 `MEMHUB_KB_DB_URL`（证明不再继承共享文件）；`check_document_format.py` / `check_document_ownership.py` / `check_agent_entrypoints_sync.py` 通过。本项为配置与文档变更，无法制造业务 RED，按 SDD 例外处理。
+
 ## 2026-11-25（Alembic 版本表显式落 `kb` schema）
 
 - `fix(alembic)`：`alembic/env.py` 给所有 `context.configure(...)` 显式传 `version_table_schema`——生产路径（未注入连接，`MEMHUB_KB_MIGRATE_DB_URL` 带外执行）固定 `kb`，不再依赖角色 `search_path` 兜底；注入连接（测试隔离、`migrate-kb`）跟随该连接当前 schema，隔离用例不写进 `kb`（ADR-0013 §6）。

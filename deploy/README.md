@@ -99,7 +99,7 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 |:---|:---|
 | ingest-api | compose 常驻容器 `memhub/app:0.1.0`，`network_mode: host`，容器内绑 `127.0.0.1:8700`（**没有 `ports:`**，host 网络下端口映射无效） |
 | worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-02:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
-| kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/`。**连 PG**：`MEMHUB_KB_DB_URL`（运行时 DML 角色，`search_path=kb`）经 `env_file` 注入，缺该键启动即失败，不退回 markdown |
+| kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/`。**连 PG**：`MEMHUB_KB_DB_URL`（运行时 DML 角色，`search_path=kb`）经**独立** `env_file` `/etc/memhub/env.kb` 注入，缺该键启动即失败，不退回 markdown；该文件不含 `MEMHUB_DB_URL` / `PGPASSWORD` / LLM 与设备凭据 |
 | explorer（旧） | 不再部署；需要时 `docker compose --profile legacy up -d explorer`，并把 nginx `/` 改回 8703 |
 | purge / rebuild | systemd timer 跑 `docker run --rm` 一次性子命令 |
 
@@ -115,7 +115,10 @@ docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）。
 
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
-运行态密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。
+运行态密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。kb-api 例外：它用独立文件
+`/etc/memhub/env.kb`（同样 0600），只放 kb 进程实际读取的键（至少 `MEMHUB_KB_DB_URL`；`/mcp` 入口
+用 `MEMHUB_MCP_GRANTS`，按需再拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` /
+`MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`），避免受限容器拿到运行态全权 DSN 与 `PGPASSWORD`。
 运行态 5 表由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
 563fefe 未新增迁移（仍只有 `0001_state`），旧库启动即打印 `schema: already up to date`。
 
@@ -204,6 +207,11 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
      `max_connections=60` 内。
    - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）与
      `MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）。值只经该文件注入；文档与提交信息只写键名。
+   - 另建 `/etc/memhub/env.kb`（0600，归属同前）：kb 容器的独立 env_file，只放 kb 进程读取的键。
+     至少 `MEMHUB_KB_DB_URL=` 同一值；`/mcp` 入口需要时一并拷 `MEMHUB_MCP_GRANTS`，以及
+     `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`
+     中实际设置过的项。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
+     kb 用受限角色，只该看到知识表的 DML 权限。
 2. **停写**：`docker compose stop kb worker`，等正在跑的 `worker --once` 结束并禁用 rebuild timer。
    ingest 可以继续跑（只写 `raw_store/` 队列，不碰 `knowledge/`）。
 3. **建表**（Alembic 带外执行，不在任何容器启动时跑）：
@@ -259,7 +267,7 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 
 1. 改 daemon.json → reload docker
 2. 同步 `knowledge/` 与 `data/` 到 `/var/lib/memhub/`（先 knowledge 后 data）
-3. 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
+3. 确认 `/etc/memhub/env.kb` 已按第 1 步建好 → 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
 4. 写 nginx vhost（保留 acme webroot）→ `nginx -t` → reload
 5. 装 systemd timer（purge / rebuild）
 6. 冒烟：`ss -lntp` 只见 127.0.0.1 的 8700/8701/4180；容器内 `/healthz` 200；未登录 `curl -i /api/v1/kb/stats` 得 401 JSON；浏览器 `/` 跳 GitHub 登录后能看到全部知识库概览
