@@ -208,7 +208,9 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
    - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）与
      `MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）。值只经该文件注入；文档与提交信息只写键名。
    - 另建 `/etc/memhub/env.kb`（0600，归属同前）：kb 容器的独立 env_file，只放 kb 进程读取的键。
-     至少 `MEMHUB_KB_DB_URL=` 同一值；`/mcp` 入口需要时一并拷 `MEMHUB_MCP_GRANTS`，以及
+     至少 `MEMHUB_KB_DB_URL=` 同一值，且 **DSN 必须自带口令**（`postgresql://memhub_kb_app:<口令>@127.0.0.1:5432/memhub_prod`）：
+     独立文件里没有 `PGPASSWORD`，仍按「DSN 不写口令 + PGPASSWORD」写法会直接认证失败。
+     `/mcp` 入口需要时一并拷 `MEMHUB_MCP_GRANTS`，以及
      `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`
      中实际设置过的项。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
      kb 用受限角色，只该看到知识表的 DML 权限。
@@ -267,7 +269,7 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 
 1. 改 daemon.json → reload docker
 2. 同步 `knowledge/` 与 `data/` 到 `/var/lib/memhub/`（先 knowledge 后 data）
-3. 确认 `/etc/memhub/env.kb` 已按第 1 步建好 → 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
+3. 确认 `/etc/memhub/env.kb` 已按第 1 步建好（compose 在解析阶段就校验所有服务的 env_file，文件缺失时连 `docker compose up -d ingest worker` 也会失败）→ 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
 4. 写 nginx vhost（保留 acme webroot）→ `nginx -t` → reload
 5. 装 systemd timer（purge / rebuild）
 6. 冒烟：`ss -lntp` 只见 127.0.0.1 的 8700/8701/4180；容器内 `/healthz` 200；未登录 `curl -i /api/v1/kb/stats` 得 401 JSON；浏览器 `/` 跳 GitHub 登录后能看到全部知识库概览
