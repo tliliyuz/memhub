@@ -77,15 +77,9 @@ async def serve(root: Path, device: str, port: int) -> None:
     dsn = os.environ.get("MEMHUB_TEST_DB_URL", "")
     if not dsn:
         raise SystemExit("联调夹具需要 MEMHUB_TEST_DB_URL（kb 真源在 PG）")
-    knowledge = root / "knowledge"
     data = root / "data"
-    for project in PROJECTS:
-        (knowledge / project).mkdir(parents=True)
-    # 采集侧仍按目录登记判目标；kb 真源与 worker 一律走 PG。
+    # 目标登记只认 `kb_projects`：前两个已登记，`fixture-denied` 未登记。
     registered = PROJECTS[:2]
-    (knowledge / ".kbs.json").write_text(
-        json.dumps({"kbs": [{"id": project} for project in registered]}), encoding="utf-8"
-    )
     for key in tuple(os.environ):
         if key.startswith("MEMHUB_"):
             del os.environ[key]
@@ -97,7 +91,6 @@ async def serve(root: Path, device: str, port: int) -> None:
     os.environ.update(
         MEMHUB_ENV="dev",
         MEMHUB_KB_DB_URL=dsn,
-        MEMHUB_KNOWLEDGE_DIR=str(knowledge),
         MEMHUB_DATA_DIR=str(data),
         MEMHUB_KB_AUTO_REBUILD="0",
         MEMHUB_KB_GRAPH=str(root / "unused-graph.json"),
@@ -107,7 +100,7 @@ async def serve(root: Path, device: str, port: int) -> None:
     state = MemoryStore()
     app = create_kb(schema=schema)
     # 先注册管理台路由，再挂载采集应用，保留各自的错误信封。
-    app.mount("/api/v1", create_ingest(state))
+    app.mount("/api/v1", create_ingest(state, kb_store=store))
     config = WorkerConfig(data, store, "fake", is_registered=state.is_registered)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, access_log=False))
 

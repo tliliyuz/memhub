@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.6
+> 版本: 0.7
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -131,9 +131,9 @@ Authorization: Bearer <device_token>
 | `from_offset/to_offset` | 用于服务端拼接；`from_offset` 必须 ≥ 服务端已知 offset，否则返回 `409 {code:1004, data:{expected_offset}}`，客户端回退。 |
 | `sha256` | 原文片段哈希，服务端用于二次去重。 |
 | `cursor_before` / `cursor_after` | **仅诊断**，服务端不校验，也不据此产生 1004。游标以每条文件的 `from_offset` 为准。 |
-| `project` | 必须是用户选定的显式知识库 ID（`^[a-z0-9][a-z0-9._-]{0,63}$`，不允许 `auto`，不修剪空白）。目标必须已在管理台登记且当前活动。不推断目标，不用 `source_id` 兜底，不自动建库。 |
+| `project` | 必须是用户选定的显式知识库 ID（`^[a-z0-9][a-z0-9._-]{0,63}$`，不允许 `auto`，不修剪空白）。目标必须已在管理台登记且当前活动——判据是 `kb_projects` 存在该行且 `archived_at` 为空，不再看 `MEMHUB_KNOWLEDGE_DIR` 下的目录或 `.kbs.json`。不推断目标，不用 `source_id` 兜底，不自动建库。 |
 
-缺失、空值、非字符串、格式错误、未登记、不活动的目标统一返回 HTTP `400`、`code:1003`，用 `data.reason` 区分 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`，不回显目标或披露是否存在；拒绝发生在配额、落盘和游标更新之前，重放也要先通过目标校验。服务暂不能确认登记状态时返回通用 `500/2001`，可重试。目标被拒仅影响该源：保留待发增量，不推进被拒游标，修正目标前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
+缺失、空值、非字符串、格式错误、未登记、不活动的目标统一返回 HTTP `400`、`code:1003`，用 `data.reason` 区分 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`，不回显目标或披露是否存在；拒绝发生在配额、落盘和游标更新之前，重放也要先通过目标校验。采集端只读 `kb_projects`，不写知识真源；未配置 `MEMHUB_KB_DB_URL` 时服务拒绝启动。服务暂不能确认登记状态（例如存在未完成的归档事务）时返回通用 `500/2001`，可重试。目标被拒仅影响该源：保留待发增量，不推进被拒游标，修正目标前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
 
 服务端游标校验只看两处：`source_rev`（是否允许重扫）与每条文件的 `from_offset`（相对已知 offset 是否回退）。
 
@@ -170,7 +170,7 @@ Authorization: Bearer <device_token>
 
 ### `GET /ingest/projects?device_id=<id>`
 
-桌面端「被采集目录 → 已有知识库」下拉框的数据源：只返回已登记且活动的知识库，完整返回已筛选条目，不分页。只有实施此筛选且推送也实施同一规则时才返回 `writable_only: true`。
+桌面端「被采集目录 → 已有知识库」下拉框的数据源：只返回已登记且活动的知识库，完整返回已筛选条目，不分页。登记与活动状态取 `kb_projects`（存在行且 `archived_at` 为空），与 `/ingest/raw` 的目标校验同源。只有实施此筛选且推送也实施同一规则时才返回 `writable_only: true`。
 
 ```json
 { "code": 0, "message": "ok", "data": {
@@ -223,6 +223,7 @@ Authorization: Bearer <device_token>
 ## 6. 版本与兼容
 
 - 路径仍为 `/api/v1`；0.6 移除 `POST /ingest/projects` 与设备—知识库授权文件，`project` 只要求显式、已登记且活动，拒绝原因细化到 `data.reason`。旧客户端调用已删除的建库代理会得到 `404/405`，需要升级到管理台建库；旧版保存的 `auto` 或缺失目标仍在下一次计划运行时被 `400/1003` 拒绝，需升级并修正保存的目标。
+- 0.7：「已登记且活动」的判据从 `MEMHUB_KNOWLEDGE_DIR`（目录 + `.kbs.json`）改为 `kb_projects`（存在行且 `archived_at` 为空）；服务端未配置 `MEMHUB_KB_DB_URL` 时拒绝启动。响应信封、错误码与拒绝原因不变。
 - 客户端在 `heartbeat` 上报 `collector_version`；服务端可下发 `upgrade` 命令但不强制。
 
 ## 7. 与面板既有接口的边界

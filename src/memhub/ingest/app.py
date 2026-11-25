@@ -1,7 +1,8 @@
 """采集 API。
 
 存储由环境决定：设置了 `MEMHUB_DB_URL` 用共享 PG 实例（生产），否则退回进程内
-`MemoryStore`（仅 dev 联调，重启即丢）。路由、信封、错误码在两种存储下完全一致。
+`MemoryStore`（仅 dev 联调，重启即丢）。采集目标登记一律读 PG 的 `kb_projects`
+（`MEMHUB_KB_DB_URL`，只读；规格 §9.2.4）。路由、信封、错误码在两种状态存储下完全一致。
 
 启动：
 
@@ -16,6 +17,8 @@ import hashlib
 import hmac
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -38,7 +41,8 @@ from memhub.contract import (
     explicit_project,
 )
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.session import KB_SCHEMA, create_runtime_store
 from memhub.kb.target_access import (
     TargetRegistry,
     TargetStatus,
@@ -56,6 +60,21 @@ from memhub.queue.rawstore import (
 )
 
 LOGGER = logging.getLogger("memhub.ingest.audit")
+
+
+def _ingest_lifespan(owned: PgKnowledgeStore | None) -> Any:
+    """应用自建的 PG 存储随应用生命周期释放；注入的存储由调用方负责。"""
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            if owned is not None:
+                await owned.aclose()
+
+    return lifespan
+
 
 HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.TOKEN_INVALID: 401,
@@ -246,7 +265,17 @@ def build_store() -> StateStore:
     return PostgresStore(dsn)
 
 
-def create_app(store: StateStore | None = None) -> FastAPI:
+def create_app(
+    store: StateStore | None = None,
+    *,
+    kb_store: PgKnowledgeStore | None = None,
+    schema: str | None = KB_SCHEMA,
+) -> FastAPI:
+    """组装采集应用；目标登记一律读 `kb_projects`（规格 §9.2.4）。
+
+    默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储，缺 DSN 启动即抛 `KbDsnMissing`；
+    `kb_store` 与 `schema` 供测试注入与隔离。采集侧只读该表，不写知识真源。
+    """
     prod = os.environ.get("MEMHUB_ENV") == "prod"
     # 文档约定：prod 下忽略 MEMHUB_DEV_TOKEN，避免误配成共享后门。
     dev_token = "" if prod else os.environ.get("MEMHUB_DEV_TOKEN", "")
@@ -264,22 +293,24 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         # 用户体系还没做，先用 provision token 把口子关上。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
     raw_root = Path(data_dir) if data_dir else None
-    knowledge_dir = os.environ.get("MEMHUB_KNOWLEDGE_DIR", "").strip()
-    registry = TargetRegistry(KnowledgeStore(Path(knowledge_dir))) if knowledge_dir else None
     # 同一进程内串行校验批次绑定和配额、写盘、记账；跨进程绑定由 rawstore 保证。
     queue_lock = Lock()
     # 即便当前没配 DATA_DIR 也要校验：配错的值应该在启动时就炸，而不是等哪天补上
-    # DATA_DIR 后突然把某个上限换成另一个数。
+    # DATA_DIR 后突然把某个上限换成另一个数。环境校验先于建库，配错优先于缺 DSN。
     queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
     quota = RawStoreQuota(raw_root / "raw_store", queue_max) if raw_root is not None else None
+    # 目标登记只读 `kb_projects`（规格 §9.2.4）；缺 DSN 在构造时即抛 `KbDsnMissing`。
+    owned: PgKnowledgeStore | None = None
+    if kb_store is None:
+        kb_store = create_runtime_store(schema=schema)
+        owned = kb_store
+    registry = TargetRegistry(kb_store)
     state = store or build_store()
     kb_api_url = os.environ.get("MEMHUB_KB_API_URL", DEFAULT_KB_API_URL)
-    app = FastAPI(title="memhub ingest", version="0.1.0")
+    app = FastAPI(title="memhub ingest", version="0.1.0", lifespan=_ingest_lifespan(owned))
     app.state.store = state
 
     async def active_project(project: str) -> bool:
-        if registry is None:
-            return False
         try:
             return await registry.active(project)
         except TargetUnavailable as exc:
@@ -308,10 +339,6 @@ def create_app(store: StateStore | None = None) -> FastAPI:
                 reason = "invalid"
             _audit(device_id, value, "reject", reason)
             raise _target_unavailable(reason)
-        if registry is None:
-            # 未配置真源目录等于没有可写目标：按「未登记」拒绝，不要暗示可重试。
-            _audit(device_id, project, "reject", "unregistered")
-            raise _target_unavailable("unregistered")
         try:
             status = await target_status(registry.store, project)
         except TargetUnavailable as exc:

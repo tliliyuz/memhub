@@ -6,9 +6,10 @@
 - `feat(kb)`：投影改为存储无关——`build_graph` 经 `edge_lines()` 读节点与边，PG 版 `save_projection` 跳过文件锁与脏标记；投影过期判断改用 `latest_write()`（取 `kb_node_revisions` / `kb_edges` 的最大时间），不再依赖文件 mtime。
 - `feat(worker)`：`WorkerConfig` 持有存储对象而非真源目录；merge 的锁与目标校验改用 `store.write_scope()` / `store.guard_write()`，PG 版一次写入即一个事务；新建节点显式带上完整 id，满足 PG 写入的 id 一致性校验。
 - `feat(cli)`：`ingest` / `project` / `mcp` / `kb` / `worker` 去掉 `--knowledge-dir`，完成输出与冒烟日志改为 `真源=PG（schema kb）`；`recover-kb-archive` 仍保留目录参数（文件版归档是迁移期工具）。
-- `feat(kb)`：`TargetRegistry` 改为接收登记状态来源（文件或 PG 存储），worker 与采集共用同一判据；采集侧在本轮仍按本地登记判目标，待真源切换完成后单独收口。
-- `test(kb)`：新增 PG boot / 投影 / worker 接线用例（缺 DSN 启动失败、worker 写库不落 markdown、PG 归档与 pending 事务的暂缓与隔离）；PG 夹具上移到 `tests/conftest.py` 供 unit 与 contract 共用。
-- `docs`：`ENVIRONMENT` 更新 `MEMHUB_KNOWLEDGE_DIR` 的读取方与 `MEMHUB_KB_DB_URL` 的适用范围。
+- `feat(kb)`：`TargetRegistry` 改为接收登记状态来源（文件或 PG 存储），worker 与采集共用同一判据。
+- `feat(ingest)`：采集目标的「已登记且活动」改为读 `kb_projects`（存在行且 `archived_at` 为空），不再读 `MEMHUB_KNOWLEDGE_DIR` 的目录与 `.kbs.json`；`create_app` 经 `create_runtime_store()` 构造 PG 存储，缺 `MEMHUB_KB_DB_URL` 启动即抛 `KbDsnMissing`，应用自建引擎在 lifespan 关闭。`/ingest/raw` 与 `/ingest/projects` 共用同一判据；归档事务 `pending` 时仍返回通用 `500/2001`。采集侧只读该表，不写知识真源。
+- `test(kb)`：新增 PG boot / 投影 / worker 接线用例（缺 DSN 启动失败、worker 写库不落 markdown、PG 归档与 pending 事务的暂缓与隔离）；采集契约用例改用独立 PG schema 登记目标，覆盖归档后重放拒绝与未完成归档事务的通用错误；PG 夹具上移到 `tests/conftest.py` 供 unit 与 contract 共用。
+- `docs`：`ENVIRONMENT` 更新 `MEMHUB_KNOWLEDGE_DIR` 的读取方（仅迁移/恢复工具）与 `MEMHUB_KB_DB_URL` 的适用范围（含 ingest）；`ingest-api` 契约升到 0.7，说明登记判据改读 `kb_projects`。
 
 ## 2026-11-24（MCP 写候选与候选区闭环）
 

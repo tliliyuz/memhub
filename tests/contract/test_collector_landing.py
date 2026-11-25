@@ -59,19 +59,11 @@ class Fake:
 async def test_selected_target_is_the_only_landing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: PgKnowledgeStore
 ) -> None:
-    root = tmp_path / "knowledge"
-    for name in ("fixture-left", "fixture-right", "fixture-denied"):
-        (root / name).mkdir(parents=True)
-    # fixture-denied 目录存在但未登记：这正是当初被隐式建库的事故形态。
-    (root / ".kbs.json").write_text(
-        json.dumps({"kbs": [{"id": name} for name in ("fixture-left", "fixture-right")]}),
-        encoding="utf-8",
-    )
     data = tmp_path / "data"
     device = str(uuid.uuid4())
     monkeypatch.setenv("MEMHUB_ENV", "dev")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data))
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(root))
+    # `fixture-denied` 未登记：这正是当初被隐式建库的事故形态；目标只认 `kb_projects`。
     # 随机测试凭据仅留在本地进程内；不用任何操作系统已保存凭据。
     token = uuid.uuid4().hex
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", token)
@@ -111,7 +103,7 @@ async def test_selected_target_is_the_only_landing(
         ],
     }
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=create_app(state)),
+        transport=httpx.ASGITransport(app=create_app(state, kb_store=store)),
         base_url="http://127.0.0.1",
         headers={"Authorization": f"Bearer {token}"},
         trust_env=False,

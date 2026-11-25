@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from collections.abc import Iterator
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from memhub.contract import SourceKind, SourceRef
 from memhub.ingest.app import create_app
+from memhub.kb.session import create_runtime_store
 from memhub.kb.store import KnowledgeStore
 from memhub.worker.merge import merge
 from memhub.worker.schema import ExtractedNode, Extraction
@@ -57,15 +59,22 @@ async def test_question_node_defaults_to_open(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    knowledge = tmp_path / "knowledge"
-    (knowledge / "example-kb").mkdir(parents=True)
-    (knowledge / ".kbs.json").write_text('{"kbs":[{"id":"example-kb"}]}', encoding="utf-8")
+def client(
+    kb_pg_schema: str, test_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
+    async def register() -> None:
+        store = create_runtime_store(dsn=test_dsn, schema=kb_pg_schema)
+        try:
+            await store.register_project("example-kb")
+        finally:
+            await store.aclose()
+
+    asyncio.run(register())
     monkeypatch.setenv("MEMHUB_ENV", "dev")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
+    monkeypatch.setenv("MEMHUB_KB_DB_URL", test_dsn)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    with TestClient(create_app()) as test_client:
+    with TestClient(create_app(schema=kb_pg_schema)) as test_client:
         test_client.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "t", "platform": "win32"},

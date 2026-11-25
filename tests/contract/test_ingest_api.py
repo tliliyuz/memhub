@@ -1,7 +1,12 @@
-"""采集 API 契约：信封、鉴权、游标冲突、幂等。"""
+"""采集 API 契约：信封、鉴权、游标冲突、幂等。
+
+采集目标只认 `kb_projects`（规格 §9.2.4）：`registered-only` 已归档，`dir-only`
+与 `ghost` 没有行，都不得写入。
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -14,33 +19,80 @@ import pytest
 from fastapi.testclient import TestClient
 
 from memhub.ingest.app import create_app
+from memhub.kb.models import KbArchive
+from memhub.kb.session import KbDsnMissing, create_runtime_store
 
 DEVICE = str(uuid.uuid4())
 TOKEN = "devtoken"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
+ACTIVE_PROJECTS = ("sdp-tag", "other-kb")
+ARCHIVED_PROJECTS = ("registered-only",)
 
-def _configure_targets(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
-    knowledge = root / "knowledge"
-    for project in ("sdp-tag", "other-kb", "dir-only"):
-        (knowledge / project).mkdir(parents=True)
-    registry = knowledge / ".kbs.json"
-    registry.write_text(
-        json.dumps(
-            {"kbs": [{"id": project} for project in ("sdp-tag", "other-kb", "registered-only")]}
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
-    return registry
+
+async def _seed_targets(dsn: str, schema: str) -> None:
+    store = create_runtime_store(dsn=dsn, schema=schema)
+    try:
+        for project in ACTIVE_PROJECTS:
+            await store.register_project(project)
+        for project in ARCHIVED_PROJECTS:
+            await store.register_project(project)
+            await store.archive_project(project)
+    finally:
+        await store.aclose()
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
-    _configure_targets(monkeypatch, tmp_path)
+def kb_targets(kb_pg_schema: str, test_dsn: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    """登记采集目标并返回隔离 schema；应用用同一 schema 构造 PG 存储。"""
+    monkeypatch.setenv("MEMHUB_KB_DB_URL", test_dsn)
+    asyncio.run(_seed_targets(test_dsn, kb_pg_schema))
+    return kb_pg_schema
+
+
+def _archive_target(schema: str, project: str) -> None:
+    """测试中途归档：模拟「已落盘批次的目标后来被归档」。"""
+
+    async def run() -> None:
+        store = create_runtime_store(schema=schema)
+        try:
+            await store.archive_project(project)
+        finally:
+            await store.aclose()
+
+    asyncio.run(run())
+
+
+def _open_pending_archive(schema: str) -> None:
+    """留下未完成的归档事务：目标登记状态不可确认。"""
+
+    async def run() -> None:
+        store = create_runtime_store(schema=schema)
+        try:
+            async with store.sessions() as session:
+                session.add(
+                    KbArchive(
+                        archive_id="p" * 32,
+                        project="sdp-tag",
+                        status="pending",
+                        snapshot=b"",
+                        archived_count=0,
+                        removed_edges=0,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+                await session.commit()
+        finally:
+            await store.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.fixture
+def client(kb_targets: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
-    with TestClient(create_app()) as test_client:
+    with TestClient(create_app(schema=kb_targets)) as test_client:
         response = test_client.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -182,13 +234,12 @@ def test_register_is_idempotent_for_same_device(client: TestClient) -> None:
 
 
 def test_raw_bytes_are_persisted_when_data_dir_is_set(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """配置 DATA_DIR 后原始字节必须落盘。"""
-    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -204,22 +255,23 @@ def test_raw_bytes_are_persisted_when_data_dir_is_set(
     ("project", "reason"),
     [
         ("ghost", "unregistered"),
+        # 目录存在不再是判据：`kb_projects` 没有行就是未登记。
         ("dir-only", "unregistered"),
         ("registered-only", "inactive"),
     ],
 )
 def test_unavailable_project_never_reaches_quota_or_state(
+    kb_targets: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     project: str,
     reason: str,
 ) -> None:
-    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     # 配额先于目标检查会让拒绝类型泄露，而且同一批修正目标后必须能正常提交。
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "1000")
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -246,15 +298,12 @@ def test_unavailable_project_never_reaches_quota_or_state(
 
 @pytest.mark.parametrize("empty_first", [False, True])
 def test_replay_cannot_change_target(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    empty_first: bool,
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, empty_first: bool
 ) -> None:
-    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     first = [] if empty_first else [_file("a.jsonl", "hello")]
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -279,38 +328,36 @@ def test_replay_cannot_change_target(
 
 
 def test_archived_target_denies_existing_replay(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    registry = _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
         )
         files = [_file("a.jsonl", "hello")]
         assert _push(fresh, files, batch_id="b1")[0] == 200
-        # 已落盘批次的目标后来被归档：重放也不能借旧记录继续写。
-        blocked = registry.parent / "_kb_archives" / "blocked"
-        blocked.mkdir(parents=True)
-        (blocked / "sdp-tag").write_text("archive-id", encoding="utf-8")
+        # 已落盘批次的目标后来被归档（`kb_projects.archived_at`）：重放也不能借旧记录继续写。
+        _archive_target(kb_targets, "sdp-tag")
         _assert_target_denied(*_push(fresh, files, batch_id="b1"), "inactive")
 
 
 def test_target_lookup_failure_is_generic(
+    kb_targets: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    registry = _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
         )
-        registry.write_text("invalid", encoding="utf-8")
+        # 未完成的归档事务让「已登记且活动」无法确认：只能给通用 500，不能泄露目标细节。
+        _open_pending_archive(kb_targets)
         status, body = _push(fresh, [_file("a.jsonl", "hello")], project="sdp-tag")
         assert status == 500
         assert body["code"] == 2001
@@ -321,13 +368,12 @@ def test_target_lookup_failure_is_generic(
 
 
 def test_chosen_project_is_persisted_for_the_worker(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """桌面端按目录选的知识库要随批次落盘，worker 才能写进对应 markdown 目录。"""
-    _configure_targets(monkeypatch, tmp_path)
+    """桌面端选的知识库要随批次落盘，worker 才能写进对应的 `kb_projects`。"""
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -377,18 +423,22 @@ def test_reserved_collector_device_is_denied(client: TestClient) -> None:
 
 
 def test_unconfigured_ingest_target_is_default_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺 DSN 直接启动失败：登记状态没有内存或文件退路（规格 §9.2.4）。"""
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    for key in ("MEMHUB_DATA_DIR", "MEMHUB_KNOWLEDGE_DIR"):
+    for key in ("MEMHUB_DATA_DIR", "MEMHUB_KB_DB_URL"):
         monkeypatch.delenv(key, raising=False)
-    with TestClient(create_app()) as fresh:
-        assert (
-            fresh.post(
-                "/devices/register",
-                json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-            ).status_code
-            == 200
-        )
-        _assert_target_denied(*_push(fresh, [], project="sdp-tag"), "unregistered")
+    with pytest.raises(KbDsnMissing):
+        create_app()
+
+
+def test_prod_start_also_requires_kb_dsn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MEMHUB_ENV", "prod")
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
+    monkeypatch.delenv("MEMHUB_KB_DB_URL", raising=False)
+    with pytest.raises(KbDsnMissing):
+        create_app()
 
 
 def test_ingest_decisions_are_audited_without_content(
@@ -414,18 +464,22 @@ def test_project_list_only_exposes_registered_active_projects(
 ) -> None:
     """保留 kb-api 的项目元数据和顺序，但只返回当前已登记且活动的目标。"""
     calls: list[tuple[str, str]] = []
-    visible = {"id": "sdp-tag", "name": "SDP Tag", "nodes": 3}
+    visible = [
+        {"id": "sdp-tag", "name": "SDP Tag", "nodes": 3},
+        {"id": "other-kb", "name": "Other KB", "nodes": 0},
+    ]
 
     async def fake(base_url: str, method: str, path: str, payload=None):  # type: ignore[no-untyped-def]
         calls.append((method, path))
         return {
             "items": [
                 {"id": "not-registered"},
-                visible,
+                visible[0],
                 {"id": "dir-only"},
+                visible[1],
                 {"id": "registered-only"},
             ],
-            "total": 4,
+            "total": 5,
         }
 
     monkeypatch.setattr("memhub.ingest.app._kb_api_request", fake)
@@ -435,7 +489,7 @@ def test_project_list_only_exposes_registered_active_projects(
         headers=AUTH,
     )
     assert response.status_code == 200
-    assert response.json()["data"] == {"items": [visible], "total": 1, "writable_only": True}
+    assert response.json()["data"] == {"items": visible, "total": 2, "writable_only": True}
     assert calls == [("GET", "/api/v1/kb/projects")]
 
 
@@ -510,14 +564,16 @@ def test_prod_requires_device_token_secret(monkeypatch: pytest.MonkeyPatch, tmp_
         create_app()
 
 
-def test_prod_ignores_dev_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_prod_ignores_dev_token(
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """prod 下共享 dev token 即便被误配也不生效（文档约定）。"""
     monkeypatch.setenv("MEMHUB_ENV", "prod")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", "shared-dev")
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         token = fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -543,14 +599,14 @@ def test_prod_requires_provision_token(monkeypatch: pytest.MonkeyPatch, tmp_path
 
 
 def test_register_requires_provision_token_when_set(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
     monkeypatch.delenv("MEMHUB_DEV_TOKEN", raising=False)
     payload = {"device_id": DEVICE, "name": "test", "platform": "win32"}
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         assert fresh.post("/devices/register", json=payload).status_code == 401
         wrong = fresh.post(
             "/devices/register", json=payload, headers={"Authorization": "Bearer nope"}
@@ -565,13 +621,15 @@ def test_register_requires_provision_token_when_set(
         assert ok.json()["data"]["device_token"].startswith("v1.")
 
 
-def test_prod_requires_device_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_prod_requires_device_id(
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """契约 0.3：生产 device_id 必填，服务端自动生成只留给 dev stub。"""
     monkeypatch.setenv("MEMHUB_ENV", "prod")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         response = fresh.post(
             "/devices/register",
             json={"name": "test", "platform": "win32"},
@@ -581,13 +639,13 @@ def test_prod_requires_device_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 
 
 def test_per_device_token_is_issued_and_scoped(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """生产 token 与设备绑定：签给别人设备的 token 用不了。"""
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.delenv("MEMHUB_DEV_TOKEN", raising=False)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         registered = fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -625,14 +683,13 @@ def test_per_device_token_is_issued_and_scoped(
 
 
 def test_raw_store_quota_returns_1008_before_writing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """raw_store 满了返回 1008 而不是写满磁盘；被拒批次一个字节都不落。"""
-    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "600")
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -645,14 +702,13 @@ def test_raw_store_quota_returns_1008_before_writing(
 
 
 def test_quota_rejects_only_new_content_not_replays(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """配额按新增字节算：重放已收下的批次仍成功，新内容才被拒。"""
-    _configure_targets(monkeypatch, tmp_path)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "2000")
-    with TestClient(create_app()) as fresh:
+    with TestClient(create_app(schema=kb_targets)) as fresh:
         fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},

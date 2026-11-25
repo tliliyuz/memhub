@@ -213,6 +213,7 @@
    - 权限边界因此落在 schema 层：`kb_*` 与 `alembic_version` 建在专用 schema `kb`，运行时/迁移角色 `search_path` 固定为 `kb`，只授予该 schema 的 `USAGE` 与 `kb_*` 权限，不授予 `public`（运行态 5 表所在）。理由见 ADR-0013 §6。
    - 生产侧建 schema、建 kb 角色与授权仍是带外运维动作，需负责人授权后执行；本轮交付不创建生产对象。
 4. **运行时强制 PG，不保留文件回退**（负责人裁决）：kb-api、MCP 服务、worker、CLI 等运行入口一律从 `MEMHUB_KB_DB_URL` 构造 PG 存储；未配置时启动即报 `KbDsnMissing`，不退到 `knowledge/` 文件存储。理由：双真源共存会让「写入落到哪」取决于环境变量是否配错，与 ADR-0013 要消除的运行时漂移同类。文件存储仅保留给测试夹具、迁移工具与一次性迁移源；`KnowledgeStore` 不删除，但任何生产运行入口不得默认使用它。
+   - ingest-api 的目标校验同属运行入口：`/ingest/raw` 与 `/ingest/projects` 的「已登记且活动」改为读 `kb_projects`，不再读 `MEMHUB_KNOWLEDGE_DIR`；缺 DSN 同样启动失败。采集侧仍只读该表，不写知识真源。
 
 ### 9.3 已决（不再讨论）
 
