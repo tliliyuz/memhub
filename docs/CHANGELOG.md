@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-25（Alembic 版本表显式落 `kb` schema）
+
+- `fix(alembic)`：`alembic/env.py` 给所有 `context.configure(...)` 显式传 `version_table_schema`——生产路径（未注入连接，`MEMHUB_KB_MIGRATE_DB_URL` 带外执行）固定 `kb`，不再依赖角色 `search_path` 兜底；注入连接（测试隔离、`migrate-kb`）跟随该连接当前 schema，隔离用例不写进 `kb`（ADR-0013 §6）。
+- `fix(alembic)`：`--sql` 离线模式优先使用调用方注入的 `sqlalchemy.url`，再退回 `MEMHUB_KB_MIGRATE_DB_URL`。
+- `test`：`test_kb_migrations.py` 新增离线 SQL 断言（`kb.alembic_version` 出现、`public.alembic_version` 不出现）。
+- 验证（2026-11-25，本地）：`pytest tests/contract/test_kb_migrations.py` 4 passed；全量 `pytest` 545 passed / 1 skipped；`ruff check`、`ruff format --check`、`mypy src`（48 files）、`check_no_raw_sql.py`、`check_async_io.py` 全绿。
+
 ## 2026-11-25（写入审计落 `kb_write_audit`）
 
 - `feat(kb)`：`PgKnowledgeStore` 新增 `record_write_audit()`，向 `kb_write_audit` 写一条不含正文与 token 的审计（规格 §3.6）；审计自成事务，落库失败按原路径上抛，不静默丢记录。

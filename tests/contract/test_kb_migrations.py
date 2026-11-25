@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import io
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -79,3 +80,16 @@ def test_downgrade_removes_kb_tables(migrated: Connection) -> None:
     command.downgrade(cfg, "base")
     remaining = set(inspect(migrated).get_table_names()) - {"alembic_version"}
     assert remaining == set()
+
+
+def test_version_table_is_qualified_with_kb_schema() -> None:
+    """生产路径（未注入连接）版本表固定落 `kb`，不靠 search_path 兜底（ADR-0013 §6）。"""
+    cfg = Config(str(ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", "postgresql+psycopg://kb@127.0.0.1:1/memhub_prod")
+    buffer = io.StringIO()
+    cfg.output_buffer = buffer
+    command.upgrade(cfg, "head", sql=True)
+    sql = buffer.getvalue()
+    assert "kb.alembic_version" in sql
+    assert "public.alembic_version" not in sql
