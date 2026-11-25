@@ -186,7 +186,22 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 - 写操作后默认 1.5s 防抖重建一次（`MEMHUB_KB_AUTO_REBUILD=0` 关闭）。
 - 设置了 `MEMHUB_KB_GRAPH_PORT` 时，重建完成后由 kb-api 重启托管的 explorer 子进程（explorer 只在启动时读 `kg.json`）。
 
-### 4.9 前端
+### 4.9 MCP 调用轨迹
+
+只读查询 `kb_mcp_trace`（ADR-0014）；服务端在 `/mcp` 入口记录每次 `tools/call` 与鉴权/路由拒绝。
+
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| GET | `/api/v1/kb/mcp-traces?limit=&offset=&tool=&status=&credential=&since=&until=` | `{items, total, offset, limit}`，`called_at` 倒序 |
+| GET | `/api/v1/kb/mcp-traces/summary?days=` | `{since, days, total, ok, error, rejected, tools:[{tool, count, ok, error, rejected, avg_ms}], credentials:[{id, name, count}]}` |
+
+- `limit` 1–500（默认 50），`offset` ≥ 0；`status` ∈ `ok/error/rejected`；`credential` 同时匹配 `credential_id` 与 `credential_name`；`days` 1–30（默认 7）。
+- 每项字段：`trace_id, request_id, rpc_id, called_at, credential:{id,name}, tool, status, http_status, error_code, error_kind, duration_ms, result_bytes, projects, client`。
+- 凭据未配置 `name` 时 `credential.name=null`，**展示层**按 `name || id || "unknown"` 降级；契约不固化展示文案。
+- 只记元数据：不含参数原文、正文与 token；参数仅留 `args_digest`。明细保留 30 天，更早数据由写入路径节流清理。
+- 非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
+
+### 4.10 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 
