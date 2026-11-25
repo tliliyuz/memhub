@@ -1,13 +1,11 @@
-"""整库归档故障恢复与投影协调（仅临时样本）。"""
+"""整库归档故障恢复（仅临时样本）。"""
 
 from pathlib import Path
-from typing import Any
 
 import anyio
 import pytest
 
 from memhub.kb import archive, catalog, manage
-from memhub.kb.projection import save_projection
 from memhub.kb.store import KnowledgeStore
 
 
@@ -76,8 +74,6 @@ async def test_resume_interrupted_archive_refuses_unknown_changes(
     assert (store.root / archive.PENDING).is_file()
     with pytest.raises(manage.WriteDeferred):
         await catalog.create_kb(store, kb_id="other")
-    with pytest.raises(manage.WriteDeferred):
-        await save_projection(store, store.root.parent / "kg.json")
     registry = store.root / ".kbs.json"
     old = registry.read_bytes()
     registry.write_bytes(b'{"kbs": [], "extra": "test"}')
@@ -89,28 +85,8 @@ async def test_resume_interrupted_archive_refuses_unknown_changes(
     assert not await archive.recover(store)
     assert not (store.root / "example").exists()
     assert (await catalog.list_archives(store))["total"] == 1
-    assert await archive.projection_dirty(store.root)
-
-
-async def test_projection_clears_dirty_only_after_success(
-    store: KnowledgeStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    await catalog.create_kb(store, kb_id="example")
-    await catalog.delete_kb(store, "example")
-    from memhub.kb import projection
-
-    class Graph:
-        def save_to_file(self, output: Path) -> None:
-            output.write_text("{}", encoding="utf-8")
-
-    async def build(_: KnowledgeStore) -> tuple[Any, projection.ProjectionReport]:
-        return Graph(), projection.ProjectionReport()
-
-    monkeypatch.setattr(projection, "build_graph", build)
-    output = store.root.parent / "kg.json"
-    await save_projection(store, output, clear_archive_dirty=True)
-    assert output.is_file()
-    assert not await archive.projection_dirty(store.root)
+    # 归档事务的最后一个步骤是历史投影哨兵；名称保留，恢复流程按原样重放。
+    assert (store.root / archive.MARKER).is_file()
 
 
 async def test_corrupt_snapshot_does_not_touch_live_data(store: KnowledgeStore) -> None:

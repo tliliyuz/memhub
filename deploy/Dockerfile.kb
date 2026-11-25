@@ -2,7 +2,7 @@
 # 构建：docker build --network=none -f deploy/Dockerfile.kb -t memhub/app-kb:0.1.0 .
 # 前置：deploy/dist/wheelhouse-worker/ 里有 memhub wheel 与全部 engine/postgres 依赖；
 #       deploy/dist/web-dist/ 是 `pnpm build` 的产物（含 index.html）。
-# 复用 worker 的 wheelhouse：kb 的投影重建会 import semantica.context。
+# 复用 worker 的 wheelhouse，与 worker 共用同一套依赖基线。
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -33,9 +33,8 @@ USER 999:987
 EXPOSE 8701
 
 # kb-api 代码里固定绑 127.0.0.1（host 网络下由 nginx 反代），不做可配置。
-# 真源是 PG（MEMHUB_KB_DB_URL），不再有 --knowledge-dir；--graph-out 仍是投影输出路径，
-# 投影只供旧 explorer 与 /api/v1/kb/projection 状态接口，管理台图谱页直读 PG（/api/v1/kb/graph）。
+# 真源是 PG（MEMHUB_KB_DB_URL）；图谱与检索直读 kb_* 表，没有 --knowledge-dir，
+# 也没有文件投影或 explorer。
 CMD ["memhub", "kb", \
-     "--graph-out", "/var/lib/memhub/kb/kg.json", \
      "--web-dist", "/app/web-dist", \
      "--data-dir", "/var/lib/memhub/data"]

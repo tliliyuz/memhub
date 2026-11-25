@@ -246,7 +246,7 @@ def _check_id(node_id: str) -> None:
 
 
 async def edge_index(store: KnowledgeReader) -> EdgeIndex:
-    """解析 `_edges.jsonl`。规则与投影一致：完整 id 优先，其次唯一 slug。"""
+    """解析 `_edges.jsonl`。规则与图谱解析一致：完整 id 优先，其次唯一 slug。"""
     ids = set(await store.list_ids())
     slug_index: dict[str, list[str]] = {}
     for node_id in ids:

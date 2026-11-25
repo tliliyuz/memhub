@@ -1,4 +1,4 @@
-"""抽取 → 合并 → 投影 的端到端形状（不调用真实模型）。"""
+"""抽取 → 合并 的端到端形状（不调用真实模型）。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import SourceKind, SourceRef, Tier
-from memhub.kb.projection import build_graph
 from memhub.kb.store import KnowledgeStore
 from memhub.worker import extract, render
 from memhub.worker.extract import ExtractionFailed, extract_document
@@ -109,7 +108,8 @@ async def test_merge_creates_updates_and_protects_canonical(tmp_path: Path) -> N
     assert "demo/pitfall/proxy-502-two-causes" in third.skipped_canonical
 
 
-async def test_projection_builds_nodes_and_resolves_edges(tmp_path: Path) -> None:
+async def test_merge_persists_resolved_edges(tmp_path: Path) -> None:
+    """合并把边写进库，端点按完整 id 解析；投影子系统下线后不再有中间图谱文件。"""
     store = await _demo_store(tmp_path)
     source = SourceRef(type=SourceKind.WIKI, ref="a.md")
     client = FakeClient([_payload()])
@@ -118,11 +118,16 @@ async def test_projection_builds_nodes_and_resolves_edges(tmp_path: Path) -> Non
     )
     await merge(store, extraction, project="demo", source=source)
 
-    graph, report = await build_graph(store)
-    assert report.nodes == 2
-    assert report.edges == 1
-    assert report.unresolved == []
-    assert graph is not None
+    node, _ = await store.read("demo/pitfall/proxy-502-two-causes")
+    assert node.title == "Proxy 502 的两个根因"
+    rows = await store.edges("demo")
+    assert [(row["source"], row["predicate"], row["target"]) for row in rows] == [
+        (
+            "demo/pitfall/proxy-502-two-causes",
+            "resolved_by",
+            "demo/procedure/locate-upstream-timeout",
+        )
+    ]
 
 
 def _node(slug: str, **overrides: object) -> dict[str, object]:

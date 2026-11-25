@@ -1,10 +1,10 @@
 # memhub
 
-Memhub 2.0：本地采集 → 云端提炼 → markdown 真源 → 图谱/向量投影 → MCP 读取。
+Memhub 2.0：本地采集 → 云端提炼 → PostgreSQL 知识真源 → 图谱/检索 → MCP 读取。
 
 - **没有 Proxy**：模型请求路径上没有任何 memhub 组件。设计动机见 [ADR-0001](docs/decisions/ADR-0001-no-proxy-in-request-path.md)。
 - **采集端是哑管道**：客户端 collector 只做增量字节搬运与推送，不做解析与判断。
-- **云端是唯一有状态者**：value filter → LLM 抽取 → 合并 → git 版本化的 markdown。
+- **云端是唯一有状态者**：value filter → LLM 抽取 → 合并 → PostgreSQL `kb_*` 真源。
 
 ## 文档
 

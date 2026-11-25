@@ -310,7 +310,7 @@ class KnowledgeStore:
         async for path in AsyncPath(base).rglob("*.md"):
             relative = Path(path).relative_to(self.root)
             # 回收站里的文件仍是 markdown，但不是节点：不跳过的话删除过的节点会以
-            # `_trash/<时间戳>/<原 id>` 的伪节点身份重新出现在投影和图谱里。
+            # `_trash/<时间戳>/<原 id>` 的伪节点身份重新出现在图谱里。
             if relative.parts[0] == TRASH_DIR:
                 continue
             ids.append(relative.with_suffix("").as_posix())

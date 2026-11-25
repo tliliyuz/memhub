@@ -92,8 +92,6 @@ async def serve(root: Path, device: str, port: int) -> None:
         MEMHUB_ENV="dev",
         MEMHUB_KB_DB_URL=dsn,
         MEMHUB_DATA_DIR=str(data),
-        MEMHUB_KB_AUTO_REBUILD="0",
-        MEMHUB_KB_GRAPH=str(root / "unused-graph.json"),
         MEMHUB_KB_API_URL=f"http://127.0.0.1:{port}",
         MEMHUB_DEV_TOKEN=secrets.token_hex(32),
     )

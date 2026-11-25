@@ -41,10 +41,7 @@
 | `MEMHUB_PROCESSED_MAX_BYTES` | 否 | `2147483648` | purge-expired | `processed_raw/` 总量上限，配合 7 天保留期按最旧优先裁剪；非法值退出 2 |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |
-| `MEMHUB_KB_GRAPH` | 否 | `kb/kg.json` | kb-api / explorer | 投影输出路径；不存在时 `/api/v1/kb/projection` 报 `stale=true` |
 | `MEMHUB_KB_WEB_DIST` | 否 | 空 | kb-api | 留空只提供 API、不托管前端；目录里没有 `index.html` 时同样跳过静态托管 |
-| `MEMHUB_KB_AUTO_REBUILD` | 否 | `1` | kb-api | `0/off/false` 关闭写后防抖重建，需手动 `POST /api/v1/kb/rebuild` |
-| `MEMHUB_KB_GRAPH_PORT` | 否 | 空 | kb-api | 非空则托管 `python -m semantica.explorer` 子进程并在重建后重启；空则不自启（explorer 由外部管理） |
 | `MEMHUB_MCP_GRANTS` | 否 | 空（`/mcp` 关闭） | kb-api | MCP HTTP 凭据，JSON 数组；每项含 `sha256`（令牌摘要，64 位小写十六进制）、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、`expires_at`（UTC）、`projects`（1–128 个库 id）。空或未设时 `/mcp` 一律 404 且不落到 SPA；配置非法（含重复摘要）启动失败；过期、缺失或不匹配的凭据返回 401。吊销 = 删除该条摘要并重启 kb-api；需安装 `memhub[mcp-http]`，否则启用时报错退出 |
 
 ## 3. 模型调用

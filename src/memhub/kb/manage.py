@@ -6,7 +6,7 @@
 （ADR-0013，规格 §7）。
 
 删除不是硬删：存储层置 `archived_at`（文件版移入 `_trash/<时间戳>/`），并清掉
-与之相连的边。投影（kg.json）不由本模块维护，调用方写完自行 rebuild。
+与之相连的边。图谱与检索都直读真源，本模块不再维护任何文件投影。
 """
 
 from __future__ import annotations

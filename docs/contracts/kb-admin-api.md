@@ -1,13 +1,13 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.3
-> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、投影重建、当前登录身份。
+> 版本: 0.4
+> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、当前登录身份。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
 ## 1. 定位
 
 - **只绑回环地址、无鉴权**：kb-api 与 worker、collector、浏览器在同一台机器上；公网入口（如果将来有）由 nginx + oauth2-proxy 负责，不在本层做会话。
-- **PostgreSQL 是唯一真源**：所有写操作都落到 `kb_*` 表（`kb_nodes` / `kb_edges` / `kb_projects` / `kb_archives`），写完可选触发投影重建（`kg.json`）。API 不直接改投影。
+- **PostgreSQL 是唯一真源**：所有写操作都落到 `kb_*` 表（`kb_nodes` / `kb_edges` / `kb_projects` / `kb_archives`）。图谱与检索直接查询真源，不再生成文件投影。
 - **单机写入互斥**：每次写入是一个 PG 事务，事务级 advisory lock 串行化跨进程写入；进程退出即释放。归档中的库禁止普通写入，worker 保留队列文件并推迟处理，不计失败。
 - 每次写入在同一事务内追加 `kb_node_revisions`（含完整快照）；不再产生 git 提交。
 - **上传是唯一不直接写真源的入口**：它把文件送进提炼队列（raw_store），由 worker 异步提炼后写入 `kb_*`；接口返回只代表「已收到并排队」。
@@ -15,8 +15,7 @@
 启动（必须先配 `MEMHUB_KB_DB_URL`；运行入口不再接受 `--knowledge-dir`）：
 
 ```bash
-memhub kb --graph-out kb/kg.json \
-          --web-dist web/dist --spawn-graph --graph-port 8703  # 端口默认 8701
+memhub kb --web-dist web/dist --data-dir data   # 端口默认 8701
 ```
 
 ## 2. 错误信封
@@ -33,7 +32,7 @@ memhub kb --graph-out kb/kg.json \
 | `1011` KB_NOT_FOUND | 404 | 节点 / 回收站条目 / 接口不存在 |
 | `1012` KB_INVALID | 400 / 422 | 请求字段非法、节点字段校验失败（`data.errors` 给出 `loc/msg/type`）；上传整批无可用文件时 `data.rejected` 给出逐文件原因 |
 | `1013` KB_QUEUE_FULL | 503 | 提炼队列已满（`data:{used,limit,incoming}`），稍后重试；上传专用，与采集端的 `1008` 语义相同但属于本 API 的错误码区间 |
-| `2001` INTERNAL | 500 | 投影重建等内部错误 |
+| `2001` INTERNAL | 500 | 内部错误（如上传目录不可用、存储不可达） |
 
 请求体一律 `extra="forbid"`：多传字段返回 422 + `1012`。
 
@@ -49,7 +48,7 @@ memhub kb --graph-out kb/kg.json \
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/healthz`、`/api/v1/kb/healthz` | `{ok, store, nodes, projection}`；`store` 为 `pg`（运行入口固定 PG，文件存储仅测试与迁移工具） |
+| GET | `/healthz`、`/api/v1/kb/healthz` | `{ok, store, nodes}`；`store` 恒为 `pg`（运行入口固定 PG，文件存储仅测试与迁移工具） |
 | GET | `/api/v1/kb/stats` | `{nodes, edges, unresolved_edges, orphans, by_kind, by_tier, by_project}` |
 
 ### 4.2 节点
@@ -92,7 +91,7 @@ memhub kb --graph-out kb/kg.json \
 |:---|:---|:---|
 | PUT | `/api/v1/kb/nodes/{node_id}/edges` | **替换**该节点全部出边：`{"edges":[{"predicate":"about","target":"memhub/fact/x"}]}` |
 
-- 目标可以是完整 id，也可以是唯一 slug；解析不到的目标原样保留（投影时报 `unresolved`）。
+- 目标可以是完整 id，也可以是唯一 slug；解析不到的目标原样保留，由 `/api/v1/kb/graph` 计入 `unresolved_edges`。
 - 只允许改「以该节点为 source」的边；其他节点的边保持原样。
 - 路由顺序注意：`/edges` 必须在 `PUT /nodes/{node_id:path}` 之前注册，否则贪婪匹配会把 `edges` 吃进 id。
 
@@ -134,7 +133,7 @@ memhub kb --graph-out kb/kg.json \
 
 - `graph` 只返回该库自己的节点；边端点按完整 id 或「库内唯一 slug」解析，解析不到的计入 `unresolved_edges`，不影响其他边。
 - `degree` 双向计数，节点按 `(-degree, id)` 排序，方便画图时先看枢纽。
-- 这个接口直接读 `kb_nodes` / `kb_edges`，**不依赖 `kg.json` 投影**；管理台的图谱页就用它（不再内联 semantica explorer）。
+- 这个接口直接读 `kb_nodes` / `kb_edges`，管理台的图谱页就用它，不再依赖任何文件投影或内联的 explorer。
 - 库的显示名与描述存 `kb_projects.name` / `description`，写操作与其他节点写入共用 PG 写作用域。
 
 #### 4.6.1 归档删除一个知识库
@@ -143,7 +142,7 @@ memhub kb --graph-out kb/kg.json \
 
 恢复到原项目 ID。库已存在、外部库或应恢复的端点已不存在、关系有冲突、短别名会改变指向、路径异常或快照损坏时返回 `409/1010`，不覆盖已有资源。跨库关系按快照恢复，保留归档期间无关修改。
 
-归档/恢复的意图与状态由 `kb_archives` 行承载（`status` 为 `pending` / `active` / `restoring`），失败时事务整体回滚；不再需要文件版 journal 与反向补偿。若操作未完成（`pending`），普通写入返回 `busy/pending` 等价错误，待本机恢复命令核对并续做后再开放。成功归档或恢复会使投影重新生成。
+归档/恢复的意图与状态由 `kb_archives` 行承载（`status` 为 `pending` / `active` / `restoring`），失败时事务整体回滚；不再需要文件版 journal 与反向补偿。若操作未完成（`pending`），普通写入返回 `busy/pending` 等价错误，待本机恢复命令核对并续做后再开放。
 
 历史单节点归档仍使用原有 `/trash` 和 `/trash/restore`，不补造历史上未归档的关系。
 
@@ -176,23 +175,13 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 - 队列总量受 `MEMHUB_QUEUE_MAX_BYTES` 约束，超限 503/`1013`。kb-api 与 ingest-api 是两个进程、各持一份 30 秒刷新的用量缓存，跨进程并发推送/上传可能短暂超出上限（容忍一个刷新窗口）。
 - 批次 id 非法或清单不存在 → 404/`1011`。
 
-### 4.8 投影
-
-| 方法 | 路径 | 说明 |
-|:---|:---|:---|
-| GET | `/api/v1/kb/projection`、`/api/v1/kb/rebuild` | `{running, started_at, finished_at, error, nodes, edges, unresolved_edges, graph, graph_mtime, stale}`；冷启动时节点/边数直接读现有 `kg.json` |
-| POST | `/api/v1/kb/rebuild` | 同步重建；返回同上的状态；失败 500/`2001` + `data` 带状态 |
-
-- 写操作后默认 1.5s 防抖重建一次（`MEMHUB_KB_AUTO_REBUILD=0` 关闭）。
-- 设置了 `MEMHUB_KB_GRAPH_PORT` 时，重建完成后由 kb-api 重启托管的 explorer 子进程（explorer 只在启动时读 `kg.json`）。
-
-### 4.9 前端
+### 4.8 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 
 ## 5. 不变式
 
-1. 任何写操作都不直接改 `kg.json`；投影永远可由 `kb_*` 真源重建。
+1. 真源只有 `kb_*` 表；图谱与检索直接查询真源，不落文件投影。
 2. 删除只做软删（`kb_nodes.archived_at` + `kb_node_revisions` 快照），不物理删除节点行；整库归档另存 `kb_archives`。
 3. 一次写操作 = 一个 PG 事务（事务级 advisory lock）；事务内不做模型调用或长任务。
 4. 修订历史只进 `kb_node_revisions`；不再产生 git 提交（`commit` 字段恒为 `null`，保留仅为兼容旧客户端）。

@@ -150,7 +150,7 @@ async def test_deleted_node_does_not_reappear_as_trash_pseudo_node(
     store: KnowledgeStore,
 ) -> None:
     """归档文件仍是 markdown：list_ids 不跳过 `_trash/` 的话，删除过的节点会以
-    `_trash/<时间戳>/<原 id>` 伪节点身份回到投影和图谱里（线上踩过）。"""
+    `_trash/<时间戳>/<原 id>` 伪节点身份回到图谱里（线上踩过）。"""
     created = await manage.create_node(store, _draft())
     await manage.delete_node(store, str(created["id"]), expected_revision=str(created["revision"]))
     assert await store.list_ids() == []
