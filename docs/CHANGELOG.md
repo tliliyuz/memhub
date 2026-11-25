@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-25（迁移写库把 naive 时间钉成 UTC）
+
+- `fix(migrate)`：`parse_tree` 产出的节点时间（`valid_from` / `valid_until` / `occurred_at` / `decided_at` / `created_at` / `updated_at`）与归档 `deleted_at` 统一先补成 UTC 再进写库计划。frontmatter 的裸日期（如 `valid_until: '2026-11-21'`）解析出 naive datetime；`timestamptz` 列会按**会话时区**解释 naive 值，生产迁移容器是 +08，落库变成 `2026-11-20T16:00:00Z`，而磁盘侧哈希按 UTC 零点算——`--verify-only` 对这类节点永远报内容不一致。规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) §3 的口径本来就是「所有时间 `timestamptz`，一律 UTC」，本次让写库侧遵守它。运行态写入路径（kb-api / MCP）不在本次范围。
+- `test`：`test_migrate_apply.py` 新增 `test_naive_frontmatter_time_is_written_as_utc`，用裸日期 fixture 并把会话时区显式钉成 `Asia/Shanghai`（不依赖跑测机器默认时区），断言 `kb_nodes.valid_until` 回读为 `2026-11-21T00:00:00Z` 且 `diff_plan` 无差异。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，按直连端点覆盖隧道口）：RED——新用例 1 failed，实际落库回读 `2026-11-20 16:00:00+00`；GREEN——同用例 1 passed。`tests/unit/test_migrate_knowledge.py`、`tests/unit/test_migrate_verify.py`、`tests/unit/test_cli_migrate_kb.py`、`tests/contract/test_migrate_apply.py`、`tests/contract/test_kb_migrations.py` 合计 56 passed。
+- 生产影响：修复只对**修复后的写库**生效。已经用旧代码写入的 `valid_until` 错位行只有一条（`memhub/fact/knowledge-source-directory-structure-export-memhub`）；markdown 源已按授权删除，不能重写，只能单行订正。该订正已于 2026-11-25 15:30 按负责人指令在服务器执行（先落全库 `pg_dump` 备份，再 `UPDATE kb.kb_nodes SET valid_until = timestamptz '2026-11-21T00:00:00+00:00'`，`revision` 未改），随后对备份 tar 中的 728 个 md 重跑 `--verify-only`：`EXIT=0`，逐节点、逐边一致。728 个节点中只有这一条用了裸日期，其余时间均带 `Z`，不是普遍问题。
+
+## 2026-11-25（Alembic 入口归一化 DSN 方言）
+
+- `fix(alembic)`：`alembic/env.py` 把 DSN 归一化成 psycopg 3 方言（复用 `memhub.kb.session` 的同一函数，公开为 `psycopg_dsn`）。此前 `postgresql://` 直接交给 `engine_from_config`，SQLAlchemy 会按默认方言去找 psycopg2；镜像里只有 psycopg 3，`alembic upgrade head` 在连库前即以 `ModuleNotFoundError: psycopg2` 失败。生产切换时是用 `postgresql+psycopg://` 临时绕过的；修复后 `deploy/README.md` 的一次性容器命令按原样可用。运行态异步引擎行为不变。
+- `test`：`test_kb_migrations.py` 新增 `test_online_path_normalizes_plain_dsn_to_psycopg3`，在 `engine_from_config` 处截获交给 SQLAlchemy 的 URL，断言已带 `+psycopg` 且不连库；先观察 RED（原始 URL 断言失败）再实施。
+- `docs`：`ENVIRONMENT.md` 说明该 DSN 可写 `postgresql://`，由入口归一化。
+- 验证（2026-11-25，本地）：RED——`pytest ... -k online_path` 1 failed，断言打印未归一化的 `postgresql://`；GREEN——同命令 1 passed，`test_kb_migrations.py` 与 `test_kb_session.py` 合计 13 passed / 3 skipped（无 `MEMHUB_TEST_DB_URL`，PG 用例按约定 skip）。
+
 ## 2026-11-25（kb 容器独立 env_file，隔离运行态凭据）
 
 - `fix(deploy)`：`compose.yml` 的 kb 服务改用独立 `/etc/memhub/env.kb`，不再继承默认 `/etc/memhub/env`——受限的 kb 容器不应拿到 `MEMHUB_DB_URL`（运行态全权角色）、`PGPASSWORD`、LLM 凭据与设备 token 密钥。`env.kb` 至少写 `MEMHUB_KB_DB_URL`；`/mcp` 入口需要 `MEMHUB_MCP_GRANTS`，另按需拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`。
