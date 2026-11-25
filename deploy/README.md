@@ -112,6 +112,11 @@ docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 构建上下文根目录还必须含仓库根的 `prompts/`（worker 镜像会 `COPY prompts /usr/local/lib/python3.12/prompts`；
 wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）。
 
+依赖锁：`lock-ingest.txt`（ingest）与 `lock-worker.txt` / `lock-kb.txt`（worker 与 kb 的
+`memhub[postgres,engine]` / `memhub[postgres,engine,mcp-http]` 完整闭包）。两份锁仅在 `mcp==2.3.0`
+及其传递依赖（`mcp-types` / `httpx2` / `sse-starlette` / `pyjwt[crypto]` / `jsonschema` 等）上不同；
+锁定版本前记得校验镜像内 `pip freeze` 与锁一致，避免与权威锁漂移。
+
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
 运行态密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。kb-api 例外：它用独立文件
 `/etc/memhub/env.kb`（同样 0600），只放 kb 进程实际读取的键（至少 `MEMHUB_KB_DB_URL`；`/mcp` 入口

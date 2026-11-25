@@ -9,7 +9,7 @@
 - `docs`：契约索引升 0.12，`kb-admin-api.md` 升 0.4（删除 §4.8 投影并重排前端小节、更新不变式），`node-schema.md` 升 0.4（§6 改为「不生成文件投影」），`architecture.md` / `DEVELOPMENT.md` / `deploy/README.md` / `web/README.md` / 根 `README.md` 同步；ADR-0013 后果段记录负责人确认删除。
 - `test`：新增 `test_healthz_has_no_projection_state`、`test_projection_routes_are_removed`、`test_projection_subcommands_are_removed`、`test_kb_console_rejects_removed_projection_flags`；`test_pipeline.py` 的投影用例改为断言合并后的边已按完整 id 落库；删除 `test_serve_env.py`（被测函数已移除）。
 - 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 按直连端点单独注入）：RED——改动前四个目标用例分别因 healthz 含 `projection`、投影/重建路由仍存在、`project`/`serve` 仍被识别、`kb` 仍接受 `--graph-out` 等参数而失败；GREEN——全量 `pytest` **545 passed / 1 skipped**；`ruff check src tests scripts alembic`、`ruff format --check src tests scripts alembic`、`mypy src`（47 files）、`check_env_example_keys.py`、`check_document_format.py`、`check_document_ownership.py --all`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py` 全绿；`web` 的 `tsc -b` 通过。`ruff check .` 另在 `.claude/hooks/guard-git-write.py`（本分支未改动的已提交文件）报 ISC004，属既有问题，未在本分支处理。
-- 依赖：`engine` extra 仍保留 `semantica`（已无代码引用）与 `python-multipart`（上传必需）；移除 semantica 需同时重出锁文件与离线 wheelhouse，按独立任务处理。
+- `chore(deploy)`：新增 `deploy/lock-kb.txt`——kb 镜像的完整依赖锁（worker 锁的 60 项 + `mcp==2.3.0` 与其 15 项传递依赖：`mcp-types` / `httpx2` / `sse-starlette` / `pyjwt` / `cryptography` / `jsonschema` 生态 / `cffi` / `pycparser` / `pywin32`）；与 `lock-worker.txt` 的差异仅 mcp-http 闭包。锁由本机 venv 的 `importlib.metadata` 版本仿真生成；**权威锁仍须发版时在镜像内 `pip freeze` 重出**。依赖：`engine` extra 仍保留 `semantica`（已无代码引用）与 `python-multipart`（上传必需）；移除 semantica 需同时重出锁文件与离线 wheelhouse，按独立任务处理。
 
 
 ## 2026-11-25（模型边界统一把时间归一为 UTC）
