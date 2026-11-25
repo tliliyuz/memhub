@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.7
+> 版本: 0.8
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -224,6 +224,7 @@ Authorization: Bearer <device_token>
 
 - 路径仍为 `/api/v1`；0.6 移除 `POST /ingest/projects` 与设备—知识库授权文件，`project` 只要求显式、已登记且活动，拒绝原因细化到 `data.reason`。旧客户端调用已删除的建库代理会得到 `404/405`，需要升级到管理台建库；旧版保存的 `auto` 或缺失目标仍在下一次计划运行时被 `400/1003` 拒绝，需升级并修正保存的目标。
 - 0.7：「已登记且活动」的判据从 `MEMHUB_KNOWLEDGE_DIR`（目录 + `.kbs.json`）改为 `kb_projects`（存在行且 `archived_at` 为空）；服务端未配置 `MEMHUB_KB_DB_URL` 时拒绝启动。响应信封、错误码与拒绝原因不变。
+- 0.8：每次采集决策（接受或拒绝，含重放）在服务端 `kb_write_audit` 表落一行：`actor=device:<device_id>`、`project`、`action=ingest`、`result=ok` 或拒绝原因码；不含会话正文与 token。对客户端透明，信封与错误码不变。
 - 客户端在 `heartbeat` 上报 `collector_version`；服务端可下发 `upgrade` 命令但不强制。
 
 ## 7. 与面板既有接口的边界

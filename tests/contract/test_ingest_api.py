@@ -17,9 +17,10 @@ from typing import Self
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from memhub.ingest.app import create_app
-from memhub.kb.models import KbArchive
+from memhub.kb.models import KbArchive, KbWriteAudit
 from memhub.kb.session import KbDsnMissing, create_runtime_store
 
 DEVICE = str(uuid.uuid4())
@@ -457,6 +458,32 @@ def test_ingest_decisions_are_audited_without_content(
     assert "decision=reject" in rejected and "reason=unregistered" in rejected
     assert "secret-body" not in accepted + rejected
     assert TOKEN not in accepted + rejected
+
+
+def test_ingest_decisions_are_recorded_in_write_audit(
+    client: TestClient, kb_targets: str, test_dsn: str
+) -> None:
+    """采集写审计落 `kb_write_audit`：设备、目标、结果；不含正文与 token。"""
+    _push(client, [_file("a2.jsonl", "secret-body")], project="sdp-tag")
+    _push(client, [_file("b2.jsonl", "secret-body")], project="ghost")
+
+    async def read_rows() -> list[tuple[str | None, str | None, str | None, str, str]]:
+        store = create_runtime_store(dsn=test_dsn, schema=kb_targets)
+        try:
+            async with store.sessions() as session:
+                rows = (await session.scalars(select(KbWriteAudit).order_by(KbWriteAudit.id))).all()
+            return [(row.actor, row.project, row.node_id, row.action, row.result) for row in rows]
+        finally:
+            await store.aclose()
+
+    rows = asyncio.run(read_rows())
+    assert rows == [
+        (f"device:{DEVICE}", "sdp-tag", None, "ingest", "ok"),
+        (f"device:{DEVICE}", "ghost", None, "ingest", "unregistered"),
+    ]
+    joined = repr(rows)
+    assert "secret-body" not in joined
+    assert TOKEN not in joined
 
 
 def test_project_list_only_exposes_registered_active_projects(

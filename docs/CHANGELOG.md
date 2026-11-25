@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-25（写入审计落 `kb_write_audit`）
+
+- `feat(kb)`：`PgKnowledgeStore` 新增 `record_write_audit()`，向 `kb_write_audit` 写一条不含正文与 token 的审计（规格 §3.6）；审计自成事务，落库失败按原路径上抛，不静默丢记录。
+- `feat(mcp)`：三个写工具（`kb_write_candidate` / `kb_update_candidate` / `kb_deprecate`）每次写尝试（含被拒的）落一行审计：`actor=mcp:<grant_id>`、`project`、`node_id`、`action`（create/update/deprecate）、`result=ok` 或拒绝原因码；文件存储（测试夹具）仍只留日志。
+- `feat(ingest)`：每次采集决策（接受、拒绝与重放）落一行审计：`actor=device:<device_id>`、`project`、`action=ingest`、`result=ok` 或拒绝原因码；原 `memhub.ingest.audit` 日志保留为运维旁路。
+- `docs`：`mcp-tools.md` 0.6 与 `ingest-api.md` 0.8 记审计落库语义，契约索引升到 0.10。
+- `test`：新增 `tests/contract/test_kb_write_audit.py`（三写工具的成功/拒绝/越权审计与内容不泄漏）与采集审计落库断言。
+
 ## 2026-11-25（运行时强制 PG：投影、MCP、CLI、worker 接线）
 
 - `feat(kb)`：运行入口统一经 `create_runtime_store()` 从 `MEMHUB_KB_DB_URL` 构造 `PgKnowledgeStore`；kb-api、MCP、worker、CLI 缺 DSN 时抛 `KbDsnMissing`，不再退回 `knowledge/` 文件存储。`KnowledgeStore` 保留给测试夹具、迁移工具与一次性迁移源。

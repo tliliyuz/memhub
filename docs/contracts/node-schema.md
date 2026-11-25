@@ -101,7 +101,7 @@ deprecated_reason: null            # tier=deprecated 且无替代节点时写原
 
 | 投影 | 来源 | 用途 |
 |---|---|---|
-| `kg.json` | `kb_nodes` + `kb_edges` | MCP 图遍历、explorer 可视化 |
+| `kg.json` | `kb_nodes` + `kb_edges` | 只供旧 explorer 可视化与 `/api/v1/kb/projection` 状态展示；MCP 图遍历与管理台图谱直接查 PG，不读它 |
 
 关键词检索不再依赖 `fts.db` 投影：kb-api 在 SQL 侧过滤候选集后用应用层 BM25 排序（`matched` 为 `"bm25"`）。向量投影与混合检索按 ADR-0007 另案推进。
 

@@ -316,9 +316,20 @@ def create_app(
         except TargetUnavailable as exc:
             raise _target_lookup_failed() from exc
 
-    def _audit(device_id: str, project: object, decision: str, reason: str = "") -> None:
-        """每次采集一条审计：设备、目标、接受/拒绝、理由、时间；不含内容与 token。"""
+    async def _audit(device_id: str, project: object, decision: str, reason: str = "") -> None:
+        """每次采集一条审计：设备、目标、接受/拒绝、理由、时间；不含内容与 token。
+
+        同步落 `kb_write_audit`（规格 §3.6，`action=ingest`，`result=ok|拒绝理由`）；
+        日志只做运维旁路。审计落库失败随原路径上抛，不静默丢记录。
+        """
         safe = project if isinstance(project, str) and len(project) <= 64 else ""
+        await kb_store.record_write_audit(
+            actor=f"device:{device_id}",
+            project=safe or None,
+            node_id=None,
+            action="ingest",
+            result="ok" if decision == "accept" else (reason or decision),
+        )
         LOGGER.info(
             "ingest decision=%s device=%r project=%r reason=%s at=%s",
             decision,
@@ -337,15 +348,15 @@ def create_app(
                 reason = "missing"
             else:
                 reason = "invalid"
-            _audit(device_id, value, "reject", reason)
+            await _audit(device_id, value, "reject", reason)
             raise _target_unavailable(reason)
         try:
             status = await target_status(registry.store, project)
         except TargetUnavailable as exc:
-            _audit(device_id, project, "reject", "registry_unavailable")
+            await _audit(device_id, project, "reject", "registry_unavailable")
             raise _target_lookup_failed() from exc
         if status is not TargetStatus.ACTIVE:
-            _audit(device_id, project, "reject", status.value)
+            await _audit(device_id, project, "reject", status.value)
             raise _target_unavailable(status.value)
         return project
 
@@ -484,7 +495,7 @@ def create_app(
                     async with queue_write_lock(raw_root):
                         replay = await state.check_replay_target(body)
                         if replay is not None:
-                            _audit(body.device_id, project, "accept", "replay")
+                            await _audit(body.device_id, project, "accept", "replay")
                             return _ok(replay.model_dump(mode="json"))
                         # 配额先于落盘，只算新增内容；重放不应被视为新增数据。
                         incoming = await estimate_new_bytes(raw_root, body, producer="collector")
@@ -497,10 +508,10 @@ def create_app(
                     replay = await state.check_replay_target(body)
                     result = replay if replay is not None else await state.apply(body)
         except BatchTargetConflict as exc:
-            _audit(body.device_id, body.project, "reject", "target_conflict")
+            await _audit(body.device_id, body.project, "reject", "target_conflict")
             raise _target_unavailable("target_conflict") from exc
         except QuotaExceeded as exc:
-            _audit(body.device_id, project, "reject", "quota_exceeded")
+            await _audit(body.device_id, project, "reject", "quota_exceeded")
             raise ApiError(
                 ErrorCode.QUEUE_BACKPRESSURE,
                 "raw_store quota exceeded",
@@ -512,11 +523,11 @@ def create_app(
             ) from exc
         except OSError as exc:
             # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
-            _audit(body.device_id, project, "reject", "raw_store_unavailable")
+            await _audit(body.device_id, project, "reject", "raw_store_unavailable")
             if quota is not None:
                 await quota.invalidate()
             raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
-        _audit(body.device_id, project, "accept")
+        await _audit(body.device_id, project, "accept")
         return _ok(result.model_dump(mode="json"))
 
     @app.post("/ingest/heartbeat")

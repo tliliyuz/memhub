@@ -1,4 +1,4 @@
-# 跨端契约（v0.9）
+# 跨端契约（v0.10）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.10 — 写入审计落库：MCP 三个写工具（[mcp-tools.md](mcp-tools.md) 0.6）与采集每次决策（[ingest-api.md](ingest-api.md) 0.8）都在 `kb_write_audit` 表记 `actor`/`project`/`node_id`/`action`/`result`，不含正文与 token；审计落库失败显式报错，不静默丢弃。
 - 0.9 — 真源改为 PostgreSQL `kb_*`（ADR-0013）：节点、边、知识库登记不再以 markdown 为真源，markdown 仅一次性迁移源；`matched` 为 `bm25`，`revision` 为每次写入重算的 16 位 hex；MCP 写工具返回的 `commit` 恒为 `null`；采集目标的「已登记且活动」改读 `kb_projects`（`ingest-api.md` 0.7）。
 - 0.8 — 候选区闭环：新增 `kb_update_candidate` 与 `kb_deprecate`（[mcp-tools.md](mcp-tools.md) 0.4），都要求 `expected_revision` 且只作用于 `tier=candidate`；`kb_read` 返回 `revision`；`NodeFrontmatter` 新增 `deprecated_reason`，`tier=deprecated` 允许「有替代节点」或「只有原因」（[node-schema.md](node-schema.md)）。canonical 修改与治理组其余工具仍关闭。
 - 0.7 — MCP 开放第一个写工具 `kb_write_candidate`（[mcp-tools.md](mcp-tools.md) 0.3）：新增 `mcp:write` 作用域（隐含读），`tools/list` 按作用域裁剪；只创建 `tier=candidate`，slug 冲突、归一化正文哈希去重、证据必填、内容门槛与每日上限；写成功自动 commit。canonical 修改与治理组其余工具仍关闭。

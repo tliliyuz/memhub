@@ -194,7 +194,7 @@ async def _write_tool(
     outcome = "failed"
     try:
         payload = await action(store, args, grant_id=grant_id, projects=projects)
-        outcome = "ok" if payload["commit"] else "ok_without_commit"
+        outcome = "ok"
         return _content(payload)
     except (CandidateRejected, CandidateConflict) as exc:
         outcome = exc.reason
@@ -214,6 +214,28 @@ async def _write_tool(
     except (manage.ManageError, OSError, ValueError, TypeError, KeyError, YAMLError):
         return _error(3007, "知识库写入失败")
     finally:
+        actor = f"mcp:{grant_id}"
+        if isinstance(args, WriteCandidateInput):
+            action_name = "create"
+            project = args.project
+            node_id = f"{args.project}/{args.kind.value}/{args.slug}"
+        elif isinstance(args, UpdateCandidateInput):
+            action_name, project, node_id = "update", args.id.split("/", 1)[0], args.id
+        else:
+            action_name = "deprecate"
+            project, node_id = args.id.split("/", 1)[0], args.id
+        if isinstance(store, PgKnowledgeStore):
+            # 写入审计进 `kb_write_audit`（规格 §3.6）；文件存储（测试夹具）只留日志。
+            try:
+                await store.record_write_audit(
+                    actor=actor,
+                    project=project,
+                    node_id=node_id,
+                    action=action_name,
+                    result=outcome,
+                )
+            except Exception:
+                logging.getLogger("memhub.mcp.audit").exception("写入审计落库失败 node=%s", node_id)
         logging.getLogger("memhub.mcp.audit").info(
             "tool=%s grant=%s project=%s node=%s result=%s at=%s",
             name,

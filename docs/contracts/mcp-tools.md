@@ -1,6 +1,6 @@
 # MCP 工具契约
 
-> 版本：0.5（真源改为 PostgreSQL `kb_*`）
+> 版本：0.6（写审计落 `kb_write_audit`）
 > 适用范围：MCP 工具、授权和传输契约。
 > 不负责：部署拓扑、凭据发放和生产验收记录。
 > 设计原则：以 PostgreSQL `kb_*` 为唯一真源、先授权与校验再读写；写只进候选区，不动 canonical。
@@ -28,7 +28,7 @@
 - **内容门槛**：确定性门禁覆盖可机械识别的垃圾：`title` 2–200 字符、`body` 20–20000 字符；`title+body` 归一化后落在寒暄/确认集合（`好的`、`收到`、`ok`、`thanks`、`谢谢`、`明白`、`了解`、`已完成`、`继续`、`开始吧` 等）拒绝为 `content_rejected`；非空行中 ≥60% 匹配日志行模式且行数 ≥10 拒绝为 `content_rejected`。其余「进度汇报、临时状态、未验证猜测」由调用方按 `prompts/sessions.md` 的忽略清单在调用前过滤，工具描述里写明。更新候选时对**更新后**的标题与正文重跑同一套门槛。
 - **每日上限**：同一凭据在同一 UTC 日共享 50 次写入额度；跨授权活动库，按现存节点 `source` 中服务端保留的 `mcp:<grant_id>` 标记与 `created_at` 日期现算，不引入独立计数器。已从活动区移除的节点不计入。超限返回 `daily_limit_exceeded`。上限只约束**创建**；更新与废弃不计入。
 - **目标校验**：`project` 必须已登记且活动（`target_access.registered_active`），否则返回 `project_unavailable`；归档事务待恢复或登记不可读时返回可重试错误。
-- **提交与审计**：节点写入即一次 PG 事务（同事务追加 `kb_node_revisions`），不再产生 git 提交，`commit` 恒为 `null`，调用方不应据此重试。通过输入契约的写尝试在审计日志中只记凭据标识、库、节点 id、工具、结果与时间，不含正文与 token。
+- **提交与审计**：节点写入即一次 PG 事务（同事务追加 `kb_node_revisions`），不再产生 git 提交，`commit` 恒为 `null`，调用方不应据此重试。通过输入契约的每次写尝试（含被拒的）在 `kb_write_audit` 表落一行（`0.6` 起为 PG 表，不再只是日志）：`actor` 为 `mcp:<grant_id>`、`project`、`node_id`、`action`（`create`/`update`/`deprecate`）、`result`（`ok` 或拒绝原因码）与时间；不含正文与 token。审计落库失败按错误返回，不静默丢记录。
 - **可见性**：候选默认不进 `kb_search` 的 canonical 结果，需要显式 `tier=candidate` 或 `all` 才看到。
 
 ### 1.2 候选更新与废弃

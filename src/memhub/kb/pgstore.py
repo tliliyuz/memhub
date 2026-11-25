@@ -42,7 +42,7 @@ from memhub.kb.errors import (
     TargetUnavailable,
     WriteDeferred,
 )
-from memhub.kb.models import KbArchive, KbEdge, KbNode, KbNodeRevision, KbProject
+from memhub.kb.models import KbArchive, KbEdge, KbNode, KbNodeRevision, KbProject, KbWriteAudit
 from memhub.kb.store import TrashEntry
 
 REVISION_RE = re.compile(r"^[0-9a-f]{16}$")
@@ -1080,6 +1080,33 @@ class PgKnowledgeStore:
             edge_at = await session.scalar(select(func.max(KbEdge.created_at)))
         moments = [moment for moment in (revision_at, edge_at) if moment is not None]
         return max(moments) if moments else None
+
+    # -- 写入审计（规格 §3.6） --------------------------------------------
+
+    async def record_write_audit(
+        self,
+        *,
+        actor: str | None,
+        project: str | None,
+        node_id: str | None,
+        action: str,
+        result: str,
+    ) -> None:
+        """一条不含正文与 token 的写入审计；自成事务，写路径失败也不能吞掉它。
+
+        审计写入失败按原样上抛：审计缺失必须显式失败，不能静默丢记录。
+        """
+        async with self._session() as session:
+            session.add(
+                KbWriteAudit(
+                    actor=actor,
+                    project=project,
+                    node_id=node_id,
+                    action=action,
+                    result=result,
+                    created_at=_now(),
+                )
+            )
 
 
 __all__ = [
