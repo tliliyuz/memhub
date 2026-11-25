@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from memhub.contract import Kind, NodeFrontmatter, Tier
 from memhub.kb import catalog
 from memhub.kb.api import create_app
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.session import KB_DSN_KEY, create_runtime_store
 
 HEADERS = {"accept": "application/json, text/event-stream"}
 INIT = {
@@ -30,10 +30,12 @@ INIT = {
 
 
 @pytest.fixture
-def web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, test_dsn: str, kb_pg_schema: str) -> None:
     (tmp_path / "index.html").write_text("fixture SPA", encoding="utf-8")
     monkeypatch.setenv("MEMHUB_KB_WEB_DIST", str(tmp_path))
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(tmp_path))
+    monkeypatch.setenv(KB_DSN_KEY, test_dsn)
+    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kg.json"))
+    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.delenv("MEMHUB_MCP_GRANTS", raising=False)
 
 
@@ -64,8 +66,8 @@ def configure(monkeypatch: pytest.MonkeyPatch, *, expired: bool = False) -> dict
     return headers
 
 
-def test_disabled_mcp_does_not_fall_through_to_spa(web: None) -> None:
-    with TestClient(create_app(), base_url="http://localhost") as client:
+def test_disabled_mcp_does_not_fall_through_to_spa(web: None, kb_pg_schema: str) -> None:
+    with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
         assert client.get("/").text == "fixture SPA"
         for path in ("/mcp", "/mcp/", "/mcp/other"):
             assert client.get(path).status_code == 404
@@ -73,10 +75,10 @@ def test_disabled_mcp_does_not_fall_through_to_spa(web: None) -> None:
 
 
 def test_http_handshake_and_scope(
-    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, kb_pg_schema: str
 ) -> None:
     headers = configure(monkeypatch)
-    with TestClient(create_app(), base_url="http://localhost") as client:
+    with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
         assert client.post("/mcp", json=INIT, headers=HEADERS).status_code == 401
         assert (
             client.post("/mcp", json=INIT, headers={**HEADERS, "cookie": "fixture=x"}).status_code
@@ -139,17 +141,17 @@ def test_http_handshake_and_scope(
 
 
 def test_expired_and_revoked_credentials(
-    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, kb_pg_schema: str
 ) -> None:
     expired, expired_headers = grant(expired=True)
     revoked, revoked_headers = grant()
     valid, valid_headers = grant()
     monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([expired, revoked, valid]))
-    with TestClient(create_app(), base_url="http://localhost") as client:
+    with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
         assert client.post("/mcp", json=INIT, headers=expired_headers).status_code == 401
         assert client.post("/mcp", json=INIT, headers=revoked_headers).status_code == 200
     monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([valid]))
-    with TestClient(create_app(), base_url="http://localhost") as client:
+    with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
         assert client.post("/mcp", json=INIT, headers=revoked_headers).status_code == 401
         assert client.post("/mcp", json=INIT, headers=valid_headers).status_code == 200
 
@@ -161,7 +163,7 @@ def test_malformed_credentials(web: None, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def test_sdk_round_trip_separates_grant_scopes(
-    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kb_pg_schema: str
 ) -> None:
     from httpx2 import ASGITransport, AsyncClient
     from mcp import Client
@@ -170,7 +172,7 @@ async def test_sdk_round_trip_separates_grant_scopes(
     sample, sample_headers = grant()
     private, private_headers = grant("private")
     monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([sample, private]))
-    store = KnowledgeStore(tmp_path)
+    store = create_runtime_store(schema=kb_pg_schema)
     now = datetime.now(UTC)
     for project in ("sample", "private"):
         await catalog.create_kb(store, kb_id=project, name=project)
@@ -188,8 +190,9 @@ async def test_sdk_round_trip_separates_grant_scopes(
             ),
             "合成正文",
         )
+    await store.aclose()
 
-    app = create_app()
+    app = create_app(schema=kb_pg_schema)
     async with app.router.lifespan_context(app):
         # 交错使用不同凭据，确认请求级范围不串库；通过 SDK 进行协议协商和工具发现。
         for allowed, forbidden, headers in (
@@ -228,7 +231,7 @@ async def test_sdk_round_trip_separates_grant_scopes(
 
 
 async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
-    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kb_pg_schema: str
 ) -> None:
     from httpx2 import ASGITransport, AsyncClient
     from mcp import Client
@@ -236,9 +239,10 @@ async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
 
     config, headers = grant(scope="mcp:write")
     monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([config]))
-    store = KnowledgeStore(tmp_path)
+    store = create_runtime_store(schema=kb_pg_schema)
     await catalog.create_kb(store, kb_id="sample", name="sample")
-    app = create_app()
+    await store.aclose()
+    app = create_app(schema=kb_pg_schema)
     async with (
         app.router.lifespan_context(app),
         AsyncClient(transport=ASGITransport(app=app), headers=headers) as http,
@@ -297,14 +301,18 @@ async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
                 )
                 assert not dropped.is_error
                 assert json.loads(dropped.content[0].text)["tier"] == "deprecated"
-    node, _ = await store.read(payload["id"])
-    assert node.source[-1].ref == f"mcp:{config['sha256'][:12]}"
-    assert node.tier is Tier.DEPRECATED
-    assert node.deprecated_reason == "HTTP 联调结束后废弃"
+    check_store = create_runtime_store(schema=kb_pg_schema)
+    try:
+        node, _ = await check_store.read(payload["id"])
+        assert node.source[-1].ref == f"mcp:{config['sha256'][:12]}"
+        assert node.tier is Tier.DEPRECATED
+        assert node.deprecated_reason == "HTTP 联调结束后废弃"
+    finally:
+        await check_store.aclose()
 
 
 async def test_http_rejects_overlapping_posts(
-    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, kb_pg_schema: str
 ) -> None:
     # httpx 的 ASGI 传输会先读完请求体再进应用，无法模拟「上一请求仍持有入口」；
     # 这里直接驱动 ASGI，用阻塞的 receive 让第一个 POST 停在应用内部。
@@ -347,7 +355,7 @@ async def test_http_rejects_overlapping_posts(
     async def complete() -> dict[str, Any]:
         return {"type": "http.request", "body": body, "more_body": False}
 
-    app = create_app()
+    app = create_app(schema=kb_pg_schema)
     entered, release = anyio.Event(), anyio.Event()
 
     async def slow() -> dict[str, Any]:

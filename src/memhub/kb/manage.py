@@ -100,10 +100,8 @@ class Storage(query.KnowledgeReader, Protocol):
 
     读侧复用 `query.KnowledgeReader`，写侧在此补齐；`write_scope` 返回异步上下文
     管理器（实现端由 `@asynccontextmanager` 提供），不是裸异步迭代器。
+    真源路径（`root`）只属于文件实现，不在操作面里，避免调用方误以为 PG 也有目录。
     """
-
-    @property
-    def root(self) -> Any: ...
 
     def write_scope(
         self, *, timeout: float = ..., recovery: bool = ...

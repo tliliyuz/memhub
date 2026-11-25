@@ -38,6 +38,7 @@ from memhub.contract import (
     explicit_project,
 )
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
+from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import (
     TargetRegistry,
     TargetStatus,
@@ -264,7 +265,7 @@ def create_app(store: StateStore | None = None) -> FastAPI:
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
     raw_root = Path(data_dir) if data_dir else None
     knowledge_dir = os.environ.get("MEMHUB_KNOWLEDGE_DIR", "").strip()
-    registry = TargetRegistry(Path(knowledge_dir)) if knowledge_dir else None
+    registry = TargetRegistry(KnowledgeStore(Path(knowledge_dir))) if knowledge_dir else None
     # 同一进程内串行校验批次绑定和配额、写盘、记账；跨进程绑定由 rawstore 保证。
     queue_lock = Lock()
     # 即便当前没配 DATA_DIR 也要校验：配错的值应该在启动时就炸，而不是等哪天补上

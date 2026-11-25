@@ -9,24 +9,25 @@ import pytest
 from fastapi.testclient import TestClient
 
 from memhub.kb.api import create_app
+from memhub.kb.session import KB_DSN_KEY
 
 
 @pytest.fixture
-def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    knowledge = tmp_path / "knowledge"
-    knowledge.mkdir()
+def client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kb_pg_schema: str, test_dsn: str
+) -> Iterator[TestClient]:
     web = tmp_path / "web"
     (web / "assets").mkdir(parents=True)
     (web / "index.html").write_text("<!doctype html><title>memhub</title>", encoding="utf-8")
     (web / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
 
-    monkeypatch.setenv("MEMHUB_KNOWLEDGE_DIR", str(knowledge))
+    monkeypatch.setenv(KB_DSN_KEY, test_dsn)
     monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
     monkeypatch.setenv("MEMHUB_KB_WEB_DIST", str(web))
     monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.delenv("MEMHUB_KB_GRAPH_PORT", raising=False)
 
-    with TestClient(create_app()) as test_client:
+    with TestClient(create_app(schema=kb_pg_schema)) as test_client:
         yield test_client
 
 
@@ -178,6 +179,7 @@ def test_edges_route_is_not_shadowed_by_greedy_node_id(client: TestClient) -> No
 
 
 def test_validation_errors_use_envelope(client: TestClient) -> None:
+    _ensure_project(client, "memhub")
     bad = client.post("/api/v1/kb/nodes", json={"kind": "entity", "title": "服务缺 entity_kind"})
     assert bad.status_code == 422
     assert bad.json()["code"] == 1012

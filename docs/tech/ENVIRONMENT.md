@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-21 |
+| 最后更新 | 2026-11-25 |
 | 适用范围 | 环境变量键集、默认值、读取方、失败语义 |
 | 不负责 | 部署拓扑、契约字段 |
 
@@ -20,11 +20,11 @@
 | `MEMHUB_ENV` | 否 | `dev` | 全栈 | 非 `dev/prod` 启动失败 |
 | `MEMHUB_LOG_LEVEL` | 否 | `INFO` | 全栈 | 非法值启动失败 |
 | `MEMHUB_DATA_DIR` | 是 | — | ingest/worker；kb-api（可选） | ingest/worker 缺失启动失败；kb-api 缺失时上传接口返回 503，其余接口正常（也可用 `memhub kb --data-dir` 指定） |
-| `MEMHUB_KNOWLEDGE_DIR` | 采集写入必需 | — | ingest / kb-api / worker | 三者必须指向同一真源。ingest 缺配置则不授予任何目标；配置后目录无法核验则返回通用服务错误。worker 缺配置且未传 `--knowledge-dir` 时退出 2；kb-api 的本地入口可传 `--knowledge-dir` |
+| `MEMHUB_KNOWLEDGE_DIR` | 采集必需 | — | ingest（采集目标校验） | 迁移期过渡：采集侧仍按本地登记判目标，kb-api / MCP / worker / CLI 已改为只读 PG 真源。ingest 缺配置则不授予任何目标；配置后目录无法核验则返回通用服务错误 |
 | `MEMHUB_DB_URL` | 生产采集必需 | 空 | ingest / worker | 格式 `postgresql://user@host:port/db`；两者必须使用同一登记库。ingest 无 DSN 使用进程内状态；独立 worker 无 DSN 无法验证采集设备，保留采集队列等待验证，不影响管理台上传 |
-| `MEMHUB_KB_DB_URL` | kb-api 必需 | 空 | kb-api（`memhub.kb.session`） | 指向只对 `kb_*` 做 DML 的受限角色，库为 `memhub_prod`、`search_path` 固定 `kb`；缺失或为空抛 `KbDsnMissing`，**不回退文件/内存**。不得复用 `MEMHUB_DB_URL`（那是运行态角色，能碰运行态表与令牌摘要） |
+| `MEMHUB_KB_DB_URL` | kb-api / MCP / worker / CLI 必需 | 空 | 运行入口（`memhub.kb.session`） | 指向只对 `kb_*` 做 DML 的受限角色，库为 `memhub_prod`、`search_path` 固定 `kb`；缺失或为空抛 `KbDsnMissing`，**不回退文件/内存**。不得复用 `MEMHUB_DB_URL`（那是运行态角色，能碰运行态表与令牌摘要） |
 | `MEMHUB_KB_MIGRATE_DB_URL` | 迁移时必需 | 空 | Alembic（`alembic/env.py`） | 迁移角色，对 `kb_*` 有 DDL；`memhub migrate-kb` / 部署步骤带外执行，不在 kb 容器启动时跑。缺失抛 `KbDsnMissing`。运行态不读它 |
-| `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约测试（`tests/contract/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。未设置时 PG 用例 skip，**skip 不计为通过** |
+| `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约与单元测试（`tests/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。未设置时 PG 用例 skip，**skip 不计为通过** |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
 | `MEMHUB_HTTP_PORT` | 否 | `8700` | ingest | 非法端口启动失败 |
 | `MEMHUB_LLM_BASE_URL` | 是 | — | worker | 启动失败（worker 不降级为无模型运行） |
@@ -60,5 +60,5 @@
 |:---|:---|
 | 必填键缺失 | 进程启动失败，退出码 2 |
 | 模型不可用 | worker 重试 3 次后该文档进 `pending_review`；ingest 不受影响 |
-| `MEMHUB_KNOWLEDGE_DIR` 只读 | 启动失败（避免"看起来在跑但不落盘"） |
+| `MEMHUB_KNOWLEDGE_DIR` 只读 | ingest 无法核验目标，拒绝所有采集目标并返回通用服务错误（kb-api / worker / CLI 不再读它） |
 | 磁盘水位超阈值 | disk-guard 告警 + 心跳附带；不自动删除任何数据 |

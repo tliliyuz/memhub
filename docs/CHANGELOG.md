@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-25（运行时强制 PG：投影、MCP、CLI、worker 接线）
+
+- `feat(kb)`：运行入口统一经 `create_runtime_store()` 从 `MEMHUB_KB_DB_URL` 构造 `PgKnowledgeStore`；kb-api、MCP、worker、CLI 缺 DSN 时抛 `KbDsnMissing`，不再退回 `knowledge/` 文件存储。`KnowledgeStore` 保留给测试夹具、迁移工具与一次性迁移源。
+- `feat(kb)`：投影改为存储无关——`build_graph` 经 `edge_lines()` 读节点与边，PG 版 `save_projection` 跳过文件锁与脏标记；投影过期判断改用 `latest_write()`（取 `kb_node_revisions` / `kb_edges` 的最大时间），不再依赖文件 mtime。
+- `feat(worker)`：`WorkerConfig` 持有存储对象而非真源目录；merge 的锁与目标校验改用 `store.write_scope()` / `store.guard_write()`，PG 版一次写入即一个事务；新建节点显式带上完整 id，满足 PG 写入的 id 一致性校验。
+- `feat(cli)`：`ingest` / `project` / `mcp` / `kb` / `worker` 去掉 `--knowledge-dir`，完成输出与冒烟日志改为 `真源=PG（schema kb）`；`recover-kb-archive` 仍保留目录参数（文件版归档是迁移期工具）。
+- `feat(kb)`：`TargetRegistry` 改为接收登记状态来源（文件或 PG 存储），worker 与采集共用同一判据；采集侧在本轮仍按本地登记判目标，待真源切换完成后单独收口。
+- `test(kb)`：新增 PG boot / 投影 / worker 接线用例（缺 DSN 启动失败、worker 写库不落 markdown、PG 归档与 pending 事务的暂缓与隔离）；PG 夹具上移到 `tests/conftest.py` 供 unit 与 contract 共用。
+- `docs`：`ENVIRONMENT` 更新 `MEMHUB_KNOWLEDGE_DIR` 的读取方与 `MEMHUB_KB_DB_URL` 的适用范围。
+
 ## 2026-11-24（MCP 写候选与候选区闭环）
 
 - `feat(mcp)`：新增 `kb_update_candidate` 与 `kb_deprecate`（ADR-0012），补齐候选区写闭环，仍然不碰 canonical。两者都要求 `mcp:write` 与 `expected_revision`（取自 `kb_read` 新增返回的 `revision`）；检查与写入在同一把跨进程写锁内完成，不符返回 `409/1010` `revision_conflict`，目标不是 `tier=candidate` 返回 `409/1010` `not_candidate` 且不改文件。更新只允许 `title/body/tags/confidence`，并对更新后的标题与正文重跑内容门槛与同项目正文哈希去重；废弃保留文件、`reason` 写入 `deprecated_reason` 并追加 `## 废弃说明`，`superseded_by` 可选（指向自己或不存在分别返回 `superseded_by_invalid` / `superseded_by_unavailable`）。

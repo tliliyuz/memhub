@@ -14,7 +14,9 @@ from anyio import Path as AsyncPath
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
 from memhub.kb import archive, catalog, manage, proc, target_access
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.projection import save_projection
+from memhub.kb.session import create_runtime_store
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
@@ -55,13 +57,11 @@ def main(argv: list[str] | None = None) -> int:
         help="目标知识库未登记时，在本次抽取前显式建库（默认只写已登记且活动的库）",
     )
     ingest.add_argument("--limit", type=int, default=0)
-    ingest.add_argument("--knowledge-dir", default=None)
     ingest.add_argument("--max-chars", type=int, default=12000)
     ingest.add_argument("--max-input-chars", type=int, default=0, help="截断输入（0 表示不截断）")
     ingest.add_argument("--dry-run", action="store_true")
 
     project_cmd = sub.add_parser("project", help="重建 semantica 图谱投影")
-    project_cmd.add_argument("--knowledge-dir", default=None)
     project_cmd.add_argument("--out", default="kb/kg.json")
 
     recover = sub.add_parser("recover-kb-archive", help="核对并续做未完成的整库归档或恢复")
@@ -72,8 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--no-browser", action="store_true")
 
-    mcp = sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
-    mcp.add_argument("--knowledge-dir", default=None)
+    sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
 
     purge = sub.add_parser(
         "purge-expired", help="删掉重放窗口（24h）外的批次记录，供 systemd timer 调用"
@@ -102,7 +101,6 @@ def main(argv: list[str] | None = None) -> int:
     worker.add_argument("--interval", type=float, default=300.0, help="轮询间隔秒数")
     worker.add_argument("--limit", type=int, default=20, help="每轮最多处理文件数")
     worker.add_argument("--data-dir", default=None)
-    worker.add_argument("--knowledge-dir", default=None)
     worker.add_argument(
         "--dry-run", action="store_true", help="只校验目录/配置并打印计划后退出（冒烟用）"
     )
@@ -111,7 +109,6 @@ def main(argv: list[str] | None = None) -> int:
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
 
     kb = sub.add_parser("kb", help="启动知识库管理 API（本地管理台后端 + 静态前端）")
-    kb.add_argument("--knowledge-dir", default=None)
     kb.add_argument("--graph-out", default=None, help="投影输出路径（默认 kb/kg.json）")
     kb.add_argument("--port", type=int, default=None, help="默认 8701（MEMHUB_KB_HTTP_PORT）")
     kb.add_argument("--web-dist", default=None, help="前端构建产物目录（含 index.html）")
@@ -169,6 +166,17 @@ def _knowledge_dir(override: str | None) -> Path:
     return Path(override or os.environ.get("MEMHUB_KNOWLEDGE_DIR", "./knowledge"))
 
 
+def _runtime_store(args: argparse.Namespace) -> PgKnowledgeStore:
+    """运行入口统一构造 PG 存储；缺 `MEMHUB_KB_DB_URL` 直接抛 `KbDsnMissing`。
+
+    `store` 属性只给测试注入独立 schema 用，命令行不会传。
+    """
+    injected = getattr(args, "store", None)
+    if isinstance(injected, PgKnowledgeStore):
+        return injected
+    return create_runtime_store()
+
+
 def _llm_client() -> tuple[AnthropicClient, str]:
     base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
@@ -199,7 +207,7 @@ async def _ingest(args: argparse.Namespace) -> int:
         return 0
 
     project = args.project or source_path.name
-    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    store = _runtime_store(args)
     if args.create_project and not args.dry_run:
         try:
             await catalog.create_kb(store, kb_id=project)
@@ -295,13 +303,13 @@ async def _ingest(args: argparse.Namespace) -> int:
 
     print(
         f"\n完成: {created} 新建 / {updated} 更新 / {skipped} 跳过(canonical) / {failed} 失败；"
-        f"真源目录 {store.root}"
+        "真源=PG（schema kb）"
     )
     return 1 if failed else 0
 
 
 async def _project(args: argparse.Namespace) -> int:
-    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
+    store = _runtime_store(args)
     out = Path(args.out)
     report = await save_projection(store, out)
     print(f"投影已写入 {out}: {report.nodes} 节点 / {report.edges} 边")
@@ -363,11 +371,11 @@ async def _serve(args: argparse.Namespace) -> int:
 
 
 async def _mcp(args: argparse.Namespace) -> int:
-    store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
-    if not await AsyncPath(store.root).is_dir():
-        print(f"知识库目录不存在: {store.root}", file=sys.stderr)
-        return 2
-    return await serve_mcp(store)
+    store = _runtime_store(args)
+    try:
+        return await serve_mcp(store)
+    finally:
+        await store.aclose()
 
 
 async def _purge_expired(args: argparse.Namespace) -> int:
@@ -429,20 +437,21 @@ async def _worker(args: argparse.Namespace) -> int:
     )
 
     data_dir = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
-    knowledge_dir = args.knowledge_dir or os.environ.get("MEMHUB_KNOWLEDGE_DIR", "")
-    if not data_dir or not knowledge_dir:
-        print("缺少 MEMHUB_DATA_DIR / MEMHUB_KNOWLEDGE_DIR", file=sys.stderr)
+    if not data_dir:
+        print("缺少 MEMHUB_DATA_DIR", file=sys.stderr)
         return 2
+    store = _runtime_store(args)
     if args.dry_run:
-        # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰文件。
+        # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰真源。
         raw_root = Path(data_dir) / "raw_store"
         exists = await AsyncPath(raw_root).is_dir()
         print(
-            f"[dry-run] data={data_dir} knowledge={knowledge_dir} "
+            f"[dry-run] data={data_dir} 真源=PG "
             f"raw_root={'exists' if exists else 'missing'} "
             f"window={args.window or 'all-day'} once={args.once}",
             flush=True,
         )
+        await store.aclose()
         return 0
     base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
@@ -487,7 +496,7 @@ async def _worker(args: argparse.Namespace) -> int:
     client, model = _llm_client()
     config = WorkerConfig(
         data_dir=Path(data_dir),
-        knowledge_dir=Path(knowledge_dir),
+        store=store,
         model=model,
         max_tokens=max_tokens,
         window=args.window or None,
@@ -508,6 +517,7 @@ async def _worker(args: argparse.Namespace) -> int:
             close = getattr(state, "close", None)
             if close is not None:
                 await close()
+            await store.aclose()
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -581,10 +591,6 @@ async def _kb(args: argparse.Namespace) -> int:
     只绑回环：这是单用户管理面，没有公网入口。前端构建产物缺失时纯 API 运行，
     开发期用 Vite 的 5173 端口直连。
     """
-    knowledge = Path(await AsyncPath(_knowledge_dir(args.knowledge_dir)).resolve())
-    if not await AsyncPath(knowledge).is_dir():
-        print(f"知识库目录不存在: {knowledge}", file=sys.stderr)
-        return 2
     graph_out = Path(
         await AsyncPath(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
     )
@@ -593,14 +599,13 @@ async def _kb(args: argparse.Namespace) -> int:
     if data_dir_raw:
         # 上传要落 raw_store：解析成绝对路径再交给 create_app，避免受启动目录影响。
         os.environ["MEMHUB_DATA_DIR"] = str(await AsyncPath(data_dir_raw).resolve())
-    os.environ["MEMHUB_KNOWLEDGE_DIR"] = str(knowledge)
     os.environ["MEMHUB_KB_GRAPH"] = str(graph_out)
     if web_dist:
         os.environ["MEMHUB_KB_WEB_DIST"] = str(await AsyncPath(web_dist).resolve())
     if args.spawn_graph:
         os.environ["MEMHUB_KB_GRAPH_PORT"] = str(args.graph_port)
     port = args.port or int(os.environ.get("MEMHUB_KB_HTTP_PORT", "8701"))
-    print(f"memhub kb-api: http://127.0.0.1:{port}/  真源={knowledge}", flush=True)
+    print(f"memhub kb-api: http://127.0.0.1:{port}/  真源=PG（schema kb）", flush=True)
     if await AsyncPath(graph_out).is_file():
         print(f"投影: {graph_out}", flush=True)
     if args.spawn_graph:

@@ -9,6 +9,7 @@ from typing import Any, TextIO
 import anyio
 
 from memhub import __version__
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.tools import TOOL_NAMES, TOOLS, call_tool
 
@@ -29,7 +30,9 @@ def _error(message_id: object, code: int, text: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": text}}
 
 
-async def handle_message(message: dict[str, Any], store: KnowledgeStore) -> dict[str, Any] | None:
+async def handle_message(
+    message: dict[str, Any], store: KnowledgeStore | PgKnowledgeStore
+) -> dict[str, Any] | None:
     """一条 JSON-RPC 消息 → 响应；已知通知返回 None。"""
     message_id = message.get("id")
     method = message.get("method")
@@ -91,7 +94,7 @@ def _use_utf8(stream: TextIO) -> None:
 
 
 async def serve(
-    store: KnowledgeStore,
+    store: KnowledgeStore | PgKnowledgeStore,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
 ) -> int:

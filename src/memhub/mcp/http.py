@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.auth import Credential, Grant, authorize
 
@@ -20,7 +21,7 @@ _SCOPE_KEY = "memhub.mcp.credential"
 
 
 class McpEndpoint:
-    def __init__(self, store: KnowledgeStore, grants: dict[str, Grant]) -> None:
+    def __init__(self, store: KnowledgeStore | PgKnowledgeStore, grants: dict[str, Grant]) -> None:
         self.grants = grants
         self.limit = anyio.CapacityLimiter(1)
         self.transport: Starlette | None = _build_transport(store) if grants else None
@@ -68,7 +69,7 @@ class McpEndpoint:
         return dispatch
 
 
-def _build_transport(store: KnowledgeStore) -> Starlette:
+def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
     # 未配置 HTTP 时不加载 SDK，保留 stdio 和既有管理台安装方式。
     # 可选依赖装与未装都要跑 strict mypy：未装时是 import-not-found，
     # 已装时这些忽略行不被使用，两种情形都用同一注释覆盖。

@@ -9,11 +9,26 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from memhub.ingest.app import create_app
 from memhub.ingest.store import MemoryStore
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.models import Base
+from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.session import create_sessionmaker
 from memhub.worker.daemon import WorkerConfig, run_round
+
+PROJECTS = ("fixture-left", "fixture-right", "fixture-denied")
+
+
+@pytest.fixture
+async def store(kb_engine: AsyncEngine) -> PgKnowledgeStore:
+    async with kb_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    pg = PgKnowledgeStore(create_sessionmaker(kb_engine))
+    for project in PROJECTS[:2]:
+        await pg.register_project(project)
+    return pg
 
 
 class Fake:
@@ -42,7 +57,7 @@ class Fake:
 
 
 async def test_selected_target_is_the_only_landing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: PgKnowledgeStore
 ) -> None:
     root = tmp_path / "knowledge"
     for name in ("fixture-left", "fixture-right", "fixture-denied"):
@@ -110,10 +125,9 @@ async def test_selected_target_is_the_only_landing(
         assert accepted.status_code == 200
     fake = Fake()
     report = await run_round(
-        fake, WorkerConfig(data, root, "fake", is_registered=state.is_registered)
+        fake, WorkerConfig(data, store, "fake", is_registered=state.is_registered)
     )
     assert (report.processed, report.created, report.failed, fake.calls) == (1, 1, 0, 1)
-    store = KnowledgeStore(root)
     assert await store.list_ids() == ["fixture-right/procedure/separate-boards-during-drying"]
     node, _ = await store.read("fixture-right/procedure/separate-boards-during-drying")
     assert node.tier == "candidate"

@@ -7,12 +7,10 @@ PG 版看 `kb_projects`。`TargetUnavailable` 仍从本模块导出，兼容既�
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import Path
 from typing import Protocol
 
 from memhub.contract import explicit_project
 from memhub.kb.errors import TargetUnavailable
-from memhub.kb.store import KnowledgeStore
 
 
 class ProjectSource(Protocol):
@@ -53,8 +51,8 @@ async def registered_active(store: ProjectSource, project: str) -> bool:
 class TargetRegistry:
     """只回答「这个库现在能不能写」；不提供设备授权文件。"""
 
-    def __init__(self, knowledge_dir: Path) -> None:
-        self.store = KnowledgeStore(knowledge_dir)
+    def __init__(self, source: ProjectSource) -> None:
+        self.store = source
 
     async def active(self, project: str) -> bool:
         return await registered_active(self.store, project)

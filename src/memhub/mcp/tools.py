@@ -24,7 +24,7 @@ from memhub.contract.mcp import (
 )
 from memhub.kb import candidates, manage, query
 from memhub.kb.candidates import CandidateConflict, CandidateRejected
-from memhub.kb.reader import ActiveReader
+from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetUnavailable
 
@@ -97,7 +97,7 @@ def _error(code: int, message: str, data: dict[str, Any] | None = None) -> dict[
 async def call_tool(
     name: str,
     arguments: dict[str, Any],
-    store: KnowledgeStore,
+    store: KnowledgeStore | PgKnowledgeStore,
     *,
     projects: frozenset[str] | None = None,
     writable: bool = False,
@@ -163,12 +163,15 @@ async def call_tool(
         )
 
     try:
-        # 归档分多文件更新，仅检查 pending 标记会漏过检查之后启动的写入。
-        with anyio.fail_after(5):
-            async with manage.write_lock(store.root, timeout=0):
-                payload = await _run(
-                    args, store, ActiveReader(store, projects), scoped=projects is not None
-                )
+        reader = store.scoped_reader(projects)
+        if isinstance(store, PgKnowledgeStore):
+            # PG 读侧每次查询自成事务，不存在「多文件更新」的中间态。
+            payload = await _run(args, store, reader, scoped=projects is not None)
+        else:
+            # 归档分多文件更新，仅检查 pending 标记会漏过检查之后启动的写入。
+            with anyio.fail_after(5):
+                async with manage.write_lock(store.root, timeout=0):
+                    payload = await _run(args, store, reader, scoped=projects is not None)
         return _content(payload)
     except (manage.WriteDeferred, TimeoutError):
         return _error(3006, "知识库正忙或等待归档恢复，请稍后重试")
@@ -181,7 +184,7 @@ async def call_tool(
 async def _write_tool(
     name: str,
     args: WriteCandidateInput | UpdateCandidateInput | DeprecateInput,
-    store: KnowledgeStore,
+    store: KnowledgeStore | PgKnowledgeStore,
     *,
     grant_id: str,
     projects: frozenset[str] | None,
@@ -224,8 +227,8 @@ async def _write_tool(
 
 async def _run(
     args: ToolInput,
-    store: KnowledgeStore,
-    reader: ActiveReader,
+    store: KnowledgeStore | PgKnowledgeStore,
+    reader: query.KnowledgeReader,
     *,
     scoped: bool,
 ) -> dict[str, Any]:

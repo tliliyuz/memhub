@@ -1,18 +1,34 @@
-"""CLI ingest 与采集共用同一写边界：只写已登记且活动的库。"""
+"""CLI 运行入口的存储接线（规格 §9.2.4）：一律 PG，缺 DSN 直接失败。
+
+ingest 与采集共用同一写边界：只写已登记且活动的库。
+"""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from anyio import Path as AsyncPath
+import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from memhub.cli.main import _ingest
+from memhub.cli import main as cli
+from memhub.cli.main import _ingest, _kb, _mcp, _project, _worker
 from memhub.kb import catalog
-from memhub.kb.store import KnowledgeStore
+from memhub.kb.models import Base
+from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.session import KB_DSN_KEY, KbDsnMissing, create_sessionmaker
 
 
-def _args(tmp_path: Path, **overrides: object) -> argparse.Namespace:
+@pytest.fixture
+async def store(kb_engine: AsyncEngine) -> PgKnowledgeStore:
+    async with kb_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return PgKnowledgeStore(create_sessionmaker(kb_engine))
+
+
+def _args(
+    tmp_path: Path, store: PgKnowledgeStore | None, **overrides: object
+) -> argparse.Namespace:
     source = tmp_path / "source"
     source.mkdir(exist_ok=True)
     (source / "a.jsonl").write_text('{"text": "合成样本"}\n', encoding="utf-8")
@@ -21,29 +37,132 @@ def _args(tmp_path: Path, **overrides: object) -> argparse.Namespace:
         "profile": "sessions",
         "project": "ghost",
         "limit": 0,
-        "knowledge_dir": str(tmp_path / "knowledge"),
         "max_chars": 12000,
         "max_input_chars": 0,
         "dry_run": True,
         "create_project": False,
     }
+    if store is not None:
+        data["store"] = store
     data.update(overrides)
     return argparse.Namespace(**data)
 
 
 async def test_unknown_project_is_refused_without_creating_a_library(
-    tmp_path: Path,
+    tmp_path: Path, store: PgKnowledgeStore
 ) -> None:
-    args = _args(tmp_path)
-    code = await _ingest(args)
+    code = await _ingest(_args(tmp_path, store))
 
     assert code == 2
-    assert not await AsyncPath(tmp_path / "knowledge" / "ghost").exists()
+    assert await store.project_status("ghost") == "unregistered"
 
 
-async def test_dry_run_accepts_registered_active_project(tmp_path: Path) -> None:
-    knowledge = tmp_path / "knowledge"
-    await catalog.create_kb(KnowledgeStore(knowledge), kb_id="demo")
-    args = _args(tmp_path, project="demo", dry_run=True)
+async def test_dry_run_accepts_registered_active_project(
+    tmp_path: Path, store: PgKnowledgeStore
+) -> None:
+    await catalog.create_kb(store, kb_id="demo")
 
-    assert await _ingest(args) == 0
+    assert await _ingest(_args(tmp_path, store, project="demo")) == 0
+
+
+async def test_ingest_requires_dsn_without_injected_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(KB_DSN_KEY, raising=False)
+    args = _args(tmp_path, None)
+
+    with pytest.raises(KbDsnMissing):
+        await _ingest(args)
+
+
+async def test_project_requires_dsn_without_injected_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(KB_DSN_KEY, raising=False)
+    args = argparse.Namespace(out=str(tmp_path / "kg.json"))
+
+    with pytest.raises(KbDsnMissing):
+        await _project(args)
+
+
+async def test_mcp_requires_dsn_without_injected_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(KB_DSN_KEY, raising=False)
+
+    with pytest.raises(KbDsnMissing):
+        await _mcp(argparse.Namespace())
+
+
+def _worker_args(tmp_path: Path, store: PgKnowledgeStore | None = None) -> argparse.Namespace:
+    data: dict[str, object] = {
+        "data_dir": str(tmp_path),
+        "dry_run": True,
+        "window": "",
+        "once": True,
+        "interval": 60.0,
+        "limit": 1,
+    }
+    if store is not None:
+        data["store"] = store
+    return argparse.Namespace(**data)
+
+
+async def test_worker_requires_dsn_without_injected_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(KB_DSN_KEY, raising=False)
+
+    with pytest.raises(KbDsnMissing):
+        await _worker(_worker_args(tmp_path))
+
+
+async def test_worker_requires_data_dir(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
+
+    assert await _worker(argparse.Namespace(data_dir="", dry_run=True)) == 2
+    assert "MEMHUB_DATA_DIR" in capsys.readouterr().err
+
+
+async def test_worker_dry_run_reports_pg_truth(
+    tmp_path: Path,
+    store: PgKnowledgeStore,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """worker 入口不再要求/读取 `MEMHUB_KNOWLEDGE_DIR`，冒烟即报 PG 真源。"""
+    monkeypatch.delenv("MEMHUB_KNOWLEDGE_DIR", raising=False)
+
+    assert await _worker(_worker_args(tmp_path, store)) == 0
+    assert "真源=PG" in capsys.readouterr().out
+
+
+async def test_kb_console_starts_without_knowledge_dir(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """管理台真源是 PG：不再要求也不读取 `MEMHUB_KNOWLEDGE_DIR`。"""
+    monkeypatch.delenv("MEMHUB_KNOWLEDGE_DIR", raising=False)
+    monkeypatch.delenv("MEMHUB_KB_GRAPH", raising=False)
+    monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
+    calls: list[tuple[str, str, int]] = []
+
+    async def fake_server(target: str, *, host: str, port: int, log_level: str) -> None:
+        calls.append((target, host, port))
+
+    monkeypatch.setattr(cli, "_run_server", fake_server)
+    code = await _kb(
+        argparse.Namespace(
+            graph_out=str(tmp_path / "kg.json"),
+            web_dist="",
+            data_dir="",
+            spawn_graph=False,
+            graph_port=0,
+            port=8799,
+        )
+    )
+
+    assert code == 0
+    assert calls == [("memhub.kb.api:create_app", "127.0.0.1", 8799)]
+    assert "真源=PG（schema kb）" in capsys.readouterr().out
