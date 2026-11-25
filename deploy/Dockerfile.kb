@@ -1,6 +1,6 @@
 # memhub kb 镜像（离线可构建；管理台后端 + 静态前端）
 # 构建：docker build --network=none -f deploy/Dockerfile.kb -t memhub/app-kb:0.1.0 .
-# 前置：deploy/dist/wheelhouse-worker/ 里有 memhub wheel 与全部 engine 依赖；
+# 前置：deploy/dist/wheelhouse-worker/ 里有 memhub wheel 与全部 engine/postgres 依赖；
 #       deploy/dist/web-dist/ 是 `pnpm build` 的产物（含 index.html）。
 # 复用 worker 的 wheelhouse：kb 的投影重建会 import semantica.context。
 FROM python:3.12-slim
@@ -12,20 +12,30 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY deploy/dist/wheelhouse-worker /wheelhouse
-# 必须带 mcp-http：kb-api 在 MEMHUB_MCP_GRANTS 非空时要加载官方 MCP SDK，
-# 缺它时 create_app() 直接抛 RuntimeError 启动失败（stdio 与管理台不受影响）。
-RUN pip install --no-index --find-links=/wheelhouse "memhub[engine,mcp-http]==0.1.0"
+# postgres：知识真源是 PG（ADR-0013），缺 MEMHUB_KB_DB_URL 时启动即失败，镜像必须带
+#   sqlalchemy / psycopg / alembic。
+# mcp-http：kb-api 在 MEMHUB_MCP_GRANTS 非空时要加载官方 MCP SDK，
+#   缺它时 create_app() 直接抛 RuntimeError 启动失败（stdio 与管理台不受影响）。
+RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres,engine,mcp-http]==0.1.0"
 
 # 静态前端烘进镜像：容器根文件系统只读，不能指望宿主机路径。
 COPY deploy/dist/web-dist /app/web-dist
+
+# Alembic 只做「带外执行」用（ADR-0013 §4：不在容器启动时跑）：
+#   docker run --rm --network=host -v /etc/memhub/env:/etc/memhub/env:ro \
+#     --env-file /etc/memhub/env memhub/app-kb:<tag> alembic -c /app/alembic.ini upgrade head
+# 不烘进镜像的话，服务器上就没有 alembic 可执行文件——它只有容器、没有宿主 venv。
+COPY alembic.ini /app/alembic.ini
+COPY alembic /app/alembic
 
 # 与主机 memhub 用户一致（999:987）；数据只能写 /var/lib/memhub 挂载卷。
 USER 999:987
 EXPOSE 8701
 
 # kb-api 代码里固定绑 127.0.0.1（host 网络下由 nginx 反代），不做可配置。
+# 真源是 PG（MEMHUB_KB_DB_URL），不再有 --knowledge-dir；--graph-out 仍是投影输出路径，
+# 投影只供旧 explorer 与 /api/v1/kb/projection 状态接口，管理台图谱页直读 PG（/api/v1/kb/graph）。
 CMD ["memhub", "kb", \
-     "--knowledge-dir", "/var/lib/memhub/knowledge", \
      "--graph-out", "/var/lib/memhub/kb/kg.json", \
      "--web-dist", "/app/web-dist", \
      "--data-dir", "/var/lib/memhub/data"]
