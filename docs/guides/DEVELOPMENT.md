@@ -19,7 +19,7 @@
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
+python -m pip install -e ".[dev,engine]"   # engine = 上传依赖 python-multipart（含投影下线后暂留的 semantica，依赖清理另案）；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
 cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
 ```
 
@@ -31,7 +31,7 @@ src/memhub/
   queue/      raw_store 落盘与配额（ingest 采集、kb 上传共用）
   ingest/     鉴权、游标、幂等、入队
   worker/     value_filter / extract / merge
-  kb/         PG 存储（kb_*）、检索、投影重建
+  kb/         PG 存储（kb_*）、检索、管理台 API
   mcp/        MCP 工具
   cli/        运维命令
 alembic/      kb_* 的 DDL 版本化（带外执行，门禁同样覆盖）
@@ -66,7 +66,7 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|
 | 测试 | `pytest` |
 | 契约测试 | `pytest tests/contract` |
-| PG 契约测试 | 先让 `MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，再 `pytest tests/contract`。未设置时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
+| PG 契约测试 | 在仓库根 `.env` 写入 `MEMHUB_TEST_DB_URL`（或只在当前 shell 导出），再 `pytest tests/contract`。测试入口在变量未设置时自动读取该键，显式环境变量优先，worktree 无需复制 `.env`；都拿不到时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
 | 检查 | `ruff check .` |
 | 格式 | `ruff format --check .` |
 | 类型 | `python -m mypy src` |
@@ -75,7 +75,7 @@ prompts/      各 source_type 的抽取 profile
 | 启动依赖 | `docker compose -f deploy/compose.yml up -d` |
 | 本机运行 | `memhub --version` |
 
-`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。单独导出这一个键即可，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
+`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。测试入口只从 `.env` 读这一个键，写进 `.env` 后直接 `pytest` 即可；若用 shell 导出，也只导出这一个键，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
 
 本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
@@ -98,7 +98,7 @@ prompts/      各 source_type 的抽取 profile
 
 - 一次提交只做一件事：一个行为、一次重构、一份文档。
 - 格式：`<type>(<scope>): <中文摘要>`，`type ∈ feat|fix|docs|refactor|test|chore|perf`，摘要 ≤50 字。
-- 不提交 `.env`、`data/`、`raw_store/`、投影产物、真实会话内容。
+- 不提交 `.env`、`data/`、`raw_store/`、真实会话内容。
 - 提交信息只描述实际改动，**不加 `Co-Authored-By` 等工具署名行**；`scripts/check_commit_message.py` 在 `commit-msg` 阶段强制（与评测仓同源）。署名属于提交信息正文，不属于源码、文档或发布物。
 
 ## 6. 分支、Git 授权与 worktree 闭环
@@ -142,17 +142,13 @@ MEMHUB_KB_MIGRATE_DB_URL=<迁移角色 DSN> alembic -c alembic.ini upgrade head
 # 1) 抽取：会话 jsonl → kb_nodes / kb_edges（库必须已登记且未归档）
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main ingest \
   --path .scratch/sessions --profile sessions --project memhub --limit 3 --create-project
-# 2) 投影：库里 → kg.json（只供旧 explorer 与 /api/v1/kb/projection 状态，管理台图谱页直读 PG）
-PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main project --out kb/kg.json
-# 3) 管理台：http://127.0.0.1:8701/
+# 2) 管理台：http://127.0.0.1:8701/
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb \
-  --graph-out kb/kg.json --web-dist web/dist --data-dir data
+  --web-dist web/dist --data-dir data
 ```
 
 - `ingest` 只写提取出的节点，来源是本地文件；真源本身仍是库。`--create-project` 等价于先在管理台建库。
-- `kb/kg.json` 是投影，随时可从库重建，不入库；MCP 与管理台都直读 `kb_*` 表，不读它。
-- `serve`（旧 semantica explorer）仍可用来看投影，但它是 ADR-0013 后果里标注的待删项，不作为验收入口；
-  管理台的 `/graph` 直接读 `GET /api/v1/kb/graph`，不受影响。
+- 图谱与检索都直读 `kb_*` 表，不再生成或依赖任何文件投影。
 - 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
 
 ### 9.1 一次性迁移（markdown → PostgreSQL）与归档恢复

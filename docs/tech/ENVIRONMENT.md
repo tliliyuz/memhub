@@ -23,8 +23,8 @@
 | `MEMHUB_KNOWLEDGE_DIR` | 否（仅迁移工具） | — | `memhub migrate-kb` / `recover-kb-archive`（一次性迁移源） | 运行入口（kb-api / MCP / worker / ingest / CLI）不再读取它；知识真源与登记状态一律取自 PG。留作 markdown 一次性迁移源与归档恢复源 |
 | `MEMHUB_DB_URL` | 生产采集必需 | 空 | ingest / worker | 格式 `postgresql://user@host:port/db`；两者必须使用同一登记库。ingest 无 DSN 使用进程内状态；独立 worker 无 DSN 无法验证采集设备，保留采集队列等待验证，不影响管理台上传 |
 | `MEMHUB_KB_DB_URL` | 所有运行入口必需（kb-api / MCP / worker / ingest / CLI） | 空 | 运行入口（`memhub.kb.session`） | 指向只对 `kb_*` 做 DML 的受限角色，库为 `memhub_prod`、`search_path` 固定 `kb`；DSN 必须自带口令（kb 容器只注入 `/etc/memhub/env.kb`，没有 `PGPASSWORD`）；缺失或为空抛 `KbDsnMissing`，**不回退文件/内存**。不得复用 `MEMHUB_DB_URL`（那是运行态角色，能碰运行态表与令牌摘要）。ingest 只用它读 `kb_projects` 校验采集目标 |
-| `MEMHUB_KB_MIGRATE_DB_URL` | 迁移时必需 | 空 | Alembic（`alembic/env.py`） | 迁移角色，对 `kb_*` 有 DDL；`memhub migrate-kb` / 部署步骤带外执行，不在 kb 容器启动时跑。缺失抛 `KbDsnMissing`。运行态不读它 |
-| `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约与单元测试（`tests/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。未设置时 PG 用例 skip，**skip 不计为通过** |
+| `MEMHUB_KB_MIGRATE_DB_URL` | 迁移时必需 | 空 | Alembic（`alembic/env.py`） | 迁移角色，对 `kb_*` 有 DDL；`memhub migrate-kb` / 部署步骤带外执行，不在 kb 容器启动时跑。缺失抛 `KbDsnMissing`。运行态不读它。DSN 可写 `postgresql://`，入口按 psycopg 3 归一化为 `postgresql+psycopg://`（镜像里没有 psycopg2） |
+| `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约与单元测试（`tests/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。解析顺序：进程环境变量优先；未设置或为空时依次读仓库根 `.env` 与（worktree 场景）主 checkout 的 `.env`，只读这一个键，空值视同未设置。仍未获得时 PG 用例 skip，**skip 不计为通过** |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
 | `MEMHUB_HTTP_PORT` | 否 | `8700` | ingest | 非法端口启动失败 |
 | `MEMHUB_LLM_BASE_URL` | 是 | — | worker | 启动失败（worker 不降级为无模型运行） |
@@ -41,10 +41,7 @@
 | `MEMHUB_PROCESSED_MAX_BYTES` | 否 | `2147483648` | purge-expired | `processed_raw/` 总量上限，配合 7 天保留期按最旧优先裁剪；非法值退出 2 |
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |
-| `MEMHUB_KB_GRAPH` | 否 | `kb/kg.json` | kb-api / explorer | 投影输出路径；不存在时 `/api/v1/kb/projection` 报 `stale=true` |
 | `MEMHUB_KB_WEB_DIST` | 否 | 空 | kb-api | 留空只提供 API、不托管前端；目录里没有 `index.html` 时同样跳过静态托管 |
-| `MEMHUB_KB_AUTO_REBUILD` | 否 | `1` | kb-api | `0/off/false` 关闭写后防抖重建，需手动 `POST /api/v1/kb/rebuild` |
-| `MEMHUB_KB_GRAPH_PORT` | 否 | 空 | kb-api | 非空则托管 `python -m semantica.explorer` 子进程并在重建后重启；空则不自启（explorer 由外部管理） |
 | `MEMHUB_MCP_GRANTS` | 否 | 空（`/mcp` 关闭） | kb-api | MCP HTTP 凭据，JSON 数组；每项含 `sha256`（令牌摘要，64 位小写十六进制）、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、`expires_at`（UTC）、`projects`（1–128 个库 id）与可选 `name`（展示名，1–64 字符；缺失时界面降级显示摘要前 12 位）。空或未设时 `/mcp` 一律 404 且不落到 SPA；配置非法（含重复摘要）启动失败；过期、缺失或不匹配的凭据返回 401。吊销 = 删除该条摘要并重启 kb-api；需安装 `memhub[mcp-http]`，否则启用时报错退出 |
 | `MEMHUB_KB_TRACE_SPOOL` | 否 | `$MEMHUB_DATA_DIR/mcp_trace_spool.jsonl` | kb-api | MCP 调用轨迹的落库失败兜底文件（ADR-0014）。两者都未配置时 spool 关闭，仅记 ERROR 日志；路径不可写不阻断启动，但会在写失败时丢失该条记录。需要该目录对 kb 运行用户可写（容器内 `/var/lib/memhub`） |
 

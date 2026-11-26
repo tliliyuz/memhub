@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from memhub.kb import catalog
 from memhub.kb.migrate import parse_tree
@@ -194,3 +195,46 @@ async def test_apply_rejects_unknown_archive_mode(tmp_path: Path, kb_engine: Asy
 
     with pytest.raises(ValueError):
         await apply_plan(engine, plan, archives="copy")
+
+
+async def test_naive_frontmatter_time_is_written_as_utc(
+    tmp_path: Path, kb_schema: str, test_dsn: str
+) -> None:
+    """裸日期（`valid_until: '2026-11-21'`）必须按 UTC 零点入库。
+
+    这类值解析出来是 naive datetime；`timestamptz` 列遇到 naive 值会按**会话时区**
+    解释。生产迁移容器的会话时区是 +08，落库就成 `2026-11-20T16:00:00Z`，
+    `--verify-only` 重算哈希与磁盘不一致。这里把会话时区显式钉成 +08 复现，
+    不依赖跑测机器的默认时区。
+    """
+    root = _tree(tmp_path)
+    alpha = root / "demo" / "fact" / "alpha.md"
+    alpha.write_text(
+        alpha.read_text(encoding="utf-8").replace(
+            "updated_at: '2026-01-02T03:04:05.000006Z'\n---",
+            "updated_at: '2026-01-02T03:04:05.000006Z'\nvalid_until: '2026-11-21'\n---",
+        ),
+        encoding="utf-8",
+    )
+    engine = create_async_engine(
+        test_dsn.replace("postgresql://", "postgresql+psycopg://", 1),
+        connect_args={"options": f"-csearch_path={kb_schema} -ctimezone=Asia/Shanghai"},
+    )
+    try:
+        await _engine_with_tables(engine)
+        plan = await parse_tree(root)
+        await apply_plan(engine, plan)
+
+        async with AsyncSession(engine) as session:
+            stored = (
+                await session.execute(
+                    select(KbNode.valid_until).where(KbNode.id == "demo/fact/alpha")
+                )
+            ).scalar_one()
+
+        assert stored is not None
+        assert stored.astimezone(UTC) == datetime(2026, 11, 21, tzinfo=UTC)
+        report = diff_plan(plan, await read_stored(engine))
+        assert report.ok, report.as_dict()
+    finally:
+        await engine.dispose()

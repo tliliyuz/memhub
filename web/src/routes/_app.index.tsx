@@ -2,14 +2,12 @@ import { useState } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle,
   Archive,
   BookOpenText,
   Database,
   GitFork,
   Network,
   Plus,
-  RefreshCw,
   Search as SearchIcon,
   Unlink,
 } from 'lucide-react'
@@ -47,20 +45,9 @@ export const Route = createFileRoute('/_app/')({
 })
 
 function KnowledgeBaseIndex() {
-  const queryClient = useQueryClient()
   const [filter, setFilter] = useState('')
   const projects = useQuery({ queryKey: ['projects'], queryFn: api.projects })
   const stats = useQuery({ queryKey: ['stats'], queryFn: api.stats })
-  const projection = useQuery({ queryKey: ['projection'], queryFn: api.projection })
-
-  const rebuild = useMutation({
-    mutationFn: api.rebuild,
-    onSuccess: async (result) => {
-      toast.success(`投影已重建：${result.nodes} 节点 / ${result.edges} 边`)
-      await queryClient.invalidateQueries()
-    },
-    onError: (error) => toast.error(error.message),
-  })
 
   const items = projects.data?.items ?? []
   const nodeTotal = items.reduce((sum, item) => sum + item.nodes, 0)
@@ -109,32 +96,6 @@ function KnowledgeBaseIndex() {
             <CreateKbDialog />
           </div>
         </div>
-
-        {projection.data && (projection.data.stale || projection.data.error) && (
-          <Card className='border-amber-500/40 bg-amber-500/5'>
-            <CardContent className='flex flex-wrap items-center gap-3 py-3'>
-              <AlertTriangle className='size-4 text-amber-600' />
-              <div className='flex-1 text-xs'>
-                {projection.data.error
-                  ? `semantica 投影上次重建失败：${projection.data.error}`
-                  : '真源有更新，semantica 投影（kg.json）已过期'}
-                <span className='text-muted-foreground'>
-                  {' '}
-                  —— 它只供 MCP / explorer 使用，管理台的图谱直接用真源。
-                </span>
-              </div>
-              <Button
-                size='sm'
-                variant='outline'
-                onClick={() => rebuild.mutate()}
-                disabled={rebuild.isPending || projection.data.running}
-              >
-                <RefreshCw className={rebuild.isPending ? 'animate-spin' : ''} />
-                重建投影
-              </Button>
-            </CardContent>
-          </Card>
-        )}
 
         {projects.isError && (
           <Card>

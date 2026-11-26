@@ -5,7 +5,7 @@
 ## 0. 本版形态（563fefe）
 
 - 云端（43.142.18.23）跑 4 个容器：ingest-api、worker、kb-api（管理台 + 静态前端）、oauth2-proxy；nginx `/` 与 `/api/v1/kb/` 走 GitHub 登录，`/api/v1/` 仍由设备 token 自鉴权。
-- **kb-api 取代 explorer**：图谱页由前端自带 cytoscape 渲染，数据来自 `kb/kg.json`；旧 explorer 容器保留为 compose `legacy` profile，不再默认启动。
+- **kb-api 取代 explorer**：图谱页由前端自带 cytoscape 渲染，数据来自 `GET /api/v1/kb/graph`（直读 PG `kb_*` 表）；不再部署 explorer，也不再有 `kg.json` 投影。
 - `knowledge/`（markdown 真源）与 `data/`（raw_store）从本地同步到 `/var/lib/memhub/`，由 worker 继续提炼。
 - collector 仍在客户端（e4 负责），本版发布后联调 session 采集。
 - **下一版**把知识真源从 markdown 换成 PostgreSQL 的 `kb_*` 表（ADR-0013），`knowledge/` 只作一次性迁移源、迁移后删除；切换步骤见 §6「知识真源切换（markdown → PG，一次性）」。
@@ -55,7 +55,6 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 | ingest-api | `127.0.0.1:8700` | `/api/v1/ingest/*`、`/devices/*` |
 | kb-api | `127.0.0.1:8701` | `/` 与 `/api/v1/kb/*`（GitHub 登录后） |
 | mcp | 随 kb-api（`127.0.0.1:8701`） | `memhub mcp` 是 stdio 服务，由 agent 客户端拉起、不占端口；HTTP 入口 `= /mcp` 与 kb-api 同进程 |
-| explorer（旧） | `127.0.0.1:8703` | 563fefe 起不再部署，`legacy` profile 备查 |
 | oauth2-proxy | `127.0.0.1:4180` | 不直接对外；nginx `/oauth2/*` 与 `auth_request` 判决 |
 
 段位约定：memhub 用 8700-8710，只监听 loopback。同机 AI 评测中台用 8200-8299，互不重叠。
@@ -65,7 +64,7 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 
 | 项 | 预算 |
 |:---|:---|
-| 内存峰值 | ≤1.5 GiB（compose 限额 ingest 384m + worker 640m + kb 384m + oauth2-proxy 128m = 1536m；实测 ingest ≈60MB、worker 抽一枚 60K 字符会话 ≈155MB、kb 重建 437 节点投影 ≈143MB、explorer 旧版 ≈151MB） |
+| 内存峰值 | ≤1.5 GiB（compose 限额 ingest 384m + worker 640m + kb 384m + oauth2-proxy 128m = 1536m；实测 ingest ≈60MB、worker 抽一枚 60K 字符会话 ≈155MB、kb 历史图谱重建（437 节点 / 2631 边）≈143MB） |
 | 磁盘 | ≤12 GiB（knowledge 5G / raw_store 4G 硬上限 / 日志 2G / 余量） |
 | raw_store 上限 | `MEMHUB_QUEUE_MAX_BYTES`（`.env.example` 为 1 GiB；磁盘预算硬顶 4 GiB，别超过），超出时 ingest 返回 `1008`，采集端降级 |
 | 隔离区清理 | `pending_review/` 中超过 30 天的文件由 purge timer 删除（`--pending-review-days`） |
@@ -74,14 +73,14 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 
 同机评测中台：内存按 1.2 GiB 设计（1.5 GiB 为上限），磁盘 10 GiB；Postgres `shared_buffers`/`work_mem` 设上限，MinIO 计入内存与磁盘水位。
 
-说明：上表是 **cgroup 限额（上限）**，不是常驻占用。常驻实际占用约 200-300 MB，两套合计仍远低于 2.2-2.5 GiB 的设计值；限额留足余量是为了突发（大文档抽取、explorer 渲染）不被 OOM 杀掉。
+说明：上表是 **cgroup 限额（上限）**，不是常驻占用。常驻实际占用约 200-300 MB，两套合计仍远低于 2.2-2.5 GiB 的设计值；限额留足余量是为了突发（大文档抽取、图谱渲染）不被 OOM 杀掉。
 
 ## 4. nginx
 
 - 重写 `memhub.work` vhost（不新开子域）：
   - `/api/` → 127.0.0.1:8700/8701（按前缀分流）
   - `/mcp` → 127.0.0.1:8701，**精确匹配**；与 kb-api 同进程，**不**挂 oauth2-proxy 的 `auth_request`，改用独立 Bearer 凭据（鉴权与作用域裁剪在应用内完成）
-  - `/` → 127.0.0.1:8703（explorer，只读页面；片段见 §6）
+  - `/` → 127.0.0.1:8701（管理台 SPA，走 GitHub 登录）
   - **保留** `/.well-known/acme-challenge/` 的 webroot，否则续期静默失败
 - `api.memhub.work` 当前指向已死的 127.0.0.1:8096，需一并处理，不留死域名。
 - `memhub.work/portal` 现为静态页；去留待用户决定（保留为 `/portal/` 或撤掉）。
@@ -100,8 +99,7 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 | ingest-api | compose 常驻容器 `memhub/app:0.1.0`，`network_mode: host`，容器内绑 `127.0.0.1:8700`（**没有 `ports:`**，host 网络下端口映射无效） |
 | worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-02:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
 | kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/`。**连 PG**：`MEMHUB_KB_DB_URL`（运行时 DML 角色，`search_path=kb`）经**独立** `env_file` `/etc/memhub/env.kb` 注入，缺该键启动即失败，不退回 markdown；该文件不含 `MEMHUB_DB_URL` / `PGPASSWORD` / LLM 与设备凭据 |
-| explorer（旧） | 不再部署；需要时 `docker compose --profile legacy up -d explorer`，并把 nginx `/` 改回 8703 |
-| purge / rebuild | systemd timer 跑 `docker run --rm` 一次性子命令 |
+| purge | systemd timer 跑 `docker run --rm` 一次性子命令 |
 
 镜像从 `wheelhouse` 离线构建（`docker build --network=none`），不在机上编译、不连 PyPI：
 
@@ -114,10 +112,15 @@ docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 构建上下文根目录还必须含仓库根的 `prompts/`（worker 镜像会 `COPY prompts /usr/local/lib/python3.12/prompts`；
 wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）。
 
+依赖锁：`lock-ingest.txt`（ingest）与 `lock-worker.txt` / `lock-kb.txt`（worker 与 kb 的
+`memhub[postgres,engine]` / `memhub[postgres,engine,mcp-http]` 完整闭包）。两份锁仅在 `mcp==2.3.0`
+及其传递依赖（`mcp-types` / `httpx2` / `sse-starlette` / `pyjwt[crypto]` / `jsonschema` 等）上不同；
+锁定版本前记得校验镜像内 `pip freeze` 与锁一致，避免与权威锁漂移。
+
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
 运行态密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。kb-api 例外：它用独立文件
 `/etc/memhub/env.kb`（同样 0600），只放 kb 进程实际读取的键（至少 `MEMHUB_KB_DB_URL`；`/mcp` 入口
-用 `MEMHUB_MCP_GRANTS`，按需再拷 `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` /
+用 `MEMHUB_MCP_GRANTS`，按需再拷 `MEMHUB_LOG_LEVEL` /
 `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`），避免受限容器拿到运行态全权 DSN 与 `PGPASSWORD`。
 运行态 5 表由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
 563fefe 未新增迁移（仍只有 `0001_state`），旧库启动即打印 `schema: already up to date`。
@@ -126,12 +129,12 @@ wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）�
 由迁移角色 `MEMHUB_KB_MIGRATE_DB_URL` **带外执行**，不在任何容器启动时跑。kb 镜像已烘入
 `alembic.ini` 与 `alembic/`，服务器上没有宿主 venv，按「知识真源切换」小节用一次性容器执行。
 
-**顺序约束**：真源切换到 PG 后，kb-api 只从 `MEMHUB_KB_DB_URL` 取知识，启动时读
-`kb/kg.json` 投影（不存在也能起，只是图谱空，真源变化后自行重建）。首次部署**不再**需要先同步
+**顺序约束**：真源切换到 PG 后，kb-api 只从 `MEMHUB_KB_DB_URL` 取知识，图谱与检索都直读 `kb_*` 表，
+不再读写任何文件投影。首次部署**不再**需要先同步
 `knowledge/`——它只在一次性迁移时用到；迁移前的旧版仍按原顺序（先 knowledge 后 kb）。替换 nginx
 配置时保持 `/api/v1/` 的尾斜杠与 `/api/v1/kb/` 的优先级（`^~`）。
 
-nginx 段（explorer 旧版）保留在上线记录里；563fefe 的完整 vhost 见
+563fefe 的完整 vhost 见
 `deploy/nginx/memhub.vhost.conf`（`/` 与 `/api/v1/kb/` → 8701，走 `auth_request /__memhub_auth`）。
 认证网关为 **oauth2-proxy v7.6.0**（GitHub OAuth，`--github-user` 白名单）：
 凭据只写 `/etc/memhub/env`（0600），cookie secret 32 字节随机
@@ -150,7 +153,6 @@ kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查
 |:---|:---|:---|
 | `memhub purge-expired` | 删 25h 外批次记录 + 30 天外隔离文件 + 裁剪 processed_raw | 0 正常 / 2 配置错 |
 | `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
-| `memhub project --out ...` | 重建图谱投影（真源=PG，不再传 `--knowledge-dir`） | 0 / 2 |
 
 ### timer 完整参数（照抄）
 
@@ -171,27 +173,13 @@ docker run --rm --name memhub-purge \
   memhub purge-expired --keep-hours 25
 ```
 
-rebuild（建议 `06:30`，oneshot；用 worker 镜像，`project` 依赖 `engine` extra 的 semantica）：
-
-```bash
-docker run --rm --name memhub-rebuild \
-  --user 999:987 \
-  --env-file /etc/memhub/env \
-  --network host \
-  --read-only \
-  --tmpfs /tmp:size=64m,mode=1777 \
-  -v /var/lib/memhub:/var/lib/memhub \
-  --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
-  memhub/app-worker:0.1.0 \
-  memhub project --out /var/lib/memhub/kb/kg.json
-```
+rebuild timer 已随投影子系统下线移除：图谱与检索直读 `kb_*` 表，不存在需要定时重建的文件。
 
 注意：
-- `--out` 必须落在 `/var/lib/memhub`（根文件系统只读），`kb/` 不存在时由命令自行创建。
 - worker 窗口由常驻容器门控，**不需要** timer；`--once` 只在手动补跑时用。
 - 退出码 1 表示部分失败，systemd 侧不要 `SuccessExitStatus=1` 掩盖它。
 
-timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控，不需要 timer。
+timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer。
 
 ### 知识真源切换（markdown → PG，一次性）
 
@@ -214,7 +202,7 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
      `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`
      中实际设置过的项。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
      kb 用受限角色，只该看到知识表的 DML 权限。
-2. **停写**：`docker compose stop kb worker`，等正在跑的 `worker --once` 结束并禁用 rebuild timer。
+2. **停写**：`docker compose stop kb worker`，等正在跑的 `worker --once` 结束。
    ingest 可以继续跑（只写 `raw_store/` 队列，不碰 `knowledge/`）。
 3. **建表**（Alembic 带外执行，不在任何容器启动时跑）：
    ```bash
@@ -260,8 +248,8 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 
 ### 整库归档版本升级与回滚
 
-- `kb`、`worker` 和一次性 `memhub project` 重建任务须使用同一发布提交的 wheel。先禁用重建 timer 并等正在运行的任务结束，再停旧 `kb` 和 `worker`，然后同时切到新版本。不要混用两代写锁；ingest 不需要重建或停机。同步 nginx 配置和 oauth2-proxy 启动参数，先执行 `nginx -t`；保留旧镜像 ID、服务配置和真源备份。
-- 若存在 `knowledge/_kb_archives/pending.json`，不要手动删标记或锁文件。在新 worker 镜像中，以同一卷、同一用户运行 `memhub recover-kb-archive --knowledge-dir /var/lib/memhub/knowledge`。若报告冲突，保持写入暂停、备份现场并核对变更，不覆盖人工修改。成功后重建投影。
+- `kb` 与 `worker` 须使用同一发布提交的 wheel：先停旧 `kb` 和 `worker`，再同时切到新版本。不要混用两代写锁；ingest 不需要停机。同步 nginx 配置和 oauth2-proxy 启动参数，先执行 `nginx -t`；保留旧镜像 ID、服务配置和真源备份。
+- 若存在 `knowledge/_kb_archives/pending.json`，不要手动删标记或锁文件。在新 worker 镜像中，以同一卷、同一用户运行 `memhub recover-kb-archive --knowledge-dir /var/lib/memhub/knowledge`。若报告冲突，保持写入暂停、备份现场并核对变更，不覆盖人工修改。成功后无需额外重建投影——图谱与检索直读 `kb_*`。
 - 旧版本不识别整库回收站及其写入阻止标记。回滚前先解决未完成的操作，恢复仍须受到阻止的已归档库，或停用旧写者直到另行处理对应队列。保留 `_kb_archives/`；镜像回滚不等于真源回滚，不用旧备份覆盖上线后的正常写入。
 - 用临时样本验收整库归档/恢复，勿归档线上库做冒烟；用实际 GitHub 会话核验用户名、头像、退出后需要重新认证，以及 `/portal`、`api.memhub.work`、回调与白名单等既有入口。
 
@@ -271,6 +259,6 @@ timer 建议：purge `06:15`；rebuild `06:30`；worker 窗口由容器内门控
 2. 同步 `knowledge/` 与 `data/` 到 `/var/lib/memhub/`（先 knowledge 后 data）
 3. 确认 `/etc/memhub/env.kb` 已按第 1 步建好（compose 在解析阶段就校验所有服务的 env_file，文件缺失时连 `docker compose up -d ingest worker` 也会失败）→ 构建三镜像（`--network=none`）→ 备份 `memhub_prod` → `docker compose up -d ingest worker kb oauth2-proxy`
 4. 写 nginx vhost（保留 acme webroot）→ `nginx -t` → reload
-5. 装 systemd timer（purge / rebuild）
+5. 装 systemd timer（purge）
 6. 冒烟：`ss -lntp` 只见 127.0.0.1 的 8700/8701/4180；容器内 `/healthz` 200；未登录 `curl -i /api/v1/kb/stats` 得 401 JSON；浏览器 `/` 跳 GitHub 登录后能看到全部知识库概览
 7. 观察 24h 磁盘/内存曲线再开全量采集

@@ -106,19 +106,6 @@ export type Stats = {
   by_project: Record<string, number>
 }
 
-export type Projection = {
-  running: boolean
-  started_at: string | null
-  finished_at: string | null
-  error: string | null
-  nodes: number
-  edges: number
-  unresolved_edges: number
-  graph: string
-  graph_mtime: string | null
-  stale: boolean
-}
-
 export type KnowledgeBase = {
   id: string
   name: string
@@ -373,9 +360,7 @@ export type NodeUpdatePayload = {
 
 export const api = {
   healthz: () =>
-    request<{ ok: boolean; knowledge_dir: string; nodes: number; projection: Projection }>(
-      '/api/v1/kb/healthz',
-    ),
+    request<{ ok: boolean; store: string; nodes: number }>('/api/v1/kb/healthz'),
   stats: () => request<Stats>('/api/v1/kb/stats'),
   listNodes: (params: NodeListParams = {}) =>
     request<{ items: NodeSummary[]; total: number; offset: number; limit: number }>(
@@ -442,8 +427,6 @@ export const api = {
     ),
   mcpTracesSummary: (days = 7) =>
     request<McpTraceSummary>(`/api/v1/kb/mcp-traces/summary${queryString({ days })}`),
-  projection: () => request<Projection>('/api/v1/kb/projection'),
-  rebuild: () => request<Projection>('/api/v1/kb/rebuild', { method: 'POST' }),
   projects: () =>
     request<{ items: KnowledgeBase[]; total: number }>('/api/v1/kb/projects'),
   createProject: (payload: { id: string; name?: string; description?: string }) =>

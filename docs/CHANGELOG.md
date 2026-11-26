@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 2026-11-26（本地 Git 不问、验收后强制回 dev，资源占用约束）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 把分支闭环与 Git 授权改为强制约束：任务验收后必须立即把特性分支经 `--no-ff` 合回 `dev`、切回 `dev`，然后删除该分支与自己的 worktree，不得以等待排期或「已提交」为由滞留；本地 Git 操作一律直接执行，禁止征求或等待负责人确认，只有远端操作需要当次授权。新增资源占用约束：验收前查看本项目标签页与进程，只按需启动，禁止多开标签页与常驻 Node/Python 服务进程，验收后全部关闭；多开并发需先确认。ADR 检查：未命中（只约束执行方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
+
+## 2026-11-26（测试入口自动读取 `.env` 的测试库 DSN）
+
+- `test(conftest)`：新增 `tests/env_loader.py`，`tests/conftest.py` 导入时调用 `resolve_test_db_url()`——进程环境变量优先；未设置或为空时依次读仓库根 `.env` 与（worktree 场景）主 checkout 的 `.env`，只读 `MEMHUB_TEST_DB_URL` 一个键，不加载整份文件，避免覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量；两处都拿不到时维持 skip。`pyproject.toml` 的 pytest 配置增加 `pythonpath = ["tests"]`。
+- RED：先写 `tests/unit/test_env_loader.py`（11 条），`pytest -q tests/unit/test_env_loader.py` 得到 `ModuleNotFoundError: No module named 'env_loader'`（目标模块不存在）。
+- GREEN：实现 `tests/env_loader.py` 并接入 conftest 后同命令 11 passed。中途发现一条用例把「主 checkout」硬编码为 `parents[2]`，在 worktree 中必然失败；改为在临时 git 仓库里验证，测试不再依赖运行位置。
+- 端到端：在 worktree（无 `.env`）中不导出 `MEMHUB_TEST_DB_URL` 全量 `pytest`：556 passed / 1 skipped（skip 是未启动 MCP 服务器的无关用例，PG 用例实际执行；基线 545 条 + 新增 11 条）。
+- 文档：`docs/tech/ENVIRONMENT.md` 的 `MEMHUB_TEST_DB_URL` 行写明解析顺序与失败语义；`docs/guides/DEVELOPMENT.md` 的 PG 契约测试命令改为写 `.env` 后直接 `pytest`。
+- 静态检查：`ruff check src tests scripts alembic`、`ruff format --check src tests scripts alembic`、`python -m mypy src`（47 文件）均通过。
+
+## 2026-11-26（第一性原理归因与信息沉淀）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` 新增 §1.2「归因与信息沉淀」。归因要求先问「为什么会出现」，再判断方案能否从根本上解决问题、泛化性是否足够，不以一次性补丁交付；任何路径得到的长期信息先判断是否会被复用，长期事实必须在同一次变更里落进权威文档、SOP、配置键、脚本、测试或 `.env`，不得只解决当前会话后静默丢弃；无法落盘时须说明它仅在会话内及缺什么前置条件。§2 的 `.env.example` 键名同步规则是它的一个具体应用。ADR 检查：未命中（只约束工作方法，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
+
 ## 2026-11-26（MCP 调用轨迹：管理台页面）
 
 - `feat(web)`：治理侧栏新增「调用轨迹」（`/traces`），展示调用总数、成功、失败、拒绝和按工具分布。明细按工具、状态、凭据和近 1/7/30 天筛选，支持分页。请求 ID 悬停显示全值；凭据无名称时显示摘要 ID，两者均缺失时显示 `unknown`。空态提示 30 天明细保留期。汇总接口失败时单独提示，不显示成「没有调用」。
@@ -20,6 +37,42 @@
 - `test`：新增 `tests/contract/test_mcp_trace.py`（14 个用例，覆盖规格 §9.1–§9.4 的 1–13 条）；`test_kb_migrations.py` 与 `test_kb_models.py` 的表清单补入 `kb_mcp_trace`。
 - 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，单进程）：全量 `pytest` 558 passed / 1 skipped / 1 failed，失败项为 `test_kb_models.py` 硬编码「恰好 6 张表」，补入 `kb_mcp_trace` 后重跑 `test_kb_models.py` + `test_mcp_trace.py` + `test_kb_migrations.py` 共 31 passed（修正后未再跑全量）；`ruff check`、`ruff format --check`、`mypy src`（50 files）、`check_async_io.py`、`check_no_raw_sql.py`、`check_document_format.py`、`check_agent_entrypoints_sync.py` 通过，`check_document_ownership.py --changed` 退出码 0。
 - 未做：管理台「调用轨迹」页面（规格 §7，验收 14–17 的页面部分）与 MCP 发现层改进，另分支处理。
+## 2026-11-25（`.env.example` 键名同步到 `.env`）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增硬约束：`.env.example` 新增或重命名键名时，必须在同一次变更里把该键同步写入本机 `.env`，值未知就先留空（`KEY=`），不得猜测值或沿用其他键的值。`.env` 被 Git 忽略，值不进仓库。ADR 检查：未命中（只约束本机环境文件的维护动作，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。该规则只约束此后的变更，不回填既有缺口。
+
+## 2026-11-25（投影子系统下线：图谱与检索直读 PG）
+
+- `refactor(kb)`：删除 `memhub/kb/projection.py` 与 `tests/contract/test_kb_projection_pg.py`；kb-api 去掉 `GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `_GraphRestarter`，`healthz` 改为只返回 `{ok, store, nodes}`（`store` 恒为 `pg`）。`archive.projection_dirty()` / `clear_projection_dirty()` 与 `PgKnowledgeStore.latest_write()` 一并移除；`archive.MARKER` 保留为历史 journal 的最后一个步骤，恢复流程按原样重放。
+- `refactor(cli)`：删除 `memhub project` 与 `memhub serve` 子命令及 `_serve_env`；`memhub kb` 只接受 `--port` / `--web-dist` / `--data-dir`，不再读取或导出 `MEMHUB_KB_GRAPH` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_KB_GRAPH_PORT`。`recover-kb-archive` 的成功提示不再要求重建投影。
+- `refactor(deploy)`：`compose.yml` 删除 `explorer`（`legacy` profile）；`Dockerfile.kb` 的 CMD 去掉 `--graph-out`；`deploy/README.md` 删除 rebuild timer 与 explorer 端口/回退说明；`docs/tech/ENVIRONMENT.md` 与 `.env.example` 删除三项投影键。
+- `refactor(web)`：删除投影状态横幅、侧栏「重建投影」入口、`Projection` 类型与 `projection`/`rebuild` 客户端方法，`healthz` 类型改为 `{ok, store, nodes}`；删除无引用的 `VITE_GRAPH_URL` 声明。
+- `docs`：契约索引升 0.12，`kb-admin-api.md` 升 0.4（删除 §4.8 投影并重排前端小节、更新不变式），`node-schema.md` 升 0.4（§6 改为「不生成文件投影」），`architecture.md` / `DEVELOPMENT.md` / `deploy/README.md` / `web/README.md` / 根 `README.md` 同步；ADR-0013 后果段记录负责人确认删除。
+- `test`：新增 `test_healthz_has_no_projection_state`、`test_projection_routes_are_removed`、`test_projection_subcommands_are_removed`、`test_kb_console_rejects_removed_projection_flags`；`test_pipeline.py` 的投影用例改为断言合并后的边已按完整 id 落库；删除 `test_serve_env.py`（被测函数已移除）。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 按直连端点单独注入）：RED——改动前四个目标用例分别因 healthz 含 `projection`、投影/重建路由仍存在、`project`/`serve` 仍被识别、`kb` 仍接受 `--graph-out` 等参数而失败；GREEN——全量 `pytest` **545 passed / 1 skipped**；`ruff check src tests scripts alembic`、`ruff format --check src tests scripts alembic`、`mypy src`（47 files）、`check_env_example_keys.py`、`check_document_format.py`、`check_document_ownership.py --all`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py` 全绿；`web` 的 `tsc -b` 通过。`ruff check .` 另在 `.claude/hooks/guard-git-write.py`（本分支未改动的已提交文件）报 ISC004，属既有问题，未在本分支处理。
+- `chore(deploy)`：新增 `deploy/lock-kb.txt`——kb 镜像的完整依赖锁（worker 锁的 60 项 + `mcp==2.3.0` 与其 15 项传递依赖：`mcp-types` / `httpx2` / `sse-starlette` / `pyjwt` / `cryptography` / `jsonschema` 生态 / `cffi` / `pycparser` / `pywin32`）；与 `lock-worker.txt` 的差异仅 mcp-http 闭包。锁由本机 venv 的 `importlib.metadata` 版本仿真生成；**权威锁仍须发版时在镜像内 `pip freeze` 重出**。依赖：`engine` extra 仍保留 `semantica`（已无代码引用）与 `python-multipart`（上传必需）；移除 semantica 需同时重出锁文件与离线 wheelhouse，按独立任务处理。
+
+
+## 2026-11-25（模型边界统一把时间归一为 UTC）
+
+- `fix(contract)`：`NodeFrontmatter` 的 `created_at` / `updated_at` / `valid_from` / `valid_until` / `occurred_at` / `decided_at` 增加 UTC 归一校验：naive 值按 UTC 补齐，带偏移的换算到 UTC。此前 API/MCP/CLI 传入裸日期（如 `valid_until: '2026-11-21'`）会得到 naive datetime，写进 `timestamptz` 时按会话时区（生产 +08）解释，落成前一天 16:00Z——与迁移写库缺陷同源，只是入口不同。迁移侧的局部修复保留（解析行也要守同一口径），模型边界覆盖运行态。
+- `docs`：`node-schema.md` 升 0.3，新增「时间语义」小节；契约索引升 0.11。`source[].captured_at` 以原始文本存 JSONB，与既有行比对绑定，不在归一范围内。
+- `test`：`test_models.py` 新增 `test_naive_times_are_normalized_to_utc`（六个字段的 naive 补齐与偏移换算）；`test_kb_pgstore.py` 新增 `test_runtime_write_normalizes_naive_time_to_utc`（会话时区钉成 +08，裸日期经 `PgKnowledgeStore.write` 回读为 UTC 零点）。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 直连 `memhub_dev`）：RED——两个新用例 2 failed，PG 用例实际回读 `2026-11-20 16:00:00+00`；GREEN——`test_models.py` + `test_kb_pgstore.py` 合计 27 passed。
+
+## 2026-11-25（迁移写库把 naive 时间钉成 UTC）
+
+- `fix(migrate)`：`parse_tree` 产出的节点时间（`valid_from` / `valid_until` / `occurred_at` / `decided_at` / `created_at` / `updated_at`）与归档 `deleted_at` 统一先补成 UTC 再进写库计划。frontmatter 的裸日期（如 `valid_until: '2026-11-21'`）解析出 naive datetime；`timestamptz` 列会按**会话时区**解释 naive 值，生产迁移容器是 +08，落库变成 `2026-11-20T16:00:00Z`，而磁盘侧哈希按 UTC 零点算——`--verify-only` 对这类节点永远报内容不一致。规格 [kb-pg-migration-spec](plans/kb-pg-migration-spec.md) §3 的口径本来就是「所有时间 `timestamptz`，一律 UTC」，本次让写库侧遵守它。运行态写入路径（kb-api / MCP）不在本次范围。
+- `test`：`test_migrate_apply.py` 新增 `test_naive_frontmatter_time_is_written_as_utc`，用裸日期 fixture 并把会话时区显式钉成 `Asia/Shanghai`（不依赖跑测机器默认时区），断言 `kb_nodes.valid_until` 回读为 `2026-11-21T00:00:00Z` 且 `diff_plan` 无差异。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，按直连端点覆盖隧道口）：RED——新用例 1 failed，实际落库回读 `2026-11-20 16:00:00+00`；GREEN——同用例 1 passed。`tests/unit/test_migrate_knowledge.py`、`tests/unit/test_migrate_verify.py`、`tests/unit/test_cli_migrate_kb.py`、`tests/contract/test_migrate_apply.py`、`tests/contract/test_kb_migrations.py` 合计 56 passed。
+- 生产影响：修复只对**修复后的写库**生效。已经用旧代码写入的 `valid_until` 错位行只有一条（`memhub/fact/knowledge-source-directory-structure-export-memhub`）；markdown 源已按授权删除，不能重写，只能单行订正。该订正已于 2026-11-25 15:30 按负责人指令在服务器执行（先落全库 `pg_dump` 备份，再 `UPDATE kb.kb_nodes SET valid_until = timestamptz '2026-11-21T00:00:00+00:00'`，`revision` 未改），随后对备份 tar 中的 728 个 md 重跑 `--verify-only`：`EXIT=0`，逐节点、逐边一致。728 个节点中只有这一条用了裸日期，其余时间均带 `Z`，不是普遍问题。
+
+## 2026-11-25（Alembic 入口归一化 DSN 方言）
+
+- `fix(alembic)`：`alembic/env.py` 把 DSN 归一化成 psycopg 3 方言（复用 `memhub.kb.session` 的同一函数，公开为 `psycopg_dsn`）。此前 `postgresql://` 直接交给 `engine_from_config`，SQLAlchemy 会按默认方言去找 psycopg2；镜像里只有 psycopg 3，`alembic upgrade head` 在连库前即以 `ModuleNotFoundError: psycopg2` 失败。生产切换时是用 `postgresql+psycopg://` 临时绕过的；修复后 `deploy/README.md` 的一次性容器命令按原样可用。运行态异步引擎行为不变。
+- `test`：`test_kb_migrations.py` 新增 `test_online_path_normalizes_plain_dsn_to_psycopg3`，在 `engine_from_config` 处截获交给 SQLAlchemy 的 URL，断言已带 `+psycopg` 且不连库；先观察 RED（原始 URL 断言失败）再实施。
+- `docs`：`ENVIRONMENT.md` 说明该 DSN 可写 `postgresql://`，由入口归一化。
+- 验证（2026-11-25，本地）：RED——`pytest ... -k online_path` 1 failed，断言打印未归一化的 `postgresql://`；GREEN——同命令 1 passed，`test_kb_migrations.py` 与 `test_kb_session.py` 合计 13 passed / 3 skipped（无 `MEMHUB_TEST_DB_URL`，PG 用例按约定 skip）。
 
 ## 2026-11-25（kb 容器独立 env_file，隔离运行态凭据）
 

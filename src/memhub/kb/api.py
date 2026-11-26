@@ -1,9 +1,8 @@
 """知识库管理 API（kb-api，全异步 IO）。
 
 本地单用户管理台的后端：列表/搜索/详情/新增/编辑/废弃/归档删除/边编辑/审计，
-外加投影重建与知识库上传。写操作落 PG 真源 `kb_*` 表（见 `memhub.kb.pgstore`），
-写完可选自动重建 `kg.json` 投影。启动时强制要求 `MEMHUB_KB_DB_URL`，没有文件
-存储退路（规格 §9.2.4）。
+外加知识库上传。写操作落 PG 真源 `kb_*` 表（见 `memhub.kb.pgstore`）。
+启动时强制要求 `MEMHUB_KB_DB_URL`，没有文件存储退路（规格 §9.2.4）。
 
 上传（`/api/v1/kb/uploads`）把文件直接送进提炼队列：落盘走 `memhub.queue.rawstore`，
 与 `/ingest/raw` 共用同一套 raw_store 布局与配额，不经过采集协议（见 `memhub.kb.uploads`）。
@@ -14,25 +13,19 @@
 
 启动：
 
-    memhub kb --graph-out kb/kg.json
+    memhub kb --web-dist web/dist
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import os
-import sys
-import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
 
-import anyio
 from anyio import Path as AsyncPath
 from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,19 +34,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, QuestionStatus, Tier
-from memhub.kb import archive, catalog, manage, proc, query, trace_query
+from memhub.kb import catalog, manage, query, trace_query
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.projection import save_projection
 from memhub.kb.session import KB_SCHEMA, create_runtime_store
-from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetUnavailable, registered_active
 from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
 from memhub.mcp.auth import load_grants
 from memhub.mcp.http import McpEndpoint
 from memhub.queue.rawstore import RawStoreQuota
 
-DEFAULT_GRAPH = "kb/kg.json"
-REBUILD_DEBOUNCE_SECONDS = 1.5
 DEFAULT_QUEUE_MAX_BYTES = 1024**3
 
 
@@ -69,9 +58,6 @@ def _env_bytes(name: str, default: int) -> int:
     if value <= 0:
         raise SystemExit(f"{name} 必须为正数: {value}")
     return value
-
-
-_log = logging.getLogger(__name__)
 
 
 class NodeCreate(BaseModel):
@@ -197,148 +183,11 @@ class KbUpdate(BaseModel):
     description: str | None = None
 
 
-class _RebuildState:
-    def __init__(self) -> None:
-        self.task: asyncio.Task[None] | None = None
-        self.due_at: float | None = None
-        self.running = False
-        self.started_at: str | None = None
-        self.finished_at: str | None = None
-        self.error: str | None = None
-        self.nodes = 0
-        self.edges = 0
-        self.unresolved = 0
-
-
 class KnowledgeApi:
-    """API 运行时状态：真源存储、投影输出、防抖重建。"""
+    """API 运行时状态：真源存储。"""
 
-    def __init__(
-        self,
-        store: KnowledgeStore | PgKnowledgeStore,
-        graph_out: Path,
-        *,
-        auto_rebuild: bool = True,
-        on_rebuilt: Callable[[], Awaitable[None]] | None = None,
-    ) -> None:
+    def __init__(self, store: PgKnowledgeStore) -> None:
         self.store = store
-        self.graph_out = graph_out
-        self.auto_rebuild = auto_rebuild
-        self.on_rebuilt = on_rebuilt
-        self.state = _RebuildState()
-
-    # ---- 投影 ----
-
-    async def rebuild_now(self) -> dict[str, Any]:
-        self.state.running = True
-        self.state.started_at = datetime.now(UTC).isoformat()
-        self.state.error = None
-        try:
-            report = await save_projection(self.store, self.graph_out, clear_archive_dirty=True)
-            self.state.nodes = report.nodes
-            self.state.edges = report.edges
-            self.state.unresolved = len(report.unresolved)
-            self.state.error = None
-        except Exception as exc:
-            self.state.error = f"{type(exc).__name__}: {exc}"
-            raise
-        finally:
-            self.state.running = False
-            self.state.finished_at = datetime.now(UTC).isoformat()
-        if self.on_rebuilt is not None:
-            await self.on_rebuilt()
-        return await self.rebuild_status()
-
-    async def _graph_counts(self) -> tuple[int, int] | None:
-        """直接数现有投影文件：冷启动（本进程还没重建过）时也能报出真实规模。"""
-        if not await AsyncPath(self.graph_out).is_file():
-            return None
-        try:
-            data = json.loads(await AsyncPath(self.graph_out).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        if not isinstance(data, dict):
-            return None
-        nodes = data.get("nodes") or []
-        edges = data.get("edges") or data.get("links") or []
-        return len(nodes), len(edges)
-
-    async def rebuild_status(self) -> dict[str, Any]:
-        state = self.state
-        graph_mtime = None
-        if await AsyncPath(self.graph_out).is_file():
-            mtime = (await AsyncPath(self.graph_out).stat()).st_mtime
-            graph_mtime = datetime.fromtimestamp(mtime, tz=UTC).isoformat()
-        counts = await self._graph_counts()
-        nodes, edges = counts if counts is not None else (state.nodes, state.edges)
-        return {
-            "running": state.running,
-            "started_at": state.started_at,
-            "finished_at": state.finished_at,
-            "error": state.error,
-            "nodes": nodes,
-            "edges": edges,
-            "unresolved_edges": state.unresolved,
-            "graph": str(self.graph_out),
-            "graph_mtime": graph_mtime,
-            "stale": await self.projection_stale(),
-        }
-
-    async def projection_stale(self) -> bool:
-        """投影是否落后于真源。
-
-        文件真源靠 mtime 与归档标记；PG 真源没有文件 mtime，改比 `latest_write`。
-        """
-        if not isinstance(self.store, PgKnowledgeStore) and await archive.projection_dirty(
-            self.store.root
-        ):
-            return True
-        if not await AsyncPath(self.graph_out).is_file():
-            if isinstance(self.store, PgKnowledgeStore):
-                return True
-            return await AsyncPath(self.store.root).is_dir()
-        graph_mtime = (await AsyncPath(self.graph_out).stat()).st_mtime
-        if isinstance(self.store, PgKnowledgeStore):
-            latest = await self.store.latest_write()
-            return latest is not None and latest.timestamp() > graph_mtime
-        for node_id in await self.store.list_ids():
-            try:
-                if (await AsyncPath(self.store.path_for(node_id)).stat()).st_mtime > graph_mtime:
-                    return True
-            except OSError:
-                continue
-        async for path in AsyncPath(self.store.root).rglob("_edges.jsonl"):
-            try:
-                if (await path.stat()).st_mtime > graph_mtime:
-                    return True
-            except OSError:
-                continue
-        return False
-
-    def schedule_rebuild(self) -> None:
-        """写操作后的防抖重建：连续保存只重建一次。"""
-        if not self.auto_rebuild:
-            return
-        self.state.due_at = time.monotonic() + REBUILD_DEBOUNCE_SECONDS
-        if self.state.task is not None and not self.state.task.done():
-            return
-        self.state.task = asyncio.get_running_loop().create_task(self._debounce_loop())
-
-    async def _debounce_loop(self) -> None:
-        while True:
-            due_at = self.state.due_at
-            if due_at is None:
-                return
-            wait = due_at - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(min(wait, 0.5))
-                continue
-            self.state.due_at = None
-            try:
-                await self.rebuild_now()
-            except Exception as exc:  # noqa: BLE001 - 后台任务不能把异常抛给请求
-                # 失败原因已经写进 state.error 供 UI 展示；这里只留一条服务端日志。
-                _log.warning("投影重建失败: %s", exc)
 
 
 def _error_response(exc: manage.ManageError) -> JSONResponse:
@@ -350,7 +199,7 @@ def _error_response(exc: manage.ManageError) -> JSONResponse:
 
 def create_app(
     *,
-    store: KnowledgeStore | PgKnowledgeStore | None = None,
+    store: PgKnowledgeStore | None = None,
     schema: str | None = KB_SCHEMA,
 ) -> FastAPI:
     """组装 kb-api；默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储（规格 §9.2.4）。
@@ -358,21 +207,13 @@ def create_app(
     `store` 与 `schema` 仅供测试注入独立 schema；生产入口不留文件存储退路，
     `search_path` 固定为 `kb`。
     """
-    graph_out = Path(os.environ.get("MEMHUB_KB_GRAPH", DEFAULT_GRAPH))
     web_dist_raw = os.environ.get("MEMHUB_KB_WEB_DIST", "")
     web_dist = Path(web_dist_raw) if web_dist_raw else None
-    auto_rebuild = os.environ.get("MEMHUB_KB_AUTO_REBUILD", "1") not in {"0", "off", "false"}
-    graph_restarter = _GraphRestarter.from_env()
     owned: PgKnowledgeStore | None = None
     if store is None:
         owned = create_runtime_store(schema=schema)
         store = owned
-    api = KnowledgeApi(
-        store,
-        graph_out,
-        auto_rebuild=auto_rebuild,
-        on_rebuilt=graph_restarter.restart if graph_restarter else None,
-    )
+    api = KnowledgeApi(store)
     data_dir_raw = os.environ.get("MEMHUB_DATA_DIR", "").strip()
     uploads: KbUploads | None = None
     if data_dir_raw:
@@ -384,12 +225,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        if graph_restarter is not None and await AsyncPath(graph_out).is_file():
-            await graph_restarter.start()
-        if not isinstance(api.store, PgKnowledgeStore) and await archive.projection_dirty(
-            api.store.root
-        ):
-            api.schedule_rebuild()
         try:
             async with mcp.lifespan():
                 yield
@@ -450,11 +285,6 @@ def create_app(
             },
         )
 
-    async def _write(action: Awaitable[dict[str, Any]]) -> dict[str, Any]:
-        result = await action
-        api.schedule_rebuild()
-        return result
-
     # ---- 健康与统计 ----
 
     @app.get("/healthz")
@@ -462,9 +292,8 @@ def create_app(
     async def healthz() -> dict[str, Any]:
         return {
             "ok": True,
-            "store": "pg" if isinstance(api.store, PgKnowledgeStore) else "files",
+            "store": "pg",
             "nodes": len(await api.store.list_ids()),
-            "projection": await api.rebuild_status(),
         }
 
     @app.get("/api/v1/kb/stats")
@@ -491,7 +320,7 @@ def create_app(
 
     @app.delete("/api/v1/kb/projects/{project}")
     async def delete_project(project: str, actor: str = "ui") -> dict[str, Any]:
-        return await _write(catalog.delete_kb(api.store, project, actor=actor))
+        return await catalog.delete_kb(api.store, project, actor=actor)
 
     @app.get("/api/v1/kb/graph")
     async def knowledge_graph(project: str = Query(min_length=1)) -> dict[str, Any]:
@@ -522,7 +351,7 @@ def create_app(
 
     @app.post("/api/v1/kb/nodes", status_code=201)
     async def create_node(body: NodeCreate) -> dict[str, Any]:
-        return await _write(manage.create_node(api.store, body.to_draft()))
+        return await manage.create_node(api.store, body.to_draft())
 
     @app.get("/api/v1/kb/nodes/{node_id:path}")
     async def get_node(node_id: str) -> dict[str, Any]:
@@ -536,26 +365,22 @@ def create_app(
             Edge(source=node_id, predicate=item.predicate, target=item.target)
             for item in body.edges
         ]
-        return await _write(manage.replace_out_edges(api.store, node_id, edges))
+        return await manage.replace_out_edges(api.store, node_id, edges)
 
     @app.put("/api/v1/kb/nodes/{node_id:path}")
     async def update_node(node_id: str, body: NodeUpdate) -> dict[str, Any]:
-        return await _write(
-            manage.update_node(
-                api.store, node_id, expected_revision=body.expected_revision, patch=body.to_patch()
-            )
+        return await manage.update_node(
+            api.store, node_id, expected_revision=body.expected_revision, patch=body.to_patch()
         )
 
     @app.post("/api/v1/kb/nodes/{node_id:path}/deprecate")
     async def deprecate_node(node_id: str, body: DeprecateRequest) -> dict[str, Any]:
-        return await _write(
-            manage.deprecate_node(
-                api.store,
-                node_id,
-                superseded_by=body.superseded_by,
-                reason=body.reason,
-                actor=body.actor,
-            )
+        return await manage.deprecate_node(
+            api.store,
+            node_id,
+            superseded_by=body.superseded_by,
+            reason=body.reason,
+            actor=body.actor,
         )
 
     @app.delete("/api/v1/kb/nodes/{node_id:path}")
@@ -565,10 +390,8 @@ def create_app(
         reason: str = "",
         actor: str = "ui",
     ) -> dict[str, Any]:
-        return await _write(
-            manage.delete_node(
-                api.store, node_id, expected_revision=revision, reason=reason, actor=actor
-            )
+        return await manage.delete_node(
+            api.store, node_id, expected_revision=revision, reason=reason, actor=actor
         )
 
     # ---- 回收站 ----
@@ -584,7 +407,7 @@ def create_app(
 
     @app.post("/api/v1/kb/trash/restore")
     async def restore_trash(body: RestoreRequest) -> dict[str, Any]:
-        return await _write(manage.restore_node(api.store, body.trash))
+        return await manage.restore_node(api.store, body.trash)
 
     @app.get("/api/v1/kb/trash/projects")
     async def list_project_trash() -> dict[str, Any]:
@@ -592,7 +415,7 @@ def create_app(
 
     @app.post("/api/v1/kb/trash/projects/restore")
     async def restore_project_trash(body: RestoreProjectRequest) -> dict[str, Any]:
-        return await _write(catalog.restore_kb(api.store, body.archive_id))
+        return await catalog.restore_kb(api.store, body.archive_id)
 
     # ---- 当前登录用户（nginx 经 oauth2-proxy 注入 X-Memhub-User）----
 
@@ -708,27 +531,6 @@ def create_app(
             return _traces_unavailable()
         return await trace_query.mcp_traces_summary(api.store, days=days)
 
-    # ---- 投影 ----
-
-    @app.get("/api/v1/kb/rebuild")
-    @app.get("/api/v1/kb/projection")
-    async def rebuild_status() -> dict[str, Any]:
-        return await api.rebuild_status()
-
-    @app.post("/api/v1/kb/rebuild", response_model=None)
-    async def rebuild() -> Any:
-        try:
-            return await api.rebuild_now()
-        except Exception as exc:  # noqa: BLE001 - 返回 500 + 原因，让 UI 展示
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "code": 2001,
-                    "message": f"投影重建失败: {type(exc).__name__}: {exc}",
-                    "data": await api.rebuild_status(),
-                },
-            )
-
     # ---- 静态前端（打包产物）----
 
     index = web_dist / "index.html" if web_dist is not None else None
@@ -766,71 +568,3 @@ def create_app(
             return FileResponse(index)
 
     return app
-
-
-class _GraphRestarter:
-    """可选：由 kb-api 拉起 explorer 子进程，投影重建后自动重启它。
-
-    explorer 只在启动时读一次 kg.json，不重启就看不到新图谱；本地形态下
-    让 kb-api 托管它是最省心的做法。未设置 `MEMHUB_KB_GRAPH_PORT` 时本类不生效。
-    """
-
-    def __init__(self, graph: Path, port: int) -> None:
-        self.graph = graph
-        self.port = port
-        self.process: Any = None
-        self.lock = anyio.Lock()
-
-    @classmethod
-    def from_env(cls) -> _GraphRestarter | None:
-        port = os.environ.get("MEMHUB_KB_GRAPH_PORT", "").strip()
-        if not port:
-            return None
-        graph = Path(os.environ.get("MEMHUB_KB_GRAPH", DEFAULT_GRAPH))
-        return cls(graph, int(port))
-
-    async def start(self) -> None:
-        async with self.lock:
-            await self._spawn_locked()
-
-    async def _spawn_locked(self) -> None:
-        if self.process is not None and proc.exit_code(self.process) is None:
-            return
-        env = os.environ.copy()
-        env.setdefault("PYTHONUTF8", "1")
-        env.setdefault("PYTHONIOENCODING", "utf-8")
-        env.setdefault("SEMANTICA_ALLOW_ANONYMOUS", "true")
-        self.process = await proc.spawn(
-            [
-                sys.executable,
-                "-m",
-                "semantica.explorer",
-                "--graph",
-                str(self.graph),
-                "--port",
-                str(self.port),
-                "--host",
-                "127.0.0.1",
-                "--no-browser",
-            ],
-            env=env,
-        )
-
-    async def restart(self) -> None:
-        async with self.lock:
-            process = self.process
-            self.process = None
-            if process is not None and proc.exit_code(process) is None:
-                proc.terminate(process)
-                with anyio.move_on_after(5):
-                    while proc.exit_code(process) is None:
-                        await anyio.sleep(0.1)
-                if proc.exit_code(process) is None:
-                    proc.kill(process)
-            await self._spawn_locked()
-
-    async def stop(self) -> None:
-        async with self.lock:
-            process = self.process
-            self.process = None
-            proc.terminate(process)

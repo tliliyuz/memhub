@@ -34,8 +34,6 @@ def web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, test_dsn: str, kb_pg_sc
     (tmp_path / "index.html").write_text("fixture SPA", encoding="utf-8")
     monkeypatch.setenv("MEMHUB_KB_WEB_DIST", str(tmp_path))
     monkeypatch.setenv(KB_DSN_KEY, test_dsn)
-    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kg.json"))
-    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.delenv("MEMHUB_MCP_GRANTS", raising=False)
 
 

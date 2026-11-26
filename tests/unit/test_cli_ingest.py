@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from memhub.cli import main as cli
-from memhub.cli.main import _ingest, _kb, _mcp, _project, _worker
+from memhub.cli.main import _ingest, _kb, _mcp, _worker
 from memhub.kb import catalog
 from memhub.kb.models import Base
 from memhub.kb.pgstore import PgKnowledgeStore
@@ -75,14 +75,33 @@ async def test_ingest_requires_dsn_without_injected_store(
         await _ingest(args)
 
 
-async def test_project_requires_dsn_without_injected_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv(KB_DSN_KEY, raising=False)
-    args = argparse.Namespace(out=str(tmp_path / "kg.json"))
+def test_projection_subcommands_are_removed(capsys: pytest.CaptureFixture[str]) -> None:
+    """投影子系统已下线：`project` / `serve` 不再是合法子命令。"""
+    for command in ("project", "serve"):
+        with pytest.raises(SystemExit) as exc:
+            cli.main([command])
+        assert exc.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
 
-    with pytest.raises(KbDsnMissing):
-        await _project(args)
+
+def test_kb_console_rejects_removed_projection_flags(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`kb` 不再接受投影/explorer 相关参数。"""
+
+    async def fake_server(target: str, *, host: str, port: int, log_level: str) -> None:
+        raise AssertionError("参数应在解析阶段被拒绝")
+
+    monkeypatch.setattr(cli, "_run_server", fake_server)
+    for flag in (
+        ("--graph-out", "kg.json"),
+        ("--spawn-graph",),
+        ("--graph-port", "8703"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["kb", *flag])
+        assert exc.value.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
 
 
 async def test_mcp_requires_dsn_without_injected_store(
@@ -144,7 +163,6 @@ async def test_kb_console_starts_without_knowledge_dir(
 ) -> None:
     """管理台真源是 PG：不再要求也不读取 `MEMHUB_KNOWLEDGE_DIR`。"""
     monkeypatch.delenv("MEMHUB_KNOWLEDGE_DIR", raising=False)
-    monkeypatch.delenv("MEMHUB_KB_GRAPH", raising=False)
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
     calls: list[tuple[str, str, int]] = []
 
@@ -154,11 +172,8 @@ async def test_kb_console_starts_without_knowledge_dir(
     monkeypatch.setattr(cli, "_run_server", fake_server)
     code = await _kb(
         argparse.Namespace(
-            graph_out=str(tmp_path / "kg.json"),
             web_dist="",
             data_dir="",
-            spawn_graph=False,
-            graph_port=0,
             port=8799,
         )
     )

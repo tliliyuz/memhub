@@ -25,11 +25,8 @@ def env(
     (data_dir / "raw_store").mkdir(parents=True)
 
     monkeypatch.setenv(KB_DSN_KEY, test_dsn)
-    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
-    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data_dir))
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
-    monkeypatch.delenv("MEMHUB_KB_GRAPH_PORT", raising=False)
 
     with TestClient(create_app(schema=kb_pg_schema)) as client:
         response = client.post("/api/v1/kb/projects", json={"id": "memory-hub"})
@@ -194,8 +191,6 @@ def test_queue_full_returns_1013(
     data_dir = tmp_path / "data"
     (data_dir / "raw_store").mkdir(parents=True)
     monkeypatch.setenv(KB_DSN_KEY, test_dsn)
-    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
-    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.setenv("MEMHUB_DATA_DIR", str(data_dir))
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "1")
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
@@ -231,8 +226,6 @@ def test_upload_disabled_without_data_dir(
     test_dsn: str,
 ) -> None:
     monkeypatch.setenv(KB_DSN_KEY, test_dsn)
-    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
-    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
     monkeypatch.delenv("MEMHUB_KB_WEB_DIST", raising=False)
 

@@ -63,7 +63,7 @@ ADR-0002 把每条知识存成一个 markdown 文件、由 git 做版本化。�
 ## 后果
 
 - ADR-0002 全文被取代；其「写知识 = 写文件 + git commit」由 `kb_node_revisions` + `pg_dump` 备份承接。ADR-0004 §2「知识真源仍是 markdown」与 §3「dev 用 MemoryStore」失效，运行态部分结论继续有效。ADR-0005 决策 4 的「不引 Alembic」本轮被改；`kb-api 不访问数据库` 的前提失效。
-- `docs/architecture.md` 数据流、`docs/contracts/node-schema.md`（真源形态与投影表）、`docs/contracts/kb-admin-api.md`、`docs/contracts/mcp-tools.md`（`matched` 语义）、`docs/tech/ENVIRONMENT.md`（新增 kb 直连键、测试键）必须同步修订。**投影与 explorer 的去留**：ADR-0002 被取代后，`kg.json` / `vector/` / `fts.db` 三项投影中两项从未实现，且 kb 不再读 markdown，投影与 semantica explorer 失去意义；`MEMHUB_KB_GRAPH`、`MEMHUB_KB_GRAPH_PORT`、`MEMHUB_KB_AUTO_REBUILD` 三项键可能整体作废。本轮先在契约中标注待删，实现时与 `projection.py`、semantica 依赖一并处置，删除与否由负责人确认。
+- `docs/architecture.md` 数据流、`docs/contracts/node-schema.md`（真源形态与投影表）、`docs/contracts/kb-admin-api.md`、`docs/contracts/mcp-tools.md`（`matched` 语义）、`docs/tech/ENVIRONMENT.md`（新增 kb 直连键、测试键）必须同步修订。**投影与 explorer 的去留**：ADR-0002 被取代后，`kg.json` / `vector/` / `fts.db` 三项投影中两项从未实现，且 kb 不再读 markdown，投影与 semantica explorer 失去意义；`MEMHUB_KB_GRAPH`、`MEMHUB_KB_GRAPH_PORT`、`MEMHUB_KB_AUTO_REBUILD` 三项键可能整体作废。本轮先在契约中标注待删，实现时与 `projection.py`、semantica 依赖一并处置，删除与否由负责人确认。**2026-11-25 更新**：负责人确认删除；`projection.py`、`kg.json`/`rebuild` 接口、`memhub project` / `serve` 命令与 explorer 服务已移除，`MEMHUB_KB_GRAPH` / `MEMHUB_KB_GRAPH_PORT` / `MEMHUB_KB_AUTO_REBUILD` 三项键作废，执行结果见 [CHANGELOG](../CHANGELOG.md)。
 - 新增运维面：kb 专用角色及其授权、Alembic 迁移执行（新增 `alembic` 依赖与 wheelhouse）、一次性数据迁移与删除、cloud PG 作为 dev/测试依赖、连接数预算重算。
 - **门禁覆盖缺口**：`check_no_raw_sql.py` / `check_async_io.py` 只扫 `src/`，`alembic/` 不在扫描范围。需把 `alembic/` 加入两脚本扫描根（作为独立提交，附带门禁自测），否则「不写裸 SQL」在迁移目录内无脚本把关。
 - 备份与恢复：`pg_dump -Fc` 成为唯一全量备份手段；恢复演练在装有 PG 的云主机做。迁移后失去「直接读文件即可审阅」的能力，人工审阅改走管理台与库查询。

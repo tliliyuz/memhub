@@ -1,4 +1,4 @@
-"""运维命令入口：ingest / project / serve（全异步 IO）。"""
+"""运维命令入口：ingest / worker / mcp（全异步 IO）。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ from anyio import Path as AsyncPath
 
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
-from memhub.kb import archive, catalog, manage, proc, target_access
+from memhub.kb import archive, catalog, manage, target_access
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.projection import save_projection
 from memhub.kb.session import create_runtime_store
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
@@ -65,16 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--max-input-chars", type=int, default=0, help="截断输入（0 表示不截断）")
     ingest.add_argument("--dry-run", action="store_true")
 
-    project_cmd = sub.add_parser("project", help="重建 semantica 图谱投影")
-    project_cmd.add_argument("--out", default="kb/kg.json")
-
     recover = sub.add_parser("recover-kb-archive", help="核对并续做未完成的整库归档或恢复")
     recover.add_argument("--knowledge-dir", default=None)
-
-    serve = sub.add_parser("serve", help="启动 semantica explorer 看图")
-    serve.add_argument("--graph", default="kb/kg.json")
-    serve.add_argument("--port", type=int, default=8000)
-    serve.add_argument("--no-browser", action="store_true")
 
     sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
 
@@ -113,7 +104,6 @@ def main(argv: list[str] | None = None) -> int:
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
 
     kb = sub.add_parser("kb", help="启动知识库管理 API（本地管理台后端 + 静态前端）")
-    kb.add_argument("--graph-out", default=None, help="投影输出路径（默认 kb/kg.json）")
     kb.add_argument("--port", type=int, default=None, help="默认 8701（MEMHUB_KB_HTTP_PORT）")
     kb.add_argument("--web-dist", default=None, help="前端构建产物目录（含 index.html）")
     kb.add_argument(
@@ -121,10 +111,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="提炼队列数据目录（缺省 MEMHUB_DATA_DIR）；配置后开放 /api/v1/kb/uploads",
     )
-    kb.add_argument(
-        "--spawn-graph", action="store_true", help="同时托管 explorer，并在投影重建后自动重启"
-    )
-    kb.add_argument("--graph-port", type=int, default=8703, help="explorer 端口（默认 8703）")
 
     provision = sub.add_parser(
         "provision-device", help="在库里登记设备并把 per-device token 打到标准输出"
@@ -174,9 +160,7 @@ def main(argv: list[str] | None = None) -> int:
 async def _dispatch(args: argparse.Namespace) -> int:
     handlers = {
         "ingest": _ingest,
-        "project": _project,
         "recover-kb-archive": _recover_kb_archive,
-        "serve": _serve,
         "mcp": _mcp,
         "purge-expired": _purge_expired,
         "worker": _worker,
@@ -337,18 +321,6 @@ async def _ingest(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-async def _project(args: argparse.Namespace) -> int:
-    store = _runtime_store(args)
-    out = Path(args.out)
-    report = await save_projection(store, out)
-    print(f"投影已写入 {out}: {report.nodes} 节点 / {report.edges} 边")
-    if report.unresolved:
-        print(f"未解析关系 {len(report.unresolved)} 条（目标不在真源中）:")
-        for item in report.unresolved[:20]:
-            print(f"  - {item}")
-    return 0
-
-
 async def _recover_kb_archive(args: argparse.Namespace) -> int:
     store = KnowledgeStore(_knowledge_dir(args.knowledge_dir))
     try:
@@ -356,47 +328,8 @@ async def _recover_kb_archive(args: argparse.Namespace) -> int:
     except (manage.ManageError, OSError) as exc:
         print(f"未能完成归档恢复：{exc}", file=sys.stderr)
         return 1
-    print("已续做归档操作；请重建投影。" if recovered else "没有待续做的归档操作。")
+    print("已续做归档操作。" if recovered else "没有待续做的归档操作。")
     return 0
-
-
-def _serve_env() -> dict[str, str]:
-    """explorer 只绑回环地址；补齐它启动所需的运行环境。
-
-    - UTF-8：semantica 启动日志含 `✓`，Windows 默认 GBK 会直接 UnicodeEncodeError。
-    - 匿名只读：explorer API 要求 token 或显式匿名，否则返回
-      "Server is not configured for authentication"。服务不对外暴露，故默认允许匿名；
-      调用方已显式设置的环境变量优先。
-    """
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    env.setdefault("SEMANTICA_ALLOW_ANONYMOUS", "true")
-    return env
-
-
-async def _serve(args: argparse.Namespace) -> int:
-    graph = Path(await AsyncPath(args.graph).resolve())
-    if not await AsyncPath(graph).is_file():
-        print(f"图谱不存在: {graph}（先运行 memhub project）", file=sys.stderr)
-        return 2
-    command = [
-        sys.executable,
-        "-m",
-        "semantica.explorer",
-        "--graph",
-        str(graph),
-        "--port",
-        str(args.port),
-        "--host",
-        "127.0.0.1",
-    ]
-    if args.no_browser:
-        command.append("--no-browser")
-    print(f"memhub explorer: http://127.0.0.1:{args.port}/  graph={graph}", flush=True)
-    # 前台长驻，子进程直接继承本进程的 stdio。
-    result = await proc.run_command(command, env=_serve_env(), capture=False)
-    return result.returncode
 
 
 async def _mcp(args: argparse.Namespace) -> int:
@@ -726,30 +659,20 @@ def _print_verify_report(report: VerifyDiff) -> None:
 
 
 async def _kb(args: argparse.Namespace) -> int:
-    """本地知识库管理台：kb-api + （可选）explorer 子进程。
+    """本地知识库管理台：kb-api + 静态前端。
 
     只绑回环：这是单用户管理面，没有公网入口。前端构建产物缺失时纯 API 运行，
     开发期用 Vite 的 5173 端口直连。
     """
-    graph_out = Path(
-        await AsyncPath(args.graph_out or os.environ.get("MEMHUB_KB_GRAPH", "kb/kg.json")).resolve()
-    )
     web_dist = args.web_dist or os.environ.get("MEMHUB_KB_WEB_DIST", "")
     data_dir_raw = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
     if data_dir_raw:
         # 上传要落 raw_store：解析成绝对路径再交给 create_app，避免受启动目录影响。
         os.environ["MEMHUB_DATA_DIR"] = str(await AsyncPath(data_dir_raw).resolve())
-    os.environ["MEMHUB_KB_GRAPH"] = str(graph_out)
     if web_dist:
         os.environ["MEMHUB_KB_WEB_DIST"] = str(await AsyncPath(web_dist).resolve())
-    if args.spawn_graph:
-        os.environ["MEMHUB_KB_GRAPH_PORT"] = str(args.graph_port)
     port = args.port or int(os.environ.get("MEMHUB_KB_HTTP_PORT", "8701"))
     print(f"memhub kb-api: http://127.0.0.1:{port}/  真源=PG（schema kb）", flush=True)
-    if await AsyncPath(graph_out).is_file():
-        print(f"投影: {graph_out}", flush=True)
-    if args.spawn_graph:
-        print(f"explorer 由 kb-api 托管: http://127.0.0.1:{args.graph_port}/", flush=True)
     if data_dir_raw:
         print(f"上传→提炼队列: {os.environ['MEMHUB_DATA_DIR']}", flush=True)
     else:

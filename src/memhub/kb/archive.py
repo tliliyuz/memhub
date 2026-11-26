@@ -22,6 +22,7 @@ from memhub.kb.store import KnowledgeStore
 
 ARCHIVES = "_kb_archives"
 ARCHIVE_ID = re.compile(r"[0-9a-f]{32}")
+# 历史投影子系统遗留的哨兵路径；仍是归档事务的最后一个步骤，保留名称以兼容旧 journal。
 MARKER = f"{ARCHIVES}/projection-dirty"
 PENDING = f"{ARCHIVES}/pending.json"
 
@@ -84,27 +85,14 @@ async def read_optional(path: Path) -> bytes | None:
     return await AsyncPath(path).read_bytes()
 
 
-async def projection_dirty(root: Path) -> bool:
-    for name in (PENDING, MARKER):
-        if await path_kind(await checked_path(root, name)) is not None:
-            return True
-    return False
-
-
 async def pending_transaction(root: Path) -> bool:
     """只看未完成的归档事务（`pending.json`）。
 
-    `projection-dirty` 是另一回事：整库归档**成功后**也会留下它，等投影重建才清。
-    迁移这类「读真源」的调用方若把两者混为一谈，归档过任何库的服务器就永远不能迁移。
+    `projection-dirty` 是历史投影子系统留下的哨兵步骤：整库归档**成功后**也会
+    留下它，恢复流程按原样重放。迁移这类「读真源」的调用方若把它也算作阻断，
+    归档过任何库的服务器就永远不能迁移。
     """
     return await path_kind(await checked_path(root, PENDING)) is not None
-
-
-async def clear_projection_dirty(root: Path) -> None:
-    path = await checked_path(root, MARKER)
-    if await path_kind(path) == "file":
-        await AsyncPath(path).unlink()
-        await _sync(path.parent)
 
 
 async def ensure_missing(path: Path) -> None:

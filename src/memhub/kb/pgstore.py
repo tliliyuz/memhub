@@ -1078,18 +1078,6 @@ class PgKnowledgeStore:
             edges = await session.scalar(select(func.count()).select_from(KbEdge))
         return {"nodes": int(nodes or 0), "edges": int(edges or 0)}
 
-    async def latest_write(self) -> datetime | None:
-        """真源最近一次写入时间；投影过期判断的文件 mtime 替代品。
-
-        取修订流与边表的最大时间：每次写节点（含软删、归档、恢复）都会追加修订，
-        普通写入也会更新节点，两者都落在这两条时间线上。
-        """
-        async with self._session() as session:
-            revision_at = await session.scalar(select(func.max(KbNodeRevision.created_at)))
-            edge_at = await session.scalar(select(func.max(KbEdge.created_at)))
-        moments = [moment for moment in (revision_at, edge_at) if moment is not None]
-        return max(moments) if moments else None
-
     # -- 写入审计（规格 §3.6） --------------------------------------------
 
     async def record_write_audit(
