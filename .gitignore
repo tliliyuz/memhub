@@ -32,6 +32,9 @@ logs/
 # 本地端到端联调（raw_store / 投影 / 截图）
 .e2e/
 
+# 本地 worktree（DEVELOPMENT §6 只允许单数目录；复数 .claude/worktrees/ 故意不忽略，出现即为工具绕过闭环）
+.claude/worktree/
+
 # build artifacts
 src/*.egg-info/
 build/
