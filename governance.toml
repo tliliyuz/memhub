@@ -1,0 +1,92 @@
+# 顶层键必须出现在任何 [段] 之前（TOML 规则）。
+# 不适用治理文档结构规则的目录放这里；与仓库层定义保持同文件维护。
+excluded_prefixes = ["knowledge/", "prompts/", ".claude/worktree/"]
+
+[repo]
+name = "memhub"
+pack = "python-service"
+
+[checks]
+entrypoints = true
+adr = true
+document_format = true
+document_ownership = true
+env_keys = true
+atomic_layers = true
+
+numbered_docs = [
+    "docs/architecture.md",
+    "docs/tech/ENVIRONMENT.md",
+    "docs/guides/DEVELOPMENT.md",
+    "docs/contracts/kb-admin-api.md",
+    "docs/contracts/mcp-tools.md",
+    "docs/contracts/node-schema.md",
+    "docs/contracts/source-registry.md",
+]
+
+authority_docs = [
+    "docs/architecture.md",
+    "docs/contracts/README.md",
+    "docs/contracts/ingest-api.md",
+    "docs/contracts/kb-admin-api.md",
+    "docs/contracts/mcp-tools.md",
+    "docs/contracts/node-schema.md",
+    "docs/contracts/source-registry.md",
+    "docs/tech/ENVIRONMENT.md",
+    "docs/guides/DEVELOPMENT.md",
+    "docs/decisions/README.md",
+]
+
+history_docs = ["docs/CHANGELOG.md"]
+deprecated_docs = []
+decisions_dir = "docs/decisions"
+env_example = ".env.example"
+environment_doc = "docs/tech/ENVIRONMENT.md"
+
+[atomic]
+max_implementation_layers = 1
+closing_layers = ["tests", "docs"]
+
+[[atomic.layer]]
+name = "config"
+patterns = ["pyproject.toml", "requirements.txt", ".env.example", "Dockerfile", "docker-compose.yml", "alembic.ini"]
+
+[[atomic.layer]]
+name = "infra"
+patterns = ["src/memhub/ingest/", "src/memhub/worker/", "deploy/"]
+
+[[atomic.layer]]
+name = "models"
+patterns = ["src/memhub/models/", "alembic/", "src/memhub/kb/"]
+
+[[atomic.layer]]
+name = "service"
+patterns = ["src/memhub/services/", "src/memhub/tasks/", "src/memhub/tools/", "src/memhub/core/", "src/memhub/dao/", "src/memhub/utils/"]
+
+[[atomic.layer]]
+name = "api"
+patterns = ["src/memhub/routers/", "src/memhub/schemas/", "src/memhub/api/", "src/memhub/mcp/"]
+
+[[atomic.layer]]
+name = "web"
+patterns = ["web/src/", "web/index.html", "web/vite.config.ts"]
+
+[[atomic.layer]]
+name = "tests"
+patterns = ["tests/"]
+
+[[atomic.layer]]
+name = "docs"
+patterns = ["docs/", "policy/", "*.md", "AGENTS.md", "CLAUDE.md", "README.md", "knowledge/", "prompts/"]
+
+[[atomic.layer]]
+name = "kb"
+patterns = ["kb/", "data/"]
+
+[[atomic.layer]]
+name = "ci"
+patterns = ["scripts/", ".github/", ".claude/", ".gitignore", ".gitattributes", ".editorconfig"]
+
+[[atomic.layer]]
+name = "governance"
+patterns = ["governance.toml", ".pre-commit-config.yaml"]
