@@ -13,6 +13,7 @@ from memhub.contract import SourceKind, SourceRef, Tier
 from memhub.kb.store import KnowledgeStore
 from memhub.worker import extract, render
 from memhub.worker.extract import ExtractionFailed, extract_document
+from memhub.worker.memory import MemoryContext, MemorySettings
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 
@@ -477,3 +478,70 @@ async def test_session_rejects_duplicate_response_keys_without_logging_values() 
             model="fake",
         )
     assert "SYNTHETIC_PRIVATE" not in str(err.value)
+
+
+MEMORY_QUOTE = "重试需要指数退避，避免打爆下游。"
+
+
+def _memory_context(*, disabled: str | None = None) -> MemoryContext:
+    settings = MemorySettings(
+        top_k=8,
+        inject_chars=4000,
+        disabled_projects=frozenset({disabled}) if disabled else frozenset(),
+    )
+    return MemoryContext(
+        version=5,
+        entries=(
+            {
+                "slug": "retry-backoff",
+                "title": "重试退避",
+                "conclusion": MEMORY_QUOTE,
+                "boundary": "幂等操作",
+                "invalidation": "不可重放时不适用。",
+                "confidence": 0.9,
+            },
+        ),
+        settings=settings,
+    )
+
+
+async def test_session_prompt_injects_memory_but_memory_cannot_be_evidence() -> None:
+    client = FakeClient(
+        [
+            {
+                "nodes": [_cited_node("copied-memory", "b0001", MEMORY_QUOTE, body=MEMORY_QUOTE)],
+                "edges": [],
+            }
+        ]
+    )
+
+    output = await extract.extract_session(
+        client,
+        template=await load_profile("sessions"),
+        path="synthetic.txt",
+        blocks=render.render_plaintext_blocks("网络重试需要指数退避。"),
+        model="fake",
+        memory=_memory_context(),
+    )
+
+    assert "长期记忆" in client.prompts[0]
+    assert "retry-backoff" in client.prompts[0]
+    # 记忆文本只存在于提示词，不在本窗原文块里：抄进 quote 也过不了逐字门禁。
+    assert output.nodes == []
+
+
+async def test_session_prompt_skips_memory_for_disabled_project() -> None:
+    client = FakeClient([{"nodes": [], "edges": []}])
+
+    await extract.extract_session(
+        client,
+        template=await load_profile("sessions"),
+        path="synthetic.txt",
+        blocks=render.render_plaintext_blocks("网络重试需要指数退避。"),
+        model="fake",
+        memory=_memory_context(disabled="demo"),
+        project="demo",
+    )
+
+    assert "（本次未注入长期记忆）" in client.prompts[0]
+    assert "retry-backoff" not in client.prompts[0]

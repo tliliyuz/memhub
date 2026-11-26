@@ -153,6 +153,7 @@ kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查
 |:---|:---|:---|
 | `memhub purge-expired` | 删 25h 外批次记录 + 30 天外隔离文件 + 裁剪 processed_raw | 0 正常 / 2 配置错 |
 | `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
+| `memhub memory-aggregate --publish` | 聚合跨项目 canonical 节点，写入记忆条目/候选并发布快照 | 0 成功（含无节点）/ 1 聚合或模型失败 / 2 配置错 |
 
 ### timer 完整参数（照抄）
 
@@ -180,6 +181,29 @@ rebuild timer 已随投影子系统下线移除：图谱与检索直读 `kb_*` �
 - 退出码 1 表示部分失败，systemd 侧不要 `SuccessExitStatus=1` 掩盖它。
 
 timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer。
+
+### 长期记忆聚合 timer（ADR-0016）
+
+unit 文件在 `deploy/systemd/`：`memhub-memory-aggregate.service`（oneshot，用
+`memhub/app-worker:0.1.0` 跑 `memhub memory-aggregate --publish`）与
+`memhub-memory-aggregate.timer`（`Mon *-*-* 03:00:00`，`Persistent=true`）。
+03:00 与 worker 的 21:00-02:00 提炼窗口错峰；聚合只读写 `kb_*` 表并调用模型，不挂数据卷。
+
+安装（部署变更，按需执行）：
+
+```bash
+install -m 644 deploy/systemd/memhub-memory-aggregate.service \
+  deploy/systemd/memhub-memory-aggregate.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now memhub-memory-aggregate.timer
+systemctl list-timers memhub-memory-aggregate.timer
+```
+
+- `/etc/memhub/env` 必须提供 `MEMHUB_KB_DB_URL`、`MEMHUB_LLM_BASE_URL` / `MEMHUB_LLM_API_KEY`，
+  以及 `MEMHUB_LLM_MODEL_MEMORY`（未设置时回退 `MEMHUB_LLM_MODEL_EXTRACT`）；缺任一则容器退出 2。
+- 聚合发布的快照不会热替换正在运行的 worker：抽取固定使用进程启动时读到的版本，要让新快照生效
+  需重启 worker。管理台「长期记忆」页的发布/回滚/停用同样要重启 worker 才改变注入内容。
+- 首次上线前先手动 `--dry-run` 看聚合计划（仍会调用模型，但不写库），确认门槛与条数符合预期。
 
 ### 知识真源切换（markdown → PG，一次性）
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from memhub.contract import Kind, Predicate
 from memhub.worker.llm import DEFAULT_MAX_TOKENS, LLMClient, parse_json
+from memhub.worker.memory import MemoryContext
 from memhub.worker.prompts import render
 from memhub.worker.render import SessionBlock, SessionWindow, session_windows
 from memhub.worker.schema import (
@@ -91,13 +92,16 @@ async def extract_session(
     model: str,
     max_chars: int = 12000,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    memory: MemoryContext | None = None,
+    project: str | None = None,
 ) -> Extraction:
     """抽取有逐字出处的会话候选；畸形窗失败时不返回任何部分结果。"""
     nodes: list[_SessionNode] = []
     edges: list[ExtractedEdge] = []
     for index, window in enumerate(session_windows(blocks, max_chars), 1):
         chunk_path = f"{path}#chunk{index}"
-        prompt = render(template, path=chunk_path, text=window.text)
+        block = memory.block(window.text, project=project) if memory is not None else ""
+        prompt = render(template, path=chunk_path, text=window.text, memory=block)
         raw = await client.complete(prompt, model=model, max_tokens=max_tokens)
         _validate_session(raw, window, chunk_path, nodes, edges)
     return _dedupe_session(nodes, edges)

@@ -1,7 +1,7 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.6（ADR-0014：新建/更新写 canonical，`tier=candidate` 无写入路径，检索默认排除 `deprecated`）
-> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、当前登录身份。
+> 版本: 0.7（ADR-0016：长期记忆管理 API）
+> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、长期记忆、当前登录身份。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
 ## 1. 定位
@@ -194,7 +194,29 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 - 只记元数据：不含参数原文、正文与 token；参数仅留 `args_digest`。明细保留 30 天，更早数据由写入路径节流清理。
 - 非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
 
-### 4.10 前端
+### 4.10 长期记忆（ADR-0016）
+
+只服务管理台与聚合排障；会话抽取的注入由 worker 在进程内读取已发布快照，不经过本入口。
+非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
+
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| GET | `/api/v1/kb/memories?status=&q=&limit=&offset=` | `status` ∈ `active/deprecated/all`（默认 `all`）；`q` 同时匹配标题与结论；返回 `{items,total,offset,limit}`，`updated_at` 倒序 |
+| GET | `/api/v1/kb/memories/{slug}` | 单条 + 最近 20 条修订（`revisions`，按时间正序） |
+| PATCH | `/api/v1/kb/memories/{slug}` | 部分更新；必填 `expected_revision`；可改 `title/conclusion/boundary/invalidation/confidence/contradicts`，多传字段返回 422/`1012`，全部省略也返回 422/`1012` |
+| POST | `/api/v1/kb/memories/{slug}/deprecate` | `{expected_revision, reason, superseded_by?, actor?}`；只允许废弃 `active` 条目，替代条目必须存在且为 `active` |
+| GET | `/api/v1/kb/memories/candidates?status=&limit=` | `status` ∈ `pending/conflict/promoted/all`（默认 `pending`）；返回 `{items,total}`，不分页，`last_seen_at` 倒序 |
+| GET | `/api/v1/kb/memories/snapshots?limit=` | 版本倒序；返回 `{items,total}`，每项含冻结的 `entries` 与 `item_count` |
+| POST | `/api/v1/kb/memories/snapshots` | 发布；body `{note?, actor?}`；把当前全部 `active` 条目冻结为新版本，旧 `published` 置 `superseded` |
+| POST | `/api/v1/kb/memories/snapshots/{version}/activate` | 回滚到旧快照；`disabled` 快照不可重新激活（409/`1010`） |
+| POST | `/api/v1/kb/memories/snapshots/{version}/disable` | 停用当前 `published` 快照；body `{reason?, actor?}`；停用后没有 `published`，抽取不再注入 |
+
+- 条目主键是全局 kebab-case `slug`，不挂知识库，不进入 `kb_nodes` 检索；不提供删除，只能废弃。
+- 更新、废弃按条目 `revision` 做乐观锁：不匹配 409/`1010`；条目或版本不存在 404/`1011`。
+- 同一时刻至多一个 `published` 快照；发布、回滚、停用各写一条 `kb_write_audit`（`memory_snapshot` = 版本号）。
+- 响应里的 `evidence` 只含节点 id 与来源定位，不含正文；管理台只展示元数据与结论。
+
+### 4.11 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 

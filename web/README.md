@@ -1,6 +1,6 @@
 # memhub-web — 本地知识库管理台
 
-kb-api（`memhub kb`，默认 `127.0.0.1:8701`）托管的前端：**按知识库隔离**的导航（每个库有自己的概览/节点/图谱）、节点列表与检索、节点详情编辑（标题/正文/标签/层级/置信度）、出边编辑、废弃与归档删除、回收站恢复、治理审计，以及基于 Cytoscape + fCoSE 自绘的知识图谱（数据直接读真源，不再内联 semantica explorer）。
+kb-api（`memhub kb`，默认 `127.0.0.1:8701`）托管的前端：**按知识库隔离**的导航（每个库有自己的概览/节点/图谱）、节点列表与检索、节点详情编辑（标题/正文/标签/层级/置信度）、出边编辑、废弃与归档删除、回收站恢复、治理审计、长期记忆条目/候选/快照治理，以及基于 Cytoscape + fCoSE 自绘的知识图谱（数据直接读真源，不再内联 semantica explorer）。
 
 ## 来源与许可
 
@@ -51,7 +51,8 @@ memhub kb --web-dist web/dist --data-dir data
 
 ```
 src/routes/           文件路由（_app.index=知识库列表 / _app.kb.$project.{index,nodes,graph} /
-                      _app.nodes.index / _app.nodes.$ / _app.graph=全局图谱 / _app.audit / _app.trash）
+                      _app.nodes.index / _app.nodes.$ / _app.graph=全局图谱 / _app.audit /
+                      _app.traces / _app.memories / _app.trash）
 src/components/graph/graph-canvas.tsx   Cytoscape 图谱画布（布局、配色、过滤、搜索）
 src/components/nodes/nodes-browser.tsx  节点表格（全局与单库复用）
 src/components/layout/kb-nav-group.tsx  侧栏动态知识库分组

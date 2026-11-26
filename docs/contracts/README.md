@@ -1,4 +1,4 @@
-# 跨端契约（v0.16）
+# 跨端契约（v0.17）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -11,7 +11,7 @@
 | [source-registry.md](source-registry.md) | `sources.json` 本地源注册表、采集器行为、隐私边界 | 客户端、collector |
 | [ingest-api.md](ingest-api.md) | 游标、推送、心跳、原始队列清理、错误码、限流、幂等 | 客户端、服务端 |
 | [mcp-tools.md](mcp-tools.md) | 检索组 + 治理组工具、错误码、不变式 | agent、治理 agent、服务端 |
-| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、MCP 调用轨迹查询、并发与错误码 | 服务端、管理台前端 |
+| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、MCP 调用轨迹查询、长期记忆治理、并发与错误码 | 服务端、管理台前端 |
 
 ## 待定（阻塞项）
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.17 — 长期记忆管理 API（ADR-0016，[kb-admin-api.md](kb-admin-api.md) 0.7）：新增 `/api/v1/kb/memories*`——条目列表/详情/乐观锁更新/废弃、聚合候选查询、快照发布/回滚/停用；记忆不挂知识库、不进节点检索，也不提供给 MCP 消费方。
 - 0.16 — MCP 服务端自描述（[mcp-tools.md](mcp-tools.md) 0.8）：`initialize` 的 `instructions` 统一为 HTTP/stdio 共用常量，说明服务定位与「何时该检索」；七个工具补中英 `title`，`kb_search` 描述补触发场景与中英同义词，所有输入字段补 `description`；参数约束与返回结构不变。新增本地令牌生成器 `memhub mcp token`（输出一次性令牌与可直接粘贴的 grant，UTC 有效期、非空库名单，经 `Grant` 校验后输出）。
 - 0.15 — 发现层事件并入 MCP 调用轨迹（ADR-0018，[mcp-tools.md](mcp-tools.md) §5、[kb-admin-api.md](kb-admin-api.md) §4.9）：`initialize` 与 `tools/list` 与 `tools/call`、鉴权/路由拒绝同表记录，新增 `event`（`call`/`list_tools`/`initialize`）与 `tool_count`；查询默认只统计 `call`，另给连接漏斗汇总。`notifications/*` 与 `ping` 不记录。
 - 0.14 — 取消候选转正门槛（ADR-0014，[node-schema.md](node-schema.md) 0.5、[mcp-tools.md](mcp-tools.md) 0.7、[kb-admin-api.md](kb-admin-api.md) 0.6）：worker、MCP 与管理台写入一律 `canonical`，存量 `candidate` 由一次性迁移转正；检索默认排除 `deprecated`，`tier` 只保留 `canonical`/`all`；MCP 更新与废弃改为「创建者 actor 与调用方一致」，拒绝码 `not_candidate` 换成 `not_owner`。

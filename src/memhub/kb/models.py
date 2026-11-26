@@ -148,7 +148,126 @@ class KbWriteAudit(Base):
     node_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     result: Mapped[str] = mapped_column(Text, nullable=False)
+    # 会话抽取与快照生命周期审计记录所用的记忆版本；不记录记忆正文。
+    memory_snapshot: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = _timestamp()
+
+
+class KbMemoryEntry(Base):
+    """长期记忆条目（ADR-0016）：不挂项目、不进 `kb_nodes`，slug 全局唯一。"""
+
+    __tablename__ = "kb_memory_entries"
+    __table_args__ = (
+        CheckConstraint(r"slug ~ '^[a-z0-9][a-z0-9-]{0,99}$'", name="ck_kb_memory_entries_slug"),
+        CheckConstraint("status in ('active', 'deprecated')", name="ck_kb_memory_entries_status"),
+        CheckConstraint(
+            "confidence >= 0 and confidence <= 1", name="ck_kb_memory_entries_confidence"
+        ),
+        Index("ix_kb_memory_entries_status", "status", "updated_at"),
+        Index("ix_kb_memory_entries_updated", "updated_at"),
+    )
+
+    slug: Mapped[str] = mapped_column(Text, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    conclusion: Mapped[str] = mapped_column(Text, nullable=False)
+    boundary: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    invalidation: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    confidence: Mapped[float] = mapped_column(Double, nullable=False, server_default="0.5")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    deprecated_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    superseded_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contradicts: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    revision: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = _timestamp()
+    updated_at: Mapped[datetime] = _timestamp()
+
+
+class KbMemoryRevision(Base):
+    """记忆条目的不可变修订；`before`/`after` 是完整条目快照。"""
+
+    __tablename__ = "kb_memory_revisions"
+    __table_args__ = (Index("ix_kb_memory_revisions_slug", "slug", "created_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = _timestamp()
+
+
+class KbMemorySnapshot(Base):
+    """已发布/已回滚/已停用的记忆快照；至多一个 `published`。"""
+
+    __tablename__ = "kb_memory_snapshots"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('published', 'superseded', 'disabled')",
+            name="ck_kb_memory_snapshots_status",
+        ),
+        Index(
+            "uq_kb_memory_snapshots_published",
+            "status",
+            unique=True,
+            postgresql_where="status = 'published'",
+        ),
+    )
+
+    version: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    entries: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    actor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _timestamp()
+    published_at: Mapped[datetime | None] = _timestamp(nullable=True)
+
+
+class KbMemoryCandidate(Base):
+    """聚合产物中未达门槛或与现有条目冲突的候选；每个 slug 只留最新一行。"""
+
+    __tablename__ = "kb_memory_candidates"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('pending', 'conflict', 'promoted')",
+            name="ck_kb_memory_candidates_status",
+        ),
+        CheckConstraint(
+            "reason in ('below_threshold', 'conclusion_differs', 'deprecated')",
+            name="ck_kb_memory_candidates_reason",
+        ),
+        CheckConstraint(
+            "confidence >= 0 and confidence <= 1", name="ck_kb_memory_candidates_confidence"
+        ),
+        Index("ix_kb_memory_candidates_status", "status", "last_seen_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    conclusion: Mapped[str] = mapped_column(Text, nullable=False)
+    boundary: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    invalidation: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    confidence: Mapped[float] = mapped_column(Double, nullable=False, server_default="0.5")
+    session_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    project_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    contradicts: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
+    first_seen_at: Mapped[datetime] = _timestamp()
+    last_seen_at: Mapped[datetime] = _timestamp()
+    created_at: Mapped[datetime] = _timestamp()
+    updated_at: Mapped[datetime] = _timestamp()
 
 
 class KbMcpTrace(Base):

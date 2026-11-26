@@ -47,6 +47,7 @@ from memhub.queue.rawstore import (
 )
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
 from memhub.worker.llm import LLMClient, LLMError
+from memhub.worker.memory import MemoryContext
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 from memhub.worker.render import (
@@ -107,6 +108,8 @@ class WorkerConfig:
     is_registered: Callable[[str], Awaitable[bool]] | None = None
     # 运行态库；缺省时关闭消息 uuid 去重（管理台上传与 dev 联调保持旧行为）。
     state: StateStore | None = None
+    # 启动时固定的记忆快照；None 表示本次进程不注入，审计的 memory_snapshot 记 null。
+    memory: MemoryContext | None = None
 
     def registry(self) -> TargetRegistry:
         return self.target_registry or TargetRegistry(self.store)
@@ -478,6 +481,22 @@ async def _mark_blocks_seen(
         print(f"[worker] mark-seen failed {path.name}: {type(exc).__name__}", file=sys.stderr)
 
 
+async def _audit_session(config: WorkerConfig, project: str, result: str) -> None:
+    """记录一次会话抽取用了哪版记忆；文件存储没有审计表，只在 PG 上执行。"""
+    record = getattr(config.store, "record_write_audit", None)
+    if record is None:
+        return
+    version = config.memory.audit_version(project) if config.memory is not None else None
+    await record(
+        actor="worker",
+        project=project,
+        node_id=None,
+        action="extract_session",
+        result=result,
+        memory_snapshot=version,
+    )
+
+
 async def process_file(
     client: LLMClient,
     config: WorkerConfig,
@@ -541,7 +560,10 @@ async def process_file(
             model=config.model,
             max_chars=config.max_chars,
             max_tokens=config.max_tokens,
+            memory=config.memory,
+            project=target.project,
         )
+        await _audit_session(config, target.project, "ok" if extraction.nodes else "empty")
         if not extraction.nodes:
             # 抽取成功但没有节点同样记账：这条消息已经付过费、处理完了。
             await _mark_blocks_seen(config, target, blocks, path)

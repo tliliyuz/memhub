@@ -18,12 +18,19 @@ from anyio import Path as AsyncPath
 from memhub import __version__
 from memhub.contract import SourceKind, SourceRef
 from memhub.kb import archive, catalog, manage, target_access
+from memhub.kb.memory import MemoryAggregateError
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.session import create_runtime_store
+from memhub.kb.session import KbDsnMissing, create_runtime_store
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
 from memhub.worker.llm import AnthropicClient, LLMError
+from memhub.worker.memory import (
+    MemoryContext,
+    MemorySettings,
+    aggregate_memories,
+    load_memory_context,
+)
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 from memhub.worker.render import (
@@ -116,6 +123,18 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="只校验目录/配置并打印计划后退出（冒烟用）"
     )
 
+    aggregate = sub.add_parser(
+        "memory-aggregate", help="从跨项目 canonical 节点聚合长期记忆（周任务用）"
+    )
+    aggregate.add_argument("--since-days", type=int, default=7)
+    aggregate.add_argument("--min-sessions", type=int, default=3)
+    aggregate.add_argument("--min-projects", type=int, default=2)
+    aggregate.add_argument("--max-nodes", type=int, default=100)
+    aggregate.add_argument(
+        "--dry-run", action="store_true", help="仍然调用模型，只打印计划，不写库"
+    )
+    aggregate.add_argument("--publish", action="store_true", help="写入成功后发布新快照")
+
     api = sub.add_parser("api", help="启动 ingest-api（绑定地址由 MEMHUB_HTTP_HOST 决定）")
     api.add_argument("--allow-non-loopback", action="store_true", help="允许绑定非回环地址")
 
@@ -183,6 +202,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "purge-expired": _purge_expired,
         "forget-messages": _forget_messages,
         "worker": _worker,
+        "memory-aggregate": _memory_aggregate,
         "api": _api,
         "kb": _kb,
         "provision-device": _provision_device,
@@ -216,6 +236,26 @@ def _llm_client() -> tuple[AnthropicClient, str]:
     if not base_url or not api_key:
         raise SystemExit("缺少 MEMHUB_LLM_BASE_URL / MEMHUB_LLM_API_KEY（或开发态 ANTHROPIC_*）")
     return AnthropicClient(base_url, api_key), model
+
+
+def _memory_client() -> tuple[AnthropicClient, str]:
+    """聚合模型：`MEMHUB_LLM_MODEL_MEMORY` 优先，回退抽取模型；两者都缺不猜默认值。"""
+    base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
+    api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    if not base_url or not api_key:
+        raise ValueError("缺少 MEMHUB_LLM_BASE_URL / MEMHUB_LLM_API_KEY（或开发态 ANTHROPIC_*）")
+    model = (
+        os.environ.get("MEMHUB_LLM_MODEL_MEMORY", "").strip()
+        or os.environ.get("MEMHUB_LLM_MODEL_EXTRACT", "").strip()
+    )
+    if not model:
+        raise ValueError("缺少 MEMHUB_LLM_MODEL_MEMORY（且未设置 MEMHUB_LLM_MODEL_EXTRACT）")
+    return AnthropicClient(base_url, api_key), model
+
+
+def _memory_settings() -> MemorySettings:
+    """注入侧配置；非法值抛 ValueError，由入口按配置错误退出 2。"""
+    return MemorySettings.from_env(os.environ)
 
 
 async def _iter_files(path: Path, profile: str) -> list[Path]:
@@ -259,6 +299,14 @@ async def _ingest(args: argparse.Namespace) -> int:
         hint = "" if args.create_project else "；先在管理台建库，或加 --create-project"
         print(f"知识库 {project!r} 未登记或不在活动状态{hint}", file=sys.stderr)
         return 2
+    memory: MemoryContext | None = None
+    if args.profile == "sessions" and not args.dry_run:
+        # 手工路径与 worker 同口径：启动时读一次已发布快照；非法配置按退出码 2 处理。
+        try:
+            memory = await load_memory_context(store, _memory_settings())
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     template = await load_profile(args.profile)
     client, model = (None, "") if args.dry_run else _llm_client()
     if client is None:
@@ -293,6 +341,16 @@ async def _ingest(args: argparse.Namespace) -> int:
                         blocks=blocks,
                         model=model,
                         max_chars=args.max_chars,
+                        memory=memory,
+                        project=project,
+                    )
+                    await store.record_write_audit(
+                        actor="worker",
+                        project=project,
+                        node_id=None,
+                        action="extract_session",
+                        result="ok" if extraction.nodes else "empty",
+                        memory_snapshot=memory.audit_version(project) if memory else None,
                     )
                     if not extraction.nodes:
                         print(f"  skip {path.name}: 无可合并的会话证据")
@@ -334,6 +392,67 @@ async def _ingest(args: argparse.Namespace) -> int:
 
     print(f"\n完成: {created} 新建 / {updated} 更新 / {failed} 失败；真源=PG（schema kb）")
     return 1 if failed else 0
+
+
+async def _memory_aggregate(args: argparse.Namespace) -> int:
+    """周期聚合入口（规格 §5.5）。退出码：0 成功（含无节点）；1 聚合失败；2 配置错误。"""
+    try:
+        store = _runtime_store(args)
+    except KbDsnMissing as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        template = await load_profile("memory")
+        try:
+            client, model = _memory_client()
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        try:
+            report = await aggregate_memories(
+                client,
+                store,
+                model=model,
+                template=template,
+                since_days=args.since_days,
+                min_sessions=args.min_sessions,
+                min_projects=args.min_projects,
+                max_nodes=args.max_nodes,
+                dry_run=args.dry_run,
+                publish=args.publish,
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        except (MemoryAggregateError, LLMError) as exc:
+            print(f"聚合失败: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            await client.aclose()
+    finally:
+        await store.aclose()
+
+    if report.nodes == 0:
+        print("没有可聚合节点")
+        return 0
+    print(
+        f"输入节点 {report.nodes}，产出记忆 {report.drafts}，"
+        f"{'dry-run' if report.dry_run else '已写库'}"
+    )
+    for write in report.writes:
+        print(
+            f"  [{write.action}] {write.slug} "
+            f"sessions={write.session_count} projects={write.project_count}"
+        )
+    for candidate in report.candidates:
+        print(
+            f"  [{candidate.status}] {candidate.slug} "
+            f"sessions={candidate.session_count} projects={candidate.project_count} "
+            f"reason={candidate.reason}"
+        )
+    if report.published is not None:
+        print(f"已发布快照 v{report.published}")
+    return 0
 
 
 async def _recover_kb_archive(args: argparse.Namespace) -> int:
@@ -485,6 +604,11 @@ async def _worker(args: argparse.Namespace) -> int:
     if not data_dir:
         print("缺少 MEMHUB_DATA_DIR", file=sys.stderr)
         return 2
+    try:
+        memory_settings = _memory_settings()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     store = _runtime_store(args)
     if args.dry_run:
         # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰真源。
@@ -498,6 +622,7 @@ async def _worker(args: argparse.Namespace) -> int:
         )
         await store.aclose()
         return 0
+    memory = await load_memory_context(store, memory_settings)
     base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
     api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     if not base_url or not api_key:
@@ -550,6 +675,7 @@ async def _worker(args: argparse.Namespace) -> int:
         limit=args.limit,
         is_registered=state.is_registered if state is not None else None,
         state=state,
+        memory=memory,
     )
     try:
         if args.once:

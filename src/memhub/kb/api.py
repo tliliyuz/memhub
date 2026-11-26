@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from anyio import Path as AsyncPath
@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, QuestionStatus, Tier
 from memhub.kb import catalog, manage, query, trace_query
+from memhub.kb.errors import RevisionConflict
 from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.session import KB_SCHEMA, create_runtime_store
 from memhub.kb.target_access import TargetUnavailable, registered_active
@@ -183,6 +184,45 @@ class KbUpdate(BaseModel):
     description: str | None = None
 
 
+class MemoryUpdate(BaseModel):
+    """条目内容更新；`status` 与废弃原因只能走废弃接口。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: str = Field(min_length=1)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    conclusion: str | None = Field(default=None, min_length=1)
+    boundary: str | None = None
+    invalidation: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    contradicts: list[str] | None = None
+    actor: str = "ui"
+
+
+class MemoryDeprecate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    superseded_by: str | None = None
+    actor: str = "ui"
+
+
+class MemorySnapshotPublish(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = ""
+    actor: str = "ui"
+
+
+class MemorySnapshotDisable(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # 仅作为契约字段保留；停用审计不记录原因（审计表没有原因列）。
+    reason: str = ""
+    actor: str = "ui"
+
+
 class KnowledgeApi:
     """API 运行时状态：真源存储。"""
 
@@ -308,6 +348,125 @@ def create_app(
     @app.get("/api/v1/kb/stats")
     async def stats() -> dict[str, Any]:
         return await manage.stats(api.store)
+
+    # ---- 长期记忆（ADR-0016，规格 §8）----
+
+    def _memories_unavailable() -> JSONResponse | None:
+        if isinstance(api.store, PgKnowledgeStore):
+            return None
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": int(ErrorCode.INTERNAL),
+                "message": "长期记忆只在 PG 存储上可用",
+                "data": {},
+            },
+        )
+
+    def _revision_conflict(exc: RevisionConflict) -> manage.ConflictError:
+        return manage.ConflictError(
+            "记忆已被其他人/进程修改，请刷新后重试",
+            {"expected": exc.expected, "current": exc.current},
+        )
+
+    # 注意顺序：`/memories/{slug}` 会吞掉静态子路径，候选与快照必须先注册。
+    @app.get("/api/v1/kb/memories", response_model=None)
+    async def list_memories(
+        status: Literal["active", "deprecated", "all"] = "all",
+        q: str | None = None,
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        return await api.store.list_memories(status=status, q=q, limit=limit, offset=offset)
+
+    @app.get("/api/v1/kb/memories/candidates", response_model=None)
+    async def list_memory_candidates(
+        status: Literal["pending", "conflict", "promoted", "all"] = "pending",
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        return await api.store.list_memory_candidates(status=status, limit=limit)
+
+    @app.get("/api/v1/kb/memories/snapshots", response_model=None)
+    async def list_memory_snapshots(
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        items = await api.store.list_memory_snapshots(limit=limit)
+        return {"items": items, "total": len(items)}
+
+    @app.post("/api/v1/kb/memories/snapshots", response_model=None)
+    async def publish_memory_snapshot(
+        body: MemorySnapshotPublish | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        payload = body or MemorySnapshotPublish()
+        return await api.store.publish_memory_snapshot(
+            actor=f"ui:{payload.actor}", note=payload.note
+        )
+
+    @app.post("/api/v1/kb/memories/snapshots/{version}/activate", response_model=None)
+    async def activate_memory_snapshot(
+        version: int, actor: str = "ui"
+    ) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        return await api.store.activate_memory_snapshot(version, actor=f"ui:{actor}")
+
+    @app.post("/api/v1/kb/memories/snapshots/{version}/disable", response_model=None)
+    async def disable_memory_snapshot(
+        version: int, body: MemorySnapshotDisable | None = None
+    ) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        payload = body or MemorySnapshotDisable()
+        return await api.store.disable_memory_snapshot(version, actor=f"ui:{payload.actor}")
+
+    @app.get("/api/v1/kb/memories/{slug}", response_model=None)
+    async def get_memory(slug: str) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        entry = await api.store.get_memory(slug)
+        entry["revisions"] = await api.store.memory_revisions(slug, limit=20)
+        return entry
+
+    @app.patch("/api/v1/kb/memories/{slug}", response_model=None)
+    async def update_memory(slug: str, body: MemoryUpdate) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        patch = body.model_dump(exclude={"expected_revision", "actor"}, exclude_none=True)
+        if not patch:
+            raise manage.InvalidError("没有可更新的字段")
+        try:
+            return await api.store.update_memory(
+                slug,
+                expected_revision=body.expected_revision,
+                patch=patch,
+                actor=f"ui:{body.actor}",
+                reason="update",
+            )
+        except RevisionConflict as exc:
+            raise _revision_conflict(exc) from exc
+
+    @app.post("/api/v1/kb/memories/{slug}/deprecate", response_model=None)
+    async def deprecate_memory(slug: str, body: MemoryDeprecate) -> dict[str, Any] | JSONResponse:
+        if (unavailable := _memories_unavailable()) is not None:
+            return unavailable
+        try:
+            return await api.store.deprecate_memory(
+                slug,
+                expected_revision=body.expected_revision,
+                reason=body.reason,
+                superseded_by=body.superseded_by,
+                actor=f"ui:{body.actor}",
+            )
+        except RevisionConflict as exc:
+            raise _revision_conflict(exc) from exc
 
     # ---- 知识库（project）----
 

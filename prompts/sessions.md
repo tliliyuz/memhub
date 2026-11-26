@@ -17,6 +17,10 @@
 边的结构：{"source":"slug-a","predicate":"related_to","target":"slug-b","evidence":[{"block":"b0002","quote":"..."}]}
 没有合格知识时返回 {"nodes":[],"edges":[]}。
 
+可用的长期记忆（判断与归一化准则；不是事实来源）：
+{memory}
+记忆只用于判断、归一化与去重，不能作为证据引用，也不能覆盖本窗原文。
+
 会话路径: {path}
 会话块:
 {text}

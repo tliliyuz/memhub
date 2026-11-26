@@ -1,5 +1,6 @@
 import {
   Activity,
+  Brain,
   Database,
   Layers,
   LayoutDashboard,
@@ -37,6 +38,7 @@ export const sidebarData: SidebarData = {
       items: [
         { title: '审计', url: '/audit', icon: ShieldCheck },
         { title: '调用轨迹', url: '/traces', icon: Activity },
+        { title: '长期记忆', url: '/memories', icon: Brain },
         { title: '回收站', url: '/trash', icon: Trash2 },
       ],
     },
