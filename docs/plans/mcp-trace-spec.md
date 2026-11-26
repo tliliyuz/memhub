@@ -5,7 +5,7 @@
 | 文档状态 | draft（待负责人评审） |
 | 最后更新 | 2026-11-26 |
 | 适用范围 | `kb_mcp_trace` 数据模型、记录语义（含发现层事件）、可靠落库、保留期、管理台 API 与页面、验收条件 |
-| 不负责 | 架构裁决（见 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)、[ADR-0017](../decisions/ADR-0017-mcp-discovery-trace.md)）、MCP 工具契约（见 [mcp-tools.md](../contracts/mcp-tools.md)）、管理台接口总表（见 [kb-admin-api.md](../contracts/kb-admin-api.md)） |
+| 不负责 | 架构裁决（见 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)、[ADR-0018](../decisions/ADR-0018-mcp-discovery-trace.md)）、MCP 工具契约（见 [mcp-tools.md](../contracts/mcp-tools.md)）、管理台接口总表（见 [kb-admin-api.md](../contracts/kb-admin-api.md)） |
 
 ## 1. 目标与范围
 
@@ -14,7 +14,7 @@
 ### 1.1 本轮范围
 
 - `kb_mcp_trace` 表与 Alembic `0002` / `0004` 迁移。
-- HTTP MCP 入口的记录：`tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`（ADR-0017）。
+- HTTP MCP 入口的记录：`tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`（ADR-0018）。
 - 可靠的写入路径（独立事务 + 重试 + 本地 spool 补投）。
 - 凭据可选 `name` 与降级显示。
 - 30 天保留的节流清理。
@@ -213,7 +213,7 @@
 - `docs/contracts/kb-admin-api.md` §4.9「MCP 调用轨迹」同步发现层字段与漏斗。
 - `docs/contracts/mcp-tools.md` §5「可观测性」同步发现层记录范围。
 - `docs/tech/ENVIRONMENT.md` 新增 `MEMHUB_KB_TRACE_SPOOL`（可选）并说明失败语义。
-- `docs/decisions/README.md` 登记 ADR-0015 与 ADR-0017。
+- `docs/decisions/README.md` 登记 ADR-0015 与 ADR-0018。
 - `docs/plans/README.md` 登记本规格。
 - `docs/CHANGELOG.md` 行为变更记录。
 
@@ -262,7 +262,7 @@
 | 凭据名缺失时的显示 | 降级显示 `credential_id` | 2026-11-25 |
 | 明细保留期 | 30 天 | 2026-11-25 |
 | 写入语义 | 可靠落库（重试 + 本地 spool），不接受 best-effort | 2026-11-25 |
-| 发现层事件是否落库 | 并入 `kb_mcp_trace`，用 `event` 区分（ADR-0017） | 2026-11-26 |
+| 发现层事件是否落库 | 并入 `kb_mcp_trace`，用 `event` 区分（ADR-0018） | 2026-11-26 |
 | 漏斗口径 | 连接 = `initialize` 成功数；列工具 = `tools/list` 成功数；实际调用 = `call` 的 ok+error；拒绝不计入调用 | 2026-11-26 |
 | 列表接口默认事件 | `event=call`，保持既有页面与筛选语义 | 2026-11-26 |
 

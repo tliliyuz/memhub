@@ -1,6 +1,6 @@
 """精确 HTTP 路径与请求级授权；协议解析交给官方 MCP SDK。
 
-调用轨迹（ADR-0015 / ADR-0017）：`tools/call`、鉴权/路由拒绝，以及发现层的
+调用轨迹（ADR-0015 / ADR-0018）：`tools/call`、鉴权/路由拒绝，以及发现层的
 `initialize` / `tools/list` 记入 `kb_mcp_trace`，只记元数据；记录失败不改变响应。
 通知与 `ping` 不属于连接漏斗，不记录。
 """
@@ -290,7 +290,7 @@ def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
                     _log.warning("MCP 调用轨迹记录失败: %s", exc)
 
     async def observe_discovery(ctx: ServerRequestContext, call_next: Any) -> Any:
-        """记录 `initialize` / `tools/list`（ADR-0017）；其余请求不落轨迹。
+        """记录 `initialize` / `tools/list`（ADR-0018）；其余请求不落轨迹。
 
         SDK 的 `initialize` 由 runner 内联处理、不可覆盖，只能经
         `Server.middleware` 观测；结果以 wire dict 返回。

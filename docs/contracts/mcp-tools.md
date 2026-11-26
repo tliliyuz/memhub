@@ -85,7 +85,7 @@
 
 ## 5. 可观测性
 
-- HTTP 入口把每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list` 记入 `kb_mcp_trace`（ADR-0015 / ADR-0017，查询接口见 [kb-admin-api.md](kb-admin-api.md) §4.9）。
+- HTTP 入口把每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list` 记入 `kb_mcp_trace`（ADR-0015 / ADR-0018，查询接口见 [kb-admin-api.md](kb-admin-api.md) §4.9）。
 - 记录字段限于元数据：时间、请求 id、JSON-RPC id、事件类型、凭据标识与名称快照、工具（或列工具时的工具数）、状态、错误码、耗时、结果大小、参数摘要、授权库范围与客户端标识。
 - **不记录**参数原文、查询词、正文或任何会话内容；参数只保留 sha256 摘要。token 与其完整摘要不落库。
 - 记录写入不改变工具返回；写入失败按重试 → 本地 spool 补投处理，不允许静默丢弃。

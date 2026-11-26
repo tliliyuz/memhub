@@ -89,7 +89,7 @@ async def mcp_traces_summary(store: PgKnowledgeStore, *, days: int = 7) -> dict[
     """近 `days` 天的调用汇总：状态分布、按工具、按凭据，以及连接漏斗。
 
     既有统计（`total`/`ok`/`error`/`rejected`/`tools`/`credentials`）只看
-    `event=call`，保持原有语义；漏斗另取发现层事件（ADR-0017）。
+    `event=call`，保持原有语义；漏斗另取发现层事件（ADR-0018）。
     """
     since = datetime.now(UTC) - timedelta(days=days)
     call_events = (KbMcpTrace.called_at >= since, KbMcpTrace.event == "call")

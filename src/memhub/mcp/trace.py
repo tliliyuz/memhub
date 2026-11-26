@@ -52,7 +52,7 @@ class TraceEntry:
     args_digest: str | None
     projects: list[str] | None
     client: str | None
-    # 发现层事件（ADR-0017）；旧 spool 行没有这两个键时按调用事件还原。
+    # 发现层事件（ADR-0018）；旧 spool 行没有这两个键时按调用事件还原。
     event: str = "call"
     tool_count: int | None = None
 

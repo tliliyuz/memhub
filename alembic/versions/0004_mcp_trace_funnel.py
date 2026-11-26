@@ -1,4 +1,4 @@
-"""kb_mcp_trace 增加发现层事件与工具数，支撑连接漏斗（ADR-0017）。
+"""kb_mcp_trace 增加发现层事件与工具数，支撑连接漏斗（ADR-0018）。
 
 `event` 区分 `call` / `list_tools` / `initialize`；存量行一律回填 `call`，
 保持旧数据的调用语义。`tool_count` 只在 `tools/list` 成功时非空。

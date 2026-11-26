@@ -178,7 +178,7 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 
 ### 4.9 MCP 调用轨迹
 
-只读查询 `kb_mcp_trace`（ADR-0015 / ADR-0017）；服务端在 `/mcp` 入口记录每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`。
+只读查询 `kb_mcp_trace`（ADR-0015 / ADR-0018）；服务端在 `/mcp` 入口记录每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`。
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
