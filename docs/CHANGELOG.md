@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-26（会话 fork 重复采集：消息 uuid 去重 ADR 草案）
+
+- `docs(adr)`：新增 [ADR-0017](decisions/ADR-0017-session-message-uuid-dedupe.md)「会话去重单位改为消息 uuid，fork 不再重复抽取」，状态 `proposed`。裁决要点：去重单位从「文件切片 sha256」改为消息 `uuid`；作用点在 worker 渲染/抽取之前，ingest 协议层与 raw 队列保持原样；索引键为 `(project, source_id, uuid)`、存运行态库；只在抽取与 merge 成功后记账；整片命中跳过 LLM；客户端契约与 `duplicates` 语义不变；重扫只补未见消息。备选（ingest 落盘前过滤、客户端识别 fork、切片哈希归一化、merge 层正文去重、source 级键、按会话级 fork 标记跳文件）均已记录否决理由。
+- 背景：agent-console 2026-11-26 实测 `--fork-session` 产生新 `.jsonl`，fork 点前消息原样复制、仅每行 `sessionId` 改写；31 行会话 fork 后 36 行，18 条消息 `uuid` 相同但无一字节相同，jsonl 无行级 fork 标记。服务端现有键 `(source_id, 切片 sha256)` 与 `(device_id, source_id, path)` 均无法识别，导致整段重传、重复抽取与近似重复知识。
+- 范围：本次只写 ADR，不含规格、测试与实现；ADR 转为 `accepted` 前不进入后续阶段。ADR 检查：本条即新增 ADR，编号 0017 未被占用（各分支现有编号最大为 0016）。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 均通过。
+
 ## 2026-11-26（浏览器 space 约束补齐并纳入验收结论）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增与 eval-platform-for-ai 一致的 space 约束：ego-lite 页面验收只用一个 space，不得另开第二个或占用用户的 space 与标签页，验收结束后关闭本次打开的全部标签页与 space；补写「归属无法确认时先问负责人，不允许以不确定为由默认保留」。

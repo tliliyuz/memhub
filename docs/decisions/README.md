@@ -21,6 +21,7 @@
 | [ADR-0012](ADR-0012-candidate-update-and-deprecate.md) | 候选区闭环：允许更新与废弃自己的候选 | accepted |
 | [ADR-0015](ADR-0015-mcp-call-trace.md) | MCP 调用轨迹落库，治理台可见 | accepted |
 | [ADR-0016](ADR-0016-long-term-memory.md) | 长期记忆独立成域，并反向注入会话抽取 | proposed |
+| [ADR-0017](ADR-0017-session-message-uuid-dedupe.md) | 会话去重单位改为消息 uuid，fork 不再重复抽取 | proposed |
 
 模板：
 
