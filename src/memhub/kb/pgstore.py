@@ -1128,6 +1128,7 @@ class PgKnowledgeStore:
             request_id=entry.request_id,
             rpc_id=entry.rpc_id,
             called_at=entry.called_at,
+            event=entry.event,
             credential_id=entry.credential_id,
             credential_name=entry.credential_name,
             tool=entry.tool,
@@ -1140,6 +1141,7 @@ class PgKnowledgeStore:
             args_digest=entry.args_digest,
             projects=entry.projects,
             client=entry.client,
+            tool_count=entry.tool_count,
         )
         statement = statement.on_conflict_do_nothing(index_elements=["trace_id"])
         async with self._session() as session:

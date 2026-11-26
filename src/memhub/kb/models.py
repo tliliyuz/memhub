@@ -165,6 +165,7 @@ class KbMcpTrace(Base):
         Index("ix_kb_mcp_trace_tool", "tool", "called_at"),
         Index("ix_kb_mcp_trace_credential", "credential_id", "called_at"),
         Index("ix_kb_mcp_trace_status", "status", "called_at"),
+        Index("ix_kb_mcp_trace_event", "event", "called_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -172,6 +173,7 @@ class KbMcpTrace(Base):
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
     rpc_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     called_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event: Mapped[str] = mapped_column(Text, nullable=False, default="call")
     credential_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     credential_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -184,3 +186,4 @@ class KbMcpTrace(Base):
     args_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
     projects: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     client: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
