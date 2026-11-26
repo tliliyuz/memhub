@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-26（部署文档：kb 新表默认权限与迁移 DSN 注入方式）
+
+- `docs(deploy)`：`deploy/README.md`「知识真源切换」第 1 步补「默认权限」要求：建角色时以 `memhub_kb_owner` 执行 `ALTER DEFAULT PRIVILEGES ... GRANT ... ON TABLES / SEQUENCES TO memhub_kb_app`，并给出存量表的补授权语句与升级后 `has_table_privilege` / `has_sequence_privilege` 核对 SQL。缺这步不会让迁移失败，而是新表对运行态角色不可见：MCP 调用轨迹写入全部退到 spool、轨迹查询报权限错（2026-11-26 发版的 `0002_kb_mcp_trace` 已实际命中，机上以手工 `GRANT` 绕过）。
+- `docs(deploy)`：第 1 步明确 `/etc/memhub/env` 只放 `MEMHUB_KB_DB_URL`；`MEMHUB_KB_MIGRATE_DB_URL` 带 DDL 权限，不得写进同时注入 ingest 与 worker 的常驻 env。第 3 步改为「一次性 0600 env-file 只注入迁移 DSN → 执行 alembic → `shred -u`」的写法。
+- 验证：纯文档修订，无业务 RED（例外理由：只改部署步骤说明，不涉及运行时代码与契约）；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py` 与 `git diff --check` 通过。ADR 检查：未命中（补 ADR-0013 角色的运维步骤，不新增架构决策）。
+
 ## 2026-11-26（取消候选门槛：写入即 canonical，ADR-0014）
 
 - `feat(kb)`：worker 合并、MCP `kb_write_candidate` 与管理台新建/更新一律写 `tier=canonical`；已有节点（任意层级）不再跳过，继续追加式合并，`MergeReport.skipped_canonical` 与 CLI 的跳过计数一并删除。规格见 [tier-canonical-spec](plans/tier-canonical-spec.md)，决策见 [ADR-0014](decisions/ADR-0014-drop-candidate-tier-gate.md)。
