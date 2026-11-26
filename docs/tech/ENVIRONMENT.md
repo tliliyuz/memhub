@@ -24,7 +24,7 @@
 | `MEMHUB_DB_URL` | 生产采集必需 | 空 | ingest / worker | 格式 `postgresql://user@host:port/db`；两者必须使用同一登记库。ingest 无 DSN 使用进程内状态；独立 worker 无 DSN 无法验证采集设备，保留采集队列等待验证，不影响管理台上传 |
 | `MEMHUB_KB_DB_URL` | 所有运行入口必需（kb-api / MCP / worker / ingest / CLI） | 空 | 运行入口（`memhub.kb.session`） | 指向只对 `kb_*` 做 DML 的受限角色，库为 `memhub_prod`、`search_path` 固定 `kb`；DSN 必须自带口令（kb 容器只注入 `/etc/memhub/env.kb`，没有 `PGPASSWORD`）；缺失或为空抛 `KbDsnMissing`，**不回退文件/内存**。不得复用 `MEMHUB_DB_URL`（那是运行态角色，能碰运行态表与令牌摘要）。ingest 只用它读 `kb_projects` 校验采集目标 |
 | `MEMHUB_KB_MIGRATE_DB_URL` | 迁移时必需 | 空 | Alembic（`alembic/env.py`） | 迁移角色，对 `kb_*` 有 DDL；`memhub migrate-kb` / 部署步骤带外执行，不在 kb 容器启动时跑。缺失抛 `KbDsnMissing`。运行态不读它。DSN 可写 `postgresql://`，入口按 psycopg 3 归一化为 `postgresql+psycopg://`（镜像里没有 psycopg2） |
-| `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约与单元测试（`tests/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。未设置时 PG 用例 skip，**skip 不计为通过** |
+| `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约与单元测试（`tests/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。解析顺序：进程环境变量优先；未设置或为空时依次读仓库根 `.env` 与（worktree 场景）主 checkout 的 `.env`，只读这一个键，空值视同未设置。仍未获得时 PG 用例 skip，**skip 不计为通过** |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
 | `MEMHUB_HTTP_PORT` | 否 | `8700` | ingest | 非法端口启动失败 |
 | `MEMHUB_LLM_BASE_URL` | 是 | — | worker | 启动失败（worker 不降级为无模型运行） |
