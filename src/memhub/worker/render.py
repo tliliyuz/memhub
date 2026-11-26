@@ -20,6 +20,7 @@ class SessionBlock:
     id: str
     role: str
     text: str
+    message_id: str | None = None
 
 
 def render_session_blocks(
@@ -29,7 +30,7 @@ def render_session_blocks(
     return _number_blocks(_dialogue_blocks(text), max_block_chars)
 
 
-def _dialogue_blocks(text: str) -> Iterator[tuple[str, str]]:
+def _dialogue_blocks(text: str) -> Iterator[tuple[str, str, str | None]]:
     # JSONL 只在换行字节分隔；文本里的 Unicode 行分隔符不是事件边界。
     for line in text.split("\n"):
         if not line.strip():
@@ -48,15 +49,18 @@ def _dialogue_blocks(text: str) -> Iterator[tuple[str, str]]:
             continue
         if message.get("role", role) != role:
             continue
+        # fork 会改写 sessionId 但保留消息 uuid，这是跨文件去重的唯一可靠身份。
+        raw_id = event.get("uuid")
+        message_id = raw_id if isinstance(raw_id, str) and raw_id else None
         content = message.get("content")
         if isinstance(content, str):
-            yield role, content
+            yield role, content, message_id
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     value = block.get("text")
                     if isinstance(value, str):
-                        yield role, value
+                        yield role, value, message_id
 
 
 def render_plaintext_blocks(
@@ -64,27 +68,27 @@ def render_plaintext_blocks(
 ) -> list[SessionBlock]:
     """仅用于显式的纯文本会话，不是 JSONL 解析回退。"""
     paragraphs = re.split(r"\r?\n[^\S\r\n]*\r?\n", text)
-    return _number_blocks((("text", part) for part in paragraphs), max_block_chars)
+    return _number_blocks(((("text", part, None) for part in paragraphs)), max_block_chars)
 
 
-def _number_blocks(pieces: Iterable[tuple[str, str]], limit: int) -> list[SessionBlock]:
+def _number_blocks(pieces: Iterable[tuple[str, str, str | None]], limit: int) -> list[SessionBlock]:
     if limit <= 0:
         raise ValueError("max_block_chars 必须为正")
     result: list[SessionBlock] = []
     ordinal = 0
-    for role, raw in pieces:
+    for role, raw, message_id in pieces:
         text = raw.strip()
         if not text:
             continue
         ordinal += 1
         block_id = f"b{ordinal:04d}"
         if len(text) <= limit:
-            result.append(SessionBlock(block_id, role, text))
+            result.append(SessionBlock(block_id, role, text, message_id))
             continue
         for part, start in enumerate(range(0, len(text), limit), 1):
             value = text[start : start + limit]
             if value.strip():
-                result.append(SessionBlock(f"{block_id}.{part}", role, value))
+                result.append(SessionBlock(f"{block_id}.{part}", role, value, message_id))
     return result
 
 

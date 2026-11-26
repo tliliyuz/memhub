@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from datetime import time as dt_time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -49,11 +50,15 @@ from memhub.worker.llm import LLMClient, LLMError
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 from memhub.worker.render import (
+    SessionBlock,
     render_jsonl_events,
     render_plaintext_blocks,
     render_session_blocks,
     truncate_blocks,
 )
+
+if TYPE_CHECKING:
+    from memhub.ingest.store import StateStore
 
 PROFILE_BY_SOURCE = {"sessions": "sessions", "wiki": "wiki", "docs": "wiki"}
 
@@ -64,6 +69,21 @@ class AuthorizationDenied(ValueError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class MessageIndexUnavailable(RuntimeError):
+    """已见消息索引不可用（表缺失/库不可用）：推迟文件，不消耗重试也不调 LLM。"""
+
+
+@dataclass(frozen=True)
+class ProcessedFile:
+    """单文件处理结果；`skipped_extraction` 表示消息全部见过、没有调用模型。"""
+
+    created: int = 0
+    updated: int = 0
+    edges: int = 0
+    skipped_extraction: bool = False
+    filtered_messages: int = 0
 
 
 @dataclass
@@ -85,6 +105,8 @@ class WorkerConfig:
     max_attempts: int = 3
     target_registry: TargetRegistry | None = None
     is_registered: Callable[[str], Awaitable[bool]] | None = None
+    # 运行态库；缺省时关闭消息 uuid 去重（管理台上传与 dev 联调保持旧行为）。
+    state: StateStore | None = None
 
     def registry(self) -> TargetRegistry:
         return self.target_registry or TargetRegistry(self.store)
@@ -115,6 +137,7 @@ class RoundReport:
     edges: int = 0
     errors: list[str] = field(default_factory=list)
     quarantined: int = 0
+    deduped: int = 0
 
 
 def parse_window(spec: str) -> tuple[dt_time, dt_time]:
@@ -339,6 +362,7 @@ def _document_text(content: str, path: str) -> str:
 class QueueTarget:
     project: str
     device_id: str
+    source_id: str
     source_type: str
     console: bool
 
@@ -380,10 +404,10 @@ def _queue_target(config: WorkerConfig, payload: dict[str, object], path: Path) 
     if producer == "console" or (producer is None and exact_console):
         if not exact_console:
             raise AuthorizationDenied("console_identity_invalid")
-        return QueueTarget(project, device_id, source_type, console=True)
+        return QueueTarget(project, device_id, source_id, source_type, console=True)
     if collector_device_reserved(device_id):
         raise AuthorizationDenied("console_identity_invalid")
-    return QueueTarget(project, device_id, source_type, console=False)
+    return QueueTarget(project, device_id, source_id, source_type, console=False)
 
 
 async def _authorize(config: WorkerConfig, registry: TargetRegistry, target: QueueTarget) -> None:
@@ -410,14 +434,58 @@ async def _authorize(config: WorkerConfig, registry: TargetRegistry, target: Que
         raise TargetUnavailable("archive_state_unavailable") from exc
 
 
+async def _drop_seen_blocks(
+    state: StateStore, target: QueueTarget, blocks: list[SessionBlock], path: Path
+) -> tuple[list[SessionBlock], int]:
+    """过滤已成功抽取过的消息块；返回 (保留块, 已见消息数)。
+
+    只有带 `message_id` 的块参与过滤；无 uuid 的来源（纯文本等）行为不变。
+    索引查询失败抛 `MessageIndexUnavailable`，由调用方推迟整份文件。
+    """
+    ids = sorted({block.message_id for block in blocks if block.message_id is not None})
+    if not ids:
+        return blocks, 0
+    try:
+        seen = await state.seen_messages(target.project, target.source_id, ids)
+    except Exception as exc:
+        # 不同 StateStore 实现可能抛出不同类型的数据库异常。
+        raise MessageIndexUnavailable("seen_lookup") from exc
+    if not seen:
+        return blocks, 0
+    kept = [block for block in blocks if block.message_id is None or block.message_id not in seen]
+    print(
+        f"[worker] dedupe {path.name}: 已见 {len(seen)} 条，剩余 {len(ids) - len(seen)} 条",
+        flush=True,
+    )
+    if not kept:
+        print(f"[worker] dedupe {path.name}: 全部消息已见过，跳过抽取", flush=True)
+    return kept, len(seen)
+
+
+async def _mark_blocks_seen(
+    config: WorkerConfig, target: QueueTarget, blocks: list[SessionBlock], path: Path
+) -> None:
+    """抽取与 merge 成功后记账；失败只记 ERROR，不把已完成的文件判失败。"""
+    state = config.state
+    if state is None:
+        return
+    ids = sorted({block.message_id for block in blocks if block.message_id is not None})
+    if not ids:
+        return
+    try:
+        await state.mark_messages_seen(target.project, target.source_id, ids)
+    except Exception as exc:  # noqa: BLE001 - 记账失败只能记日志，不能让已完成文件失败
+        print(f"[worker] mark-seen failed {path.name}: {type(exc).__name__}", file=sys.stderr)
+
+
 async def process_file(
     client: LLMClient,
     config: WorkerConfig,
     path: Path,
     *,
     templates: dict[str, str] | None = None,
-) -> tuple[int, int, int]:
-    """处理一个 raw 文件；返回 (created, updated, edges)。失败抛异常，由调用方隔离。"""
+) -> ProcessedFile:
+    """处理一个 raw 文件；失败抛异常，由调用方隔离。"""
     try:
         payload = json.loads(await AsyncPath(path).read_text(encoding="utf-8"))
     except (ValueError, RecursionError):
@@ -440,19 +508,25 @@ async def process_file(
         raise AuthorizationDenied("queue_payload_invalid")
     profile = PROFILE_BY_SOURCE[target.source_type]
     is_session = profile == "sessions"
+    blocks: list[SessionBlock] = []
+    filtered = 0
     if is_session:
         blocks = (
             render_session_blocks(content)
             if Path(file_path).suffix.lower() == ".jsonl"
             else render_plaintext_blocks(content)
         )
+        # 先去已见消息，再把输入预算留给新内容。
+        if config.state is not None:
+            blocks, filtered = await _drop_seen_blocks(config.state, target, blocks, path)
+        all_seen = bool(filtered) and not blocks
         blocks = truncate_blocks(blocks, config.max_input_chars)
         if not blocks:
-            return 0, 0, 0
+            return ProcessedFile(skipped_extraction=all_seen, filtered_messages=filtered)
     else:
         text = _document_text(content, file_path)[: config.max_input_chars]
         if not text.strip():
-            return 0, 0, 0
+            return ProcessedFile()
 
     if templates is None:
         templates = {}
@@ -469,7 +543,9 @@ async def process_file(
             max_tokens=config.max_tokens,
         )
         if not extraction.nodes:
-            return 0, 0, 0
+            # 抽取成功但没有节点同样记账：这条消息已经付过费、处理完了。
+            await _mark_blocks_seen(config, target, blocks, path)
+            return ProcessedFile(filtered_messages=filtered)
     else:
         extraction = await extract_document(
             client,
@@ -489,7 +565,15 @@ async def process_file(
         lock_timeout=0,
         check_target=check_target,
     )
-    return len(report.created), len(report.updated), report.edges_added
+    if is_session:
+        # 只记实际进入模型输入的块；被截断掉的留给下一次推送。
+        await _mark_blocks_seen(config, target, blocks, path)
+    return ProcessedFile(
+        created=len(report.created),
+        updated=len(report.updated),
+        edges=report.edges_added,
+        filtered_messages=filtered,
+    )
 
 
 async def run_round(
@@ -510,7 +594,7 @@ async def run_round(
             break
         relative = str(path.relative_to(config.raw_root))
         try:
-            created, updated, edges = await process_file(client, config, path, templates=templates)
+            outcome = await process_file(client, config, path, templates=templates)
         except AuthorizationDenied as exc:
             try:
                 await _move_to(config, path, config.pending_root)
@@ -528,6 +612,10 @@ async def run_round(
         except TargetUnavailable:
             # 读不到登记不是原始文件失败，保留原字节与已有失败次数。
             print("[worker] defer: target_registry_unavailable", flush=True)
+            continue
+        except MessageIndexUnavailable:
+            # 索引不可用（表缺失/库不可用）不是文件失败：保留 raw，不计失败次数，不调模型。
+            print("[worker] defer: message_index_unavailable", flush=True)
             continue
         except WriteDeferred as exc:
             print(f"[worker] defer: {exc.reason or 'write_unavailable'}", flush=True)
@@ -568,11 +656,13 @@ async def run_round(
             dirty = True
         attempted += 1
         current.processed += 1
-        current.created += created
-        current.updated += updated
-        current.edges += edges
+        current.deduped += int(outcome.skipped_extraction)
+        current.created += outcome.created
+        current.updated += outcome.updated
+        current.edges += outcome.edges
         print(
-            f"[worker] ok {path.name}: +{created} new, {updated} updated, {edges} edges",
+            f"[worker] ok {path.name}: +{outcome.created} new,"
+            f" {outcome.updated} updated, {outcome.edges} edges",
             flush=True,
         )
     if dirty:
@@ -600,10 +690,11 @@ async def run_forever(
             await sleep(config.interval)
             continue
         report = await run_round(client, config)
-        if report.processed or report.failed or report.quarantined:
+        if report.processed or report.failed or report.quarantined or report.deduped:
             print(
                 f"[worker] round: {report.processed} ok / {report.failed} fail "
-                f"/ {report.quarantined} denied / +{report.created} new / {report.updated} updated",
+                f"/ {report.quarantined} denied / {report.deduped} dedup "
+                f"/ +{report.created} new / {report.updated} updated",
                 flush=True,
             )
         if report.failed:
@@ -618,6 +709,8 @@ async def run_forever(
 
 __all__ = [
     "PROFILE_BY_SOURCE",
+    "MessageIndexUnavailable",
+    "ProcessedFile",
     "RoundReport",
     "WorkerConfig",
     "in_window",

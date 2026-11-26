@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## 2026-11-26（消息 uuid 去重实现，ADR-0017）
+
+- `feat(worker)`：`SessionBlock` 携带消息 `uuid`（`message_id`）；`process_file` 在会话分支先过滤已见消息、再按 `max_input_chars` 截断；抽取与 merge 成功后记账，整片命中时不调用模型并记入 `RoundReport.deduped`；索引不可用抛 `MessageIndexUnavailable` 推迟文件（不调 LLM、不计失败），记账失败只记 ERROR、文件照常完成。`WorkerConfig.state` 缺省时去重关闭，行为与现状一致。
+- `feat(ingest)`：运行态迁移 `0002_seen_messages` 新增 `seen_messages` 表；`StateStore` 新增 `seen_messages` / `mark_messages_seen` / `forget_messages`，内存与 PG 实现语义一致（PG 按 1000 个一批查询与写入）。
+- `feat(cli)`：新增 `memhub forget-messages --project <库> [--source <源>]`，只清已见消息索引，不动游标与 raw；缺 `MEMHUB_DB_URL` 退出 2；`worker` 入口把已有 `state` 传给 `WorkerConfig`。
+- RED：先写规格 T1–T11 的验收测试并实际观察失败——渲染/存储/迁移用例 12 failed（缺 `message_id`、`0002_seen_messages`、三个 StateStore 方法），CLI 用例收集期 `ImportError: _forget_messages`，daemon 用例 6 failed（`WorkerConfig` 无 `state` 参数）。
+- GREEN：同一批用例 98 passed；其中一处验收断言按规格修正——T6 只要求「不被去重跳过」，重复内容 merge 后可能是更新而非新建，改为断言 `processed/deduped/calls`，不再钉死 `created`。
+- 迁移态：迁移号 `0002_seen_messages`（运行态库；前向追加，只应用一次并写入 `schema_migrations`）；变更类型为新增表，无存量数据转换；回滚为代码回退、表保留无害；部署顺序必须先升级并重启 ingest（启动 `migrate()` 建表）再升级 worker，顺序反了 worker 持续 `defer: message_index_unavailable`，不丢数据不付费；验证为内存+PG 契约用例与迁移幂等用例。
+- 验证（2026-11-26，worktree `.claude/worktree/message-uuid-dedupe`）：全量 `pytest` 631 passed / 1 skipped（skip 为未启动 MCP HTTP 服务器的无关用例）；`ruff check .`、`ruff format --check .`、`mypy src`（49 files）、`check_env_example_keys.py`、`check_document_format.py`、`check_document_ownership.py --all`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- ADR 检查：实现 ADR-0017，不新增决策；`duplicates` 仍为切片级，客户端契约不变。
+
+## 2026-11-26（消息 uuid 去重实施规格）
+
+- `docs(plans)`：新增 [message-uuid-dedupe-spec](plans/message-uuid-dedupe-spec.md)（`specified`，2026-11-26 负责人评审通过），承接 ADR-0017。规格要点：运行态表 `seen_messages`（前向迁移 `0002_seen_messages`）；`StateStore` 新增 `seen_messages` / `mark_messages_seen` / `forget_messages`；worker 渲染产出消息 `uuid`，先过滤已见块再截断，抽取与 merge 成功后记账；前置查询失败推迟文件、记账失败只记 ERROR 不重复付费；新增 CLI `memhub forget-messages`；验收场景 T1–T11。
+- 范围：规格已获批，按 T1–T11 导出验收测试后进入 RED → GREEN。
+- ADR 检查：实现 ADR-0017，不新增决策。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
+## 2026-11-26（ADR-0017 转 accepted）
+
+- `docs(adr)`：[ADR-0017](decisions/ADR-0017-session-message-uuid-dedupe.md)「会话去重单位改为消息 uuid，fork 不再重复抽取」由 `proposed` 转为 `accepted`，`decisions/README.md` 索引同步。裁决内容不变：去重单位改为消息 `uuid`，作用点在 worker 渲染/抽取之前，索引键 `(project, source_id, uuid)`，raw 与客户端契约不动。
+- 下一步：按 SDD 先写实施规格与验收测试，再实现；规格获批前不动代码。
+- ADR 检查：本条为既有 ADR 状态流转，不新增决策。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
 ## 2026-11-26（MCP 发现层事件并入轨迹与连接漏斗，ADR-0018）
 
 - `feat(trace)`：HTTP 入口经 MCP SDK `Server.middleware` 记录 `initialize` 与 `tools/list`，与既有 `tools/call`、鉴权/路由拒绝同表；新增 `event`（`call` / `list_tools` / `initialize`）与 `tool_count`（成功列工具数），仍只记元数据，`notifications/*` 与 `ping` 不记录。决策见 [ADR-0018](decisions/ADR-0018-mcp-discovery-trace.md)，规格见 [mcp-trace-spec](plans/mcp-trace-spec.md)。

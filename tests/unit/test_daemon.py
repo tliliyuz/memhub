@@ -65,10 +65,12 @@ class FakeClient:
         self.error = error
         self.calls = 0
         self.max_tokens_seen: list[int] = []
+        self.prompts: list[str] = []
 
     async def complete(self, prompt: str, *, model: str, max_tokens: int = 32000) -> str:
         self.calls += 1
         self.max_tokens_seen.append(max_tokens)
+        self.prompts.append(prompt)
         if self.error is not None:
             raise self.error
         return self.reply
@@ -800,3 +802,186 @@ async def test_pending_archive_in_pg_defers_worker_without_quarantine(
     assert raw.exists()
     assert not config.pending_root.exists()
     assert not config.failures_path.exists()
+
+
+# ---- 消息 uuid 去重（ADR-0017 / 规格 T1–T6、T9、T10） -------------------
+
+NEW_EVIDENCE = "fork 后新增：提交前必须跑全量测试。"
+SECOND_OLD = "第二条旧消息：发布只从 main 出。"
+
+
+def _event(uuid: str, text: str, *, session_id: str = "session-a") -> str:
+    """一行带消息 uuid 的 Claude Code 会话事件；fork 只改 sessionId。"""
+    return json.dumps(
+        {
+            "type": "user",
+            "uuid": uuid,
+            "sessionId": session_id,
+            "message": {"role": "user", "content": text},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _reply_for(block: str, quote: str) -> str:
+    return json.dumps(
+        {
+            "nodes": [
+                {
+                    "kind": "fact",
+                    "slug": "fork-new-message",
+                    "title": "提交前跑全量测试",
+                    "body": "fork 之后补充的新知识。",
+                    "evidence": [{"block": block, "quote": quote}],
+                }
+            ],
+            "edges": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+class _BrokenState:
+    async def seen_messages(self, project: str, source_id: str, uuids: list[str]) -> set[str]:
+        raise RuntimeError("state down")
+
+    async def mark_messages_seen(self, project: str, source_id: str, uuids: list[str]) -> None:
+        raise RuntimeError("state down")
+
+
+class _MarkFailsState:
+    async def seen_messages(self, project: str, source_id: str, uuids: list[str]) -> set[str]:
+        return set()
+
+    async def mark_messages_seen(self, project: str, source_id: str, uuids: list[str]) -> None:
+        raise RuntimeError("write down")
+
+
+async def test_fork_copy_is_not_extracted_again(tmp_path: Path) -> None:
+    state = MemoryStore()
+    await state.register_device("dev-1")
+    parent = "\n".join([_event("m1", EVIDENCE), _event("m2", SECOND_OLD)])
+    await _push(tmp_path, parent, path="sessions/parent.jsonl")
+    config = await _config(tmp_path, state=state)
+    assert (await run_round(FakeClient(), config)).created == 1
+
+    fork = "\n".join(
+        [
+            _event("m1", EVIDENCE, session_id="fork"),
+            _event("m2", SECOND_OLD, session_id="fork"),
+            _event("m3", NEW_EVIDENCE, session_id="fork"),
+        ]
+    )
+    await _push(tmp_path, fork, path="sessions/fork.jsonl")
+    fork_client = FakeClient(reply=_reply_for("b0003", NEW_EVIDENCE))
+    report = await run_round(fork_client, config)
+
+    assert (report.processed, report.created, report.failed) == (1, 1, 0)
+    assert fork_client.calls == 1, "复制过来的旧消息不应再付费抽取"
+    assert SECOND_OLD not in fork_client.prompts[0]
+    assert NEW_EVIDENCE in fork_client.prompts[0]
+
+
+async def test_fully_duplicate_fork_file_skips_the_model(tmp_path: Path) -> None:
+    state = MemoryStore()
+    await state.register_device("dev-1")
+    parent = "\n".join([_event("m1", EVIDENCE), _event("m2", SECOND_OLD)])
+    await _push(tmp_path, parent, path="sessions/parent.jsonl")
+    config = await _config(tmp_path, state=state)
+    assert (await run_round(FakeClient(), config)).created == 1
+
+    fork = "\n".join(
+        [
+            _event("m1", EVIDENCE, session_id="fork"),
+            _event("m2", SECOND_OLD, session_id="fork"),
+        ]
+    )
+    await _push(tmp_path, fork, path="sessions/fork.jsonl")
+    client = FakeClient()
+    report = await run_round(client, config)
+
+    assert client.calls == 0
+    assert (report.processed, report.deduped) == (1, 1)
+    processed = [item async for item in AsyncPath(config.processed_root).rglob("*.json")]
+    assert len(processed) == 2
+
+
+async def test_failed_extraction_does_not_mark_messages_seen(tmp_path: Path) -> None:
+    state = MemoryStore()
+    await state.register_device("dev-1")
+    await _push(tmp_path, _event("m1", EVIDENCE), path="sessions/a.jsonl")
+    config = await _config(tmp_path, state=state)
+
+    failed = await run_round(FakeClient(error=LLMError("boom")), config)
+    assert failed.failed == 1
+    assert await state.seen_messages("cc-sessions", "cc-sessions", ["m1"]) == set()
+
+    retry = FakeClient()
+    assert (await run_round(retry, config)).processed == 1
+    assert retry.calls == 1
+    assert await state.seen_messages("cc-sessions", "cc-sessions", ["m1"]) == {"m1"}
+
+
+async def test_same_uuid_in_another_project_is_extracted(tmp_path: Path) -> None:
+    state = MemoryStore()
+    await state.register_device("dev-1")
+    await _push(tmp_path, _event("m1", EVIDENCE), path="sessions/a.jsonl", project="cc-sessions")
+    await _push(
+        tmp_path,
+        _event("m1", EVIDENCE, session_id="other"),
+        path="sessions/b.jsonl",
+        project="sdp-tag",
+    )
+    config = await _config(tmp_path, state=state)
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.created, client.calls) == (2, 2, 2)
+
+
+async def test_dedupe_is_off_without_a_state_store(tmp_path: Path) -> None:
+    """dev / 管理台上传没有运行态 DSN 时保持原行为。"""
+    parent = _event("m1", EVIDENCE)
+    await _push(tmp_path, parent, path="sessions/parent.jsonl")
+    config = await _config(tmp_path)
+    assert (await run_round(FakeClient(), config)).created == 1
+
+    await _push(
+        tmp_path,
+        _event("m1", EVIDENCE, session_id="fork"),
+        path="sessions/fork.jsonl",
+    )
+    client = FakeClient()
+
+    report = await run_round(client, config)
+    # 断言「没有被去重跳过」；重复内容 merge 后可能是更新而非新建，不在这里钉死。
+    assert (report.processed, report.deduped, client.calls) == (1, 0, 1)
+
+
+async def test_message_index_unavailable_defers_without_spending_llm(tmp_path: Path) -> None:
+    await _push(tmp_path, _event("m1", EVIDENCE), path="sessions/a.jsonl")
+    config = await _config(tmp_path, state=_BrokenState())
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.failed, report.quarantined) == (0, 0, 0)
+    assert client.calls == 0
+    assert len(await iter_pending(config.raw_root, config.processed_root)) == 1
+    assert not config.failures_path.exists()
+
+
+async def test_mark_failure_after_merge_keeps_file_complete(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """merge 已成功；记账失败只记 ERROR，不能让同一文件再次付费抽取。"""
+    await _push(tmp_path, _event("m1", EVIDENCE), path="sessions/a.jsonl")
+    config = await _config(tmp_path, state=_MarkFailsState())
+    client = FakeClient()
+
+    report = await run_round(client, config)
+
+    assert (report.processed, report.failed, report.created) == (1, 0, 1)
+    assert await iter_pending(config.raw_root, config.processed_root) == []
+    assert "mark-seen failed" in capsys.readouterr().err

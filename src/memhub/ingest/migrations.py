@@ -70,6 +70,22 @@ MIGRATIONS: list[tuple[str, Sequence[str]]] = [
             """,
         ),
     ),
+    (
+        # ADR-0017：fork 会改写 sessionId 但保留消息 uuid，按 uuid 记账才能跨文件去重。
+        # 不建外键：源被清理后已见记录仍应保留，避免重推时重复付费抽取。
+        "0002_seen_messages",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS seen_messages (
+                project       text NOT NULL,
+                source_id     text NOT NULL,
+                uuid          text NOT NULL,
+                first_seen_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (project, source_id, uuid)
+            )
+            """,
+        ),
+    ),
 ]
 
 

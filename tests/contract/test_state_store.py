@@ -197,3 +197,39 @@ async def test_concurrent_same_batch_applies_once(store: StateStore) -> None:
     )
     assert sorted(result.replayed for result in results) == [False, True]
     assert results[0].accepted == results[1].accepted
+
+
+# ---- 消息 uuid 去重索引（ADR-0017 / 规格 T7） ---------------------------------
+
+
+async def test_seen_messages_round_trip(store: StateStore) -> None:
+    assert await store.seen_messages("p", "s", ["u1", "u2"]) == set()
+    await store.mark_messages_seen("p", "s", ["u1", "u2"])
+    assert await store.seen_messages("p", "s", ["u1", "u2", "u3"]) == {"u1", "u2"}
+    await store.mark_messages_seen("p", "s", ["u1", "u3"])
+    assert await store.seen_messages("p", "s", ["u1", "u2", "u3"]) == {"u1", "u2", "u3"}
+    assert await store.seen_messages("p", "s", []) == set()
+
+
+async def test_seen_messages_are_scoped_by_project_and_source(store: StateStore) -> None:
+    await store.mark_messages_seen("p", "s", ["u1"])
+    await store.mark_messages_seen("p", "t", ["u1"])
+    await store.mark_messages_seen("q", "s", ["u1"])
+    assert await store.seen_messages("p", "s", ["u1"]) == {"u1"}
+    assert await store.seen_messages("p", "t", ["u1"]) == {"u1"}
+    assert await store.seen_messages("q", "s", ["u1"]) == {"u1"}
+    await store.mark_messages_seen("p", "s", [])  # 空输入不落写也不报错
+
+
+async def test_forget_messages_clears_by_project_and_source(store: StateStore) -> None:
+    await store.mark_messages_seen("p", "s", ["u1", "u2"])
+    await store.mark_messages_seen("p", "t", ["u3"])
+    await store.mark_messages_seen("q", "s", ["u4"])
+
+    assert await store.forget_messages("p", source_id="s") == 2
+    assert await store.seen_messages("p", "s", ["u1", "u2"]) == set()
+    assert await store.seen_messages("p", "t", ["u3"]) == {"u3"}
+
+    assert await store.forget_messages("p") == 1
+    assert await store.forget_messages("p") == 0
+    assert await store.seen_messages("q", "s", ["u4"]) == {"u4"}

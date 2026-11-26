@@ -88,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
         help="processed_raw/ 副本保留天数（默认 7；0 表示不按时间清理）",
     )
 
+    forget = sub.add_parser(
+        "forget-messages", help="清理已见消息索引，让重推内容重新抽取（不动游标与 raw）"
+    )
+    forget.add_argument("--project", required=True, help="知识库 id")
+    forget.add_argument("--source", dest="source_id", default=None, help="只清该源；缺省清整库")
+
     worker = sub.add_parser("worker", help="提炼守护进程：raw_store → 知识真源（串行）")
     worker.add_argument("--once", action="store_true", help="只跑一轮后退出（timer 用）")
     worker.add_argument(
@@ -163,6 +169,7 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "recover-kb-archive": _recover_kb_archive,
         "mcp": _mcp,
         "purge-expired": _purge_expired,
+        "forget-messages": _forget_messages,
         "worker": _worker,
         "api": _api,
         "kb": _kb,
@@ -384,6 +391,30 @@ async def _purge_expired(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _forget_messages(args: argparse.Namespace) -> int:
+    """清理已见消息索引；只动运行态记录，不动游标与 raw（规格 §6）。"""
+    state = getattr(args, "state", None)
+    if state is not None:
+        deleted = await state.forget_messages(args.project, source_id=args.source_id)
+    else:
+        dsn = os.environ.get("MEMHUB_DB_URL", "")
+        if not dsn:
+            print("缺少 MEMHUB_DB_URL（已见消息索引只在共享库）", file=sys.stderr)
+            return 2
+        from memhub.ingest.postgres import PostgresStore
+
+        store = PostgresStore(dsn, min_size=1, max_size=1)
+        try:
+            # 幂等建表：入口不依赖部署顺序。
+            await store.migrate()
+            deleted = await store.forget_messages(args.project, source_id=args.source_id)
+        finally:
+            await store.close()
+    scope = f"{args.project}/{args.source_id}" if args.source_id else f"{args.project}（整库）"
+    print(f"已清理 {deleted} 条已见消息记录：{scope}")
+    return 0
+
+
 async def _worker(args: argparse.Namespace) -> int:
     """提炼守护进程。退出码：0 无失败；1 有失败；2 配置/LLM 端点错误。"""
     from memhub.worker.daemon import (
@@ -462,6 +493,7 @@ async def _worker(args: argparse.Namespace) -> int:
         interval=args.interval,
         limit=args.limit,
         is_registered=state.is_registered if state is not None else None,
+        state=state,
     )
     try:
         if args.once:
