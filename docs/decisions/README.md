@@ -69,7 +69,7 @@ ADR 检查
 | [ADR-0016](ADR-0016-long-term-memory.md) | 长期记忆独立成域，并反向注入会话抽取 | accepted |
 | [ADR-0017](ADR-0017-session-message-uuid-dedupe.md) | 会话去重单位改为消息 uuid，fork 不再重复抽取 | accepted |
 | [ADR-0018](ADR-0018-mcp-discovery-trace.md) | MCP 发现层事件并入调用轨迹，形成连接漏斗 | accepted |
-| [ADR-0019](ADR-0019-mcp-memory-tools.md) | MCP 只读长期记忆工具，凭据显式开启 | proposed |
+| [ADR-0019](ADR-0019-mcp-memory-tools.md) | MCP 只读长期记忆工具，凭据显式开启 | accepted |
 
 ## 模板
 
