@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-26（长期记忆第一期：聚合、快照与会话抽取注入，ADR-0016）
+
+- `feat(db)`：新增 Alembic `0004_long_term_memory`：四张表 `kb_memory_entries`（条目，slug 全局唯一）、`kb_memory_revisions`（不可变修订）、`kb_memory_snapshots`（版本化快照，部分唯一索引保证至多一个 `published`）、`kb_memory_candidates`（未达门槛或冲突候选，每 slug 一行）；`kb_write_audit` 增加可空 `memory_snapshot`。`downgrade` 逆序删列删表。
+- `feat(kb)`：新增 `memhub.kb.memory` 计划函数与 `PgKbStore` 记忆方法：证据覆盖 ≥3 个独立会话且 ≥2 个项目才写 active 条目，少一个条件只留 `pending` 候选；同 slug 结论相同合并证据并重算计数，结论不同只写 `conflict` 候选且不改现有条目，已废弃条目不复活；新建/更新/废弃都追加修订快照并重算 `revision`，过期 `expected_revision` 返回冲突且不覆盖。快照发布把旧 `published` 置 `superseded`，回滚把目标置 `published`，停用后没有 `published`；三种生命周期各写一条 `kb_write_audit`（`memory_snapshot_publish` / `_activate` / `_disable`）并记录版本。
+- `feat(worker)`：新增 `memhub.worker.memory`：聚合只读跨项目 canonical 节点与 `source` 元数据，不读记忆表（避免自证循环）；worker 与 ingest 启动时固定当前已发布快照，按 BM25 取分数 >0 的 active 条目注入 `extract_session`，遵守 `MEMHUB_MEMORY_TOP_K`（默认 8）、`MEMHUB_MEMORY_INJECT_CHARS`（默认 4000）与 `MEMHUB_MEMORY_INJECT_DISABLED_PROJECTS` 按项目停用；每次抽取（含空结果）写 `extract_session` 审计并记录所用快照版本；提示词明确记忆只用于判断、归一化与去重，不能作为逐字证据或覆盖原文。
+- `feat(cli)`：新增 `memhub memory-aggregate`：`--since-days 7`、`--min-sessions 3`、`--min-projects 2`、`--max-nodes 100`、`--dry-run`（仍调模型、不写库）、`--publish`；退出码 0 成功（含无节点）/ 1 聚合或模型失败 / 2 配置错误。模型键 `MEMHUB_LLM_MODEL_MEMORY` 未设时回退 `MEMHUB_LLM_MODEL_EXTRACT`，两者皆空退出 2。
+- `feat(api)`：实现 `kb-admin-api.md` 0.7 §4.10 的九条 `/api/v1/kb/memories*` 路由：条目列表（status/limit/offset，按 updated_at 倒序）、详情（含最近 20 条修订）、乐观锁 PATCH、废弃、候选列表、快照列表、发布、回滚、停用；错误映射 404 / `1011`、409 / `1010`、422 / `1012`，非 PG 存储 503 / `2001`；不提供删除，证据只回元数据。
+- `feat(web)`：侧栏「治理 → 长期记忆」页面：条目（状态筛选、搜索、分页、带原因废弃）、候选（只读、冲突标记）、快照（发布/回滚/停用、失败行内提示与刷新）；`api.ts` 记忆客户端与类型；前端单测覆盖查询串与错误映射。
+- 文档与部署：`kb-admin-api.md` 0.7、`contracts/README.md` 0.15、`architecture.md`（拓扑、worker 注入/冻结/审计、kb-api 路由、timer 清单）、`tech/ENVIRONMENT.md` 与 `.env.example` 新增四个键、`deploy/README.md` 与 `deploy/systemd/memhub-memory-aggregate.{service,timer}`（周一 03:00，`Persistent=true`，一次性 docker run）。规格 §8 原先的错误映射与权威契约不一致，按文档矩阵改为契约口径并留裁决记录。
+- 范围：只做 ADR 第一期（会话抽取注入）；MCP 记忆工具、影子抽取、向量检索、项目检索与 `kb_nodes` 中的记忆均未实现。
+- RED：先写 `test_memory_store.py`、`test_memory.py`、`test_memory_worker.py`、`test_cli_memory.py`、`test_kb_api.py` 记忆用例与前端 `memories.test.mjs`，分别观察到目标模块缺失、路由 404 与 `api.* is not a function` 等失败后才进入实现；全量首跑暴露 `test_kb_models.py` 的 kb 表全集断言未含新表（1 failed），补入四张记忆表后通过。
+- 验证（2026-11-26，worktree `.claude/worktree/long-term-memory`）：全量 `pytest` 664 passed / 1 skipped（skip 为未启动 MCP 服务器的无关用例，非本次范围）；`ruff check .`、`ruff format --check .`（600 files）、`mypy src`（51 files）、`check_no_raw_sql.py`、`check_async_io.py`、`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`（31 键）与 `git diff --check` 通过；前端 `node --test web/tests/*.test.mjs` 15 passed（含 5 条记忆用例），`tsc -b` 与 `vite build` 通过。`deploy/systemd` 两个单元文件只做了静态审阅：本机为 Windows、无 systemd，未执行 `systemd-analyze verify`，需在部署机复核。
+- ADR 检查：实现 [ADR-0016](decisions/ADR-0016-long-term-memory.md)（accepted），未新增架构决策。
+
 ## 2026-11-26（长期记忆：ADR 转 accepted 并进入实施规格）
 
 - `docs(adr)`：ADR-0016 由 `proposed` 转为 `accepted`，索引同步。负责人当次指示继续实现；本轮按 ADR 默认值落规格，不另行调整方向。

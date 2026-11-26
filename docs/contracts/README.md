@@ -1,4 +1,4 @@
-# 跨端契约（v0.14）
+# 跨端契约（v0.15）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -11,7 +11,7 @@
 | [source-registry.md](source-registry.md) | `sources.json` 本地源注册表、采集器行为、隐私边界 | 客户端、collector |
 | [ingest-api.md](ingest-api.md) | 游标、推送、心跳、原始队列清理、错误码、限流、幂等 | 客户端、服务端 |
 | [mcp-tools.md](mcp-tools.md) | 检索组 + 治理组工具、错误码、不变式 | agent、治理 agent、服务端 |
-| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、MCP 调用轨迹查询、并发与错误码 | 服务端、管理台前端 |
+| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、MCP 调用轨迹查询、长期记忆治理、并发与错误码 | 服务端、管理台前端 |
 
 ## 待定（阻塞项）
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.15 — 长期记忆管理 API（ADR-0016，[kb-admin-api.md](kb-admin-api.md) 0.7）：新增 `/api/v1/kb/memories*`——条目列表/详情/乐观锁更新/废弃、聚合候选查询、快照发布/回滚/停用；记忆不挂知识库、不进节点检索，也不提供给 MCP 消费方。
 - 0.14 — 取消候选转正门槛（ADR-0014，[node-schema.md](node-schema.md) 0.5、[mcp-tools.md](mcp-tools.md) 0.7、[kb-admin-api.md](kb-admin-api.md) 0.6）：worker、MCP 与管理台写入一律 `canonical`，存量 `candidate` 由一次性迁移转正；检索默认排除 `deprecated`，`tier` 只保留 `canonical`/`all`；MCP 更新与废弃改为「创建者 actor 与调用方一致」，拒绝码 `not_candidate` 换成 `not_owner`。
 - 0.13 — 补齐采集原始队列清理接口（[ingest-api.md](ingest-api.md) 0.9）：仅接受 provision token，按设备和源清理文件，不重置云端游标或删除已提炼知识。
 - 0.12 — 投影子系统下线（[kb-admin-api.md](kb-admin-api.md) 0.4、[node-schema.md](node-schema.md) 0.4）：删除 `kg.json` 文件投影、`GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `memhub project` / `memhub serve` 命令，图谱与检索直接查询 `kb_*` 真源；`healthz` 只报 `{ok, store, nodes}`。
