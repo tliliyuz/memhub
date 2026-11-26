@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-26（MCP 调用轨迹：管理台页面）
+
+- `feat(web)`：治理侧栏新增「调用轨迹」（`/traces`），展示调用总数、成功、失败、拒绝和按工具分布。明细按工具、状态、凭据和近 1/7/30 天筛选，支持分页。请求 ID 悬停显示全值；凭据无名称时显示摘要 ID，两者均缺失时显示 `unknown`。空态提示 30 天明细保留期。汇总接口失败时单独提示，不显示成「没有调用」。
+- `docs`：规格 §7 表格补「请求 ID」列，§9.4 验收 15 的构建命令改为 `pnpm build`。
+- `test`：新增 `web/tests/mcp-traces.test.mjs`（查询参数透传、汇总路径、503 错误码、凭据降级、时间范围换算）。RED：目标模块 `web/src/lib/traces.ts` 不存在，`node --test tests/mcp-traces.test.mjs` 报 `ERR_MODULE_NOT_FOUND`；GREEN 后与既有用例共 10 项通过。
+- 验证（2026-11-26）：`node --test tests/mcp-traces.test.mjs tests/kb-project-archive.test.mjs` 10 passed；`pnpm build`（含 `tsc -b`）通过；ego-browser + 本地模拟查询接口验证治理入口、有数据与空态、分页、工具/状态/凭据/时间范围筛选与清除，验收标签页已关闭。未连接真实数据库做页面联调。
+- ADR 检查：页面属于 [ADR-0014](decisions/ADR-0014-mcp-call-trace.md) 决策 6 的实现范围，未新增架构决策；ADR-0014 状态仍为 `proposed`，待负责人裁决为 accepted。
+
 ## 2026-11-25（MCP 调用轨迹：服务端落库与查询接口）
 
 - `feat(mcp)`：`/mcp` 入口把每次 `tools/call`（成功、业务错误、未预期异常）与鉴权/路由拒绝（401/403/405/429）记入新表 `kb_mcp_trace`；`initialize`、`tools/list`、`ping`、通知与非 `/mcp` 路径不记录。只记元数据，参数原文不落库，仅留规范化 JSON 的 sha256。
