@@ -46,6 +46,7 @@ from memhub.queue.rawstore import (
 )
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
 from memhub.worker.llm import LLMClient, LLMError
+from memhub.worker.memory import MemoryContext
 from memhub.worker.merge import merge
 from memhub.worker.prompts import load_profile
 from memhub.worker.render import (
@@ -85,6 +86,8 @@ class WorkerConfig:
     max_attempts: int = 3
     target_registry: TargetRegistry | None = None
     is_registered: Callable[[str], Awaitable[bool]] | None = None
+    # 启动时固定的记忆快照；None 表示本次进程不注入（也不写 extract_session 审计）。
+    memory: MemoryContext | None = None
 
     def registry(self) -> TargetRegistry:
         return self.target_registry or TargetRegistry(self.store)
@@ -410,6 +413,22 @@ async def _authorize(config: WorkerConfig, registry: TargetRegistry, target: Que
         raise TargetUnavailable("archive_state_unavailable") from exc
 
 
+async def _audit_session(config: WorkerConfig, project: str, result: str) -> None:
+    """记录一次会话抽取用了哪版记忆；文件存储没有审计表，只在 PG 上执行。"""
+    record = getattr(config.store, "record_write_audit", None)
+    if record is None:
+        return
+    version = config.memory.audit_version(project) if config.memory is not None else None
+    await record(
+        actor="worker",
+        project=project,
+        node_id=None,
+        action="extract_session",
+        result=result,
+        memory_snapshot=version,
+    )
+
+
 async def process_file(
     client: LLMClient,
     config: WorkerConfig,
@@ -467,7 +486,10 @@ async def process_file(
             model=config.model,
             max_chars=config.max_chars,
             max_tokens=config.max_tokens,
+            memory=config.memory,
+            project=target.project,
         )
+        await _audit_session(config, target.project, "ok" if extraction.nodes else "empty")
         if not extraction.nodes:
             return 0, 0, 0
     else:

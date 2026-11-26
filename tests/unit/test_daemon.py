@@ -13,12 +13,13 @@ from pathlib import Path
 import anyio
 import pytest
 from anyio import Path as AsyncPath
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from memhub.contract import BatchFile, IngestRequest, Tier
 from memhub.ingest.store import MemoryStore
 from memhub.kb import catalog, manage
-from memhub.kb.models import Base, KbArchive
+from memhub.kb.models import Base, KbArchive, KbWriteAudit
 from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.session import create_sessionmaker
 from memhub.kb.store import KnowledgeStore
@@ -38,6 +39,7 @@ from memhub.worker.daemon import (
     run_round,
 )
 from memhub.worker.llm import LLMError
+from memhub.worker.memory import MemoryContext, MemorySettings
 
 NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
 EVIDENCE = "网络重试需要指数退避。"
@@ -800,3 +802,83 @@ async def test_pending_archive_in_pg_defers_worker_without_quarantine(
     assert raw.exists()
     assert not config.pending_root.exists()
     assert not config.failures_path.exists()
+
+
+# -- 会话抽取注入与审计（规格 §7） ------------------------------------------
+
+
+def _memory(disabled: frozenset[str] = frozenset()) -> MemoryContext:
+    return MemoryContext(
+        version=9,
+        entries=(
+            {
+                "slug": "retry-backoff",
+                "title": "重试退避",
+                "conclusion": "网络重试需要指数退避。",
+                "boundary": "幂等操作",
+                "invalidation": "",
+                "confidence": 0.9,
+            },
+        ),
+        settings=MemorySettings(disabled_projects=disabled),
+    )
+
+
+async def _session_audits(pg_store: PgKnowledgeStore) -> list[KbWriteAudit]:
+    async with pg_store.sessions() as session:
+        rows = await session.scalars(
+            select(KbWriteAudit)
+            .where(KbWriteAudit.action == "extract_session")
+            .order_by(KbWriteAudit.id)
+        )
+        return list(rows)
+
+
+async def test_session_round_records_audit_with_frozen_snapshot(
+    tmp_path: Path, pg_store: PgKnowledgeStore
+) -> None:
+    await pg_store.register_project("cc-sessions", name="会话提炼")
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
+    config = _pg_config(tmp_path, pg_store, memory=_memory())
+
+    report = await run_round(FakeClient(), config)
+
+    assert report.processed == 1
+    [audit] = await _session_audits(pg_store)
+    assert audit.actor == "worker"
+    assert audit.project == "cc-sessions"
+    assert audit.node_id is None
+    assert audit.result == "ok"
+    assert audit.memory_snapshot == 9
+
+
+async def test_empty_session_extraction_is_audited_as_empty(
+    tmp_path: Path, pg_store: PgKnowledgeStore
+) -> None:
+    await pg_store.register_project("cc-sessions", name="会话提炼")
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
+    config = _pg_config(tmp_path, pg_store, memory=_memory())
+    empty = json.dumps({"nodes": [], "edges": []})
+
+    report = await run_round(FakeClient(reply=empty), config)
+
+    assert (report.processed, report.created) == (1, 0)
+    [audit] = await _session_audits(pg_store)
+    assert audit.result == "empty"
+    assert audit.memory_snapshot == 9
+
+
+async def test_disabled_project_injects_nothing_and_audits_null(
+    tmp_path: Path, pg_store: PgKnowledgeStore
+) -> None:
+    await pg_store.register_project("cc-sessions", name="会话提炼")
+    await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
+    config = _pg_config(tmp_path, pg_store, memory=_memory(frozenset({"cc-sessions"})))
+    client = FakeClient()
+
+    await run_round(client, config)
+
+    assert client.calls == 1
+    [audit] = await _session_audits(pg_store)
+    assert audit.memory_snapshot is None
+    assert audit.result == "ok"
