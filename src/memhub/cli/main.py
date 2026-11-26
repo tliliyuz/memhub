@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import json
 import os
 import re
+import secrets
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -67,7 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     recover = sub.add_parser("recover-kb-archive", help="核对并续做未完成的整库归档或恢复")
     recover.add_argument("--knowledge-dir", default=None)
 
-    sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
+    mcp = sub.add_parser("mcp", help="启动知识检索与写候选的 MCP stdio 服务")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command")
+    token = mcp_sub.add_parser("token", help="本地生成 MCP HTTP 令牌与 grant 配置")
+    token.add_argument("--name", default=None, help="凭据展示名，可选")
+    token.add_argument("--projects", required=True, help="逗号分隔的知识库 id，至少一个")
+    token.add_argument("--scope", choices=["read", "write"], default="read")
+    token.add_argument("--days", type=int, default=90, help="有效期天数（默认 90）")
+    token.add_argument("--json", action="store_true", help="输出单行 JSON，供脚本读取")
 
     purge = sub.add_parser(
         "purge-expired", help="删掉重放窗口（24h）外的批次记录，供 systemd timer 调用"
@@ -158,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "mcp" and getattr(args, "mcp_command", None) == "token":
+        return _mcp_token(args)
     handlers = {
         "ingest": _ingest,
         "recover-kb-archive": _recover_kb_archive,
@@ -325,6 +337,50 @@ async def _recover_kb_archive(args: argparse.Namespace) -> int:
         print(f"未能完成归档恢复：{exc}", file=sys.stderr)
         return 1
     print("已续做归档操作。" if recovered else "没有待续做的归档操作。")
+    return 0
+
+
+def _mcp_token(args: argparse.Namespace) -> int:
+    """生成本地 MCP HTTP 令牌与可直接粘贴的 grant；令牌只写 stdout。"""
+    from datetime import UTC, datetime, timedelta
+
+    from pydantic import ValidationError
+
+    from memhub.mcp.auth import Grant
+
+    if not 1 <= args.days <= 3650:
+        print("--days 必须在 1–3650 之间", file=sys.stderr)
+        return 2
+    projects = [item.strip() for item in args.projects.split(",") if item.strip()]
+    token_value = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(UTC) + timedelta(days=args.days)).replace(microsecond=0)
+    try:
+        grant = Grant(
+            sha256=hashlib.sha256(token_value.encode("ascii")).hexdigest(),
+            scope="mcp:read" if args.scope == "read" else "mcp:write",
+            expires_at=expires_at,
+            projects=frozenset(projects),
+            name=args.name,
+        )
+    except ValidationError as exc:
+        print(f"参数无效，未生成令牌：{exc}", file=sys.stderr)
+        return 2
+    payload = {
+        "sha256": grant.sha256,
+        "scope": grant.scope,
+        "expires_at": grant.expires_at.isoformat(),
+        "projects": projects,
+        "name": grant.name,
+    }
+    if args.json:
+        print(json.dumps({"token": token_value, "grant": payload}, ensure_ascii=False))
+        return 0
+    print("令牌（只显示一次，请只写入本机环境变量）：")
+    print(token_value)
+    print()
+    print("可粘贴到 MEMHUB_MCP_GRANTS 数组的 grant：")
+    print(json.dumps(payload, ensure_ascii=False))
+    print("不要把令牌写入仓库、文档或聊天记录。", file=sys.stderr)
     return 0
 
 
