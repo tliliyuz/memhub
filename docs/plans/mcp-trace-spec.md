@@ -5,11 +5,11 @@
 | 文档状态 | draft（待负责人评审） |
 | 最后更新 | 2026-11-25 |
 | 适用范围 | `kb_mcp_trace` 数据模型、记录语义、可靠落库、保留期、管理台 API 与页面、验收条件 |
-| 不负责 | 架构裁决（见 [ADR-0014](../decisions/ADR-0014-mcp-call-trace.md)）、MCP 工具契约（见 [mcp-tools.md](../contracts/mcp-tools.md)）、管理台接口总表（见 [kb-admin-api.md](../contracts/kb-admin-api.md)） |
+| 不负责 | 架构裁决（见 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)）、MCP 工具契约（见 [mcp-tools.md](../contracts/mcp-tools.md)）、管理台接口总表（见 [kb-admin-api.md](../contracts/kb-admin-api.md)） |
 
 ## 1. 目标与范围
 
-承接 [ADR-0014](../decisions/ADR-0014-mcp-call-trace.md)：让「MCP 到底被调用了多少次、被谁调用、成没成功、慢不慢」在服务端有唯一可查的真源，并在管理台「治理」菜单下可见。
+承接 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)：让「MCP 到底被调用了多少次、被谁调用、成没成功、慢不慢」在服务端有唯一可查的真源，并在管理台「治理」菜单下可见。
 
 ### 1.1 本轮范围
 
@@ -197,7 +197,7 @@
 - `docs/contracts/kb-admin-api.md` 新增 §4.x「MCP 调用轨迹」。
 - `docs/contracts/mcp-tools.md` 新增「可观测性」小节：记录范围、不记录内容、保留期。
 - `docs/tech/ENVIRONMENT.md` 新增 `MEMHUB_KB_TRACE_SPOOL`（可选）并说明失败语义。
-- `docs/decisions/README.md` 登记 ADR-0014。
+- `docs/decisions/README.md` 登记 ADR-0015。
 - `docs/plans/README.md` 登记本规格。
 - `docs/CHANGELOG.md` 行为变更记录。
 

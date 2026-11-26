@@ -1,4 +1,4 @@
-"""MCP 调用轨迹的写入器（ADR-0014，规格 docs/plans/mcp-trace-spec.md §4）。
+"""MCP 调用轨迹的写入器（ADR-0015，规格 docs/plans/mcp-trace-spec.md §4）。
 
 可靠落库：独立事务提交，失败按 100ms/300ms 退避重试（最多 3 次），仍失败追加到
 本地 spool（JSONL，flush + fsync）；下一次成功写入前先补投 spool，成功后清空。

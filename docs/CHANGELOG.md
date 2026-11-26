@@ -23,7 +23,7 @@
 - `docs`：规格 §7 表格补「请求 ID」列，§9.4 验收 15 的构建命令改为 `pnpm build`。
 - `test`：新增 `web/tests/mcp-traces.test.mjs`（查询参数透传、汇总路径、503 错误码、凭据降级、时间范围换算）。RED：目标模块 `web/src/lib/traces.ts` 不存在，`node --test tests/mcp-traces.test.mjs` 报 `ERR_MODULE_NOT_FOUND`；GREEN 后与既有用例共 10 项通过。
 - 验证（2026-11-26）：`node --test tests/mcp-traces.test.mjs tests/kb-project-archive.test.mjs` 10 passed；`pnpm build`（含 `tsc -b`）通过；ego-browser + 本地模拟查询接口验证治理入口、有数据与空态、分页、工具/状态/凭据/时间范围筛选与清除，验收标签页已关闭。未连接真实数据库做页面联调。
-- ADR 检查：页面属于 [ADR-0014](decisions/ADR-0014-mcp-call-trace.md) 决策 6 的实现范围，未新增架构决策；ADR-0014 状态仍为 `proposed`，待负责人裁决为 accepted。
+- ADR 检查：页面属于 [ADR-0015](decisions/ADR-0015-mcp-call-trace.md) 决策 6 的实现范围，未新增架构决策；ADR-0015 状态仍为 `proposed`，待负责人裁决为 accepted。
 
 ## 2026-11-25（MCP 调用轨迹：服务端落库与查询接口）
 
@@ -33,7 +33,7 @@
 - `feat(kb)`：明细保留 30 天，清理挂在写入路径上，按小时节流，失败只记 WARNING。
 - `feat(kb-api)`：新增 `GET /api/v1/kb/mcp-traces`（分页与过滤）与 `/summary`（按状态、工具、凭据聚合；`avg_ms` 只算 ok 与 error）；非 PG 存储返回 503/`2001`。
 - `feat(alembic)`：迁移 `0002_kb_mcp_trace`，含 4 个索引与 `trace_id` 唯一约束。
-- `docs`：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`ENVIRONMENT.md` 的 `MEMHUB_KB_TRACE_SPOOL` 已同步；规格 §2.1 索引改写为升序 B-tree（列表倒序由反向扫描满足），§6.2 补 `avg_ms` 口径。ADR-0014 仍为 `proposed`，待负责人裁决。
+- `docs`：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`ENVIRONMENT.md` 的 `MEMHUB_KB_TRACE_SPOOL` 已同步；规格 §2.1 索引改写为升序 B-tree（列表倒序由反向扫描满足），§6.2 补 `avg_ms` 口径。ADR-0015 仍为 `proposed`，待负责人裁决。
 - `test`：新增 `tests/contract/test_mcp_trace.py`（14 个用例，覆盖规格 §9.1–§9.4 的 1–13 条）；`test_kb_migrations.py` 与 `test_kb_models.py` 的表清单补入 `kb_mcp_trace`。
 - 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，单进程）：全量 `pytest` 558 passed / 1 skipped / 1 failed，失败项为 `test_kb_models.py` 硬编码「恰好 6 张表」，补入 `kb_mcp_trace` 后重跑 `test_kb_models.py` + `test_mcp_trace.py` + `test_kb_migrations.py` 共 31 passed（修正后未再跑全量）；`ruff check`、`ruff format --check`、`mypy src`（50 files）、`check_async_io.py`、`check_no_raw_sql.py`、`check_document_format.py`、`check_agent_entrypoints_sync.py` 通过，`check_document_ownership.py --changed` 退出码 0。
 - 未做：管理台「调用轨迹」页面（规格 §7，验收 14–17 的页面部分）与 MCP 发现层改进，另分支处理。

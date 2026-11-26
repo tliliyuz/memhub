@@ -1105,7 +1105,7 @@ class PgKnowledgeStore:
                 )
             )
 
-    # -- MCP 调用轨迹（ADR-0014） ------------------------------------------
+    # -- MCP 调用轨迹（ADR-0015） ------------------------------------------
 
     async def record_mcp_trace(self, entry: TraceEntry) -> None:
         """一行调用轨迹；`trace_id` 冲突视为重放，直接忽略保证幂等。"""

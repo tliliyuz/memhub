@@ -488,7 +488,7 @@ def create_app(
     ) -> dict[str, Any]:
         return await query.audit_list(api.store, limit=limit, offset=offset)
 
-    # ---- MCP 调用轨迹（ADR-0014） ----
+    # ---- MCP 调用轨迹（ADR-0015） ----
 
     def _traces_unavailable() -> JSONResponse:
         return JSONResponse(

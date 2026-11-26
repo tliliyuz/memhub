@@ -19,7 +19,7 @@
 | [ADR-0010](ADR-0010-collector-target-without-grant-file.md) | 采集写的目标边界改为「显式 + 已登记 + 活动」 | accepted |
 | [ADR-0011](ADR-0011-mcp-write-candidate.md) | MCP 第一阶段只开放写候选 | accepted |
 | [ADR-0012](ADR-0012-candidate-update-and-deprecate.md) | 候选区闭环：允许更新与废弃自己的候选 | accepted |
-| [ADR-0014](ADR-0014-mcp-call-trace.md) | MCP 调用轨迹落库，治理台可见 | proposed |
+| [ADR-0015](ADR-0015-mcp-call-trace.md) | MCP 调用轨迹落库，治理台可见 | proposed |
 
 模板：
 

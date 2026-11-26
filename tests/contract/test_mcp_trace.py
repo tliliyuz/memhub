@@ -1,4 +1,4 @@
-"""MCP 调用轨迹（规格 `docs/plans/mcp-trace-spec.md` §9，ADR-0014）。
+"""MCP 调用轨迹（规格 `docs/plans/mcp-trace-spec.md` §9，ADR-0015）。
 
 服务端把每次 `tools/call` 与鉴权/路由拒绝记入 `kb_mcp_trace`；只记元数据，
 不记参数原文、正文或 token。写入按可靠落库处理：重试 → 本地 spool 补投。

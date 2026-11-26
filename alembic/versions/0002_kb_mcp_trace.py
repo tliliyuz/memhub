@@ -1,4 +1,4 @@
-"""kb_mcp_trace：MCP 调用轨迹（ADR-0014，规格 docs/plans/mcp-trace-spec.md §2.1）。
+"""kb_mcp_trace：MCP 调用轨迹（ADR-0015，规格 docs/plans/mcp-trace-spec.md §2.1）。
 
 只记元数据（时间、请求 id、凭据、工具、状态、耗时、参数摘要），不含参数原文、
 正文与 token。`trace_id` 唯一实现重试与 spool 补投的幂等；不设外键。
