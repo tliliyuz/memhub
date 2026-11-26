@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 2026-11-26（长期记忆子系统 ADR 草案）
+
+- `docs(adr)`：新增 [ADR-0016](decisions/ADR-0016-long-term-memory.md)「长期记忆独立成域，并反向注入会话抽取」，状态 `proposed`。裁决要点：长期记忆与 `kb_*` 知识库分层，不新增 `Kind`、不作为采集目标、不进项目库检索；由周期聚合任务以跨项目 canonical 节点为主证据提炼，门槛为 ≥3 个独立会话且 ≥2 个项目；记忆按版本化快照周发布，第一期只注入会话抽取提示词，每次抽取记录所用记忆版本；聚合任务自身不读记忆，避免自证循环。备选方案（新 `Kind`+`global` 库、每项目各存、`scope` 字段、抽取时产出、立即生效、原始会话为主证据）均已记录否决理由。
+- 范围：本次只写 ADR，不含规格、测试与实现；ADR 转为 `accepted` 前不进入后续阶段。ADR 检查：本条即新增 ADR，编号 0016 未被占用。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 均通过。
+
 ## 2026-11-26（部署文档：kb 新表默认权限与迁移 DSN 注入方式）
 
 - `docs(deploy)`：`deploy/README.md`「知识真源切换」第 1 步补「默认权限」要求：建角色时以 `memhub_kb_owner` 执行 `ALTER DEFAULT PRIVILEGES ... GRANT ... ON TABLES / SEQUENCES TO memhub_kb_app`，并给出存量表的补授权语句与升级后 `has_table_privilege` / `has_sequence_privilege` 核对 SQL。缺这步不会让迁移失败，而是新表对运行态角色不可见：MCP 调用轨迹写入全部退到 spool、轨迹查询报权限错（2026-11-26 发版的 `0002_kb_mcp_trace` 已实际命中，机上以手工 `GRANT` 绕过）。
