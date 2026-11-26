@@ -1,7 +1,7 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.4
-> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、当前登录身份。
+> 版本: 0.5（新增 MCP 调用轨迹查询，§4.9）
+> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、当前登录身份。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
 ## 1. 定位
@@ -175,7 +175,23 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 - 队列总量受 `MEMHUB_QUEUE_MAX_BYTES` 约束，超限 503/`1013`。kb-api 与 ingest-api 是两个进程、各持一份 30 秒刷新的用量缓存，跨进程并发推送/上传可能短暂超出上限（容忍一个刷新窗口）。
 - 批次 id 非法或清单不存在 → 404/`1011`。
 
-### 4.8 前端
+### 4.9 MCP 调用轨迹
+
+只读查询 `kb_mcp_trace`（ADR-0014）；服务端在 `/mcp` 入口记录每次 `tools/call` 与鉴权/路由拒绝。
+
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| GET | `/api/v1/kb/mcp-traces?limit=&offset=&tool=&status=&credential=&since=&until=` | `{items, total, offset, limit}`，`called_at` 倒序 |
+| GET | `/api/v1/kb/mcp-traces/summary?days=` | `{since, days, total, ok, error, rejected, tools:[{tool, count, ok, error, rejected, avg_ms}], credentials:[{id, name, count}]}` |
+
+- `limit` 1–500（默认 50），`offset` ≥ 0；`status` ∈ `ok/error/rejected`；`credential` 同时匹配 `credential_id` 与 `credential_name`；`days` 1–30（默认 7）。
+- `avg_ms` 为该工具 `ok` 与 `error` 调用耗时的平均值（取整），`rejected` 不参与，无可算调用时为 0。
+- 每项字段：`trace_id, request_id, rpc_id, called_at, credential:{id,name}, tool, status, http_status, error_code, error_kind, duration_ms, result_bytes, projects, client`。
+- 凭据未配置 `name` 时 `credential.name=null`，**展示层**按 `name || id || "unknown"` 降级；契约不固化展示文案。
+- 只记元数据：不含参数原文、正文与 token；参数仅留 `args_digest`。明细保留 30 天，更早数据由写入路径节流清理。
+- 非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
+
+### 4.10 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 

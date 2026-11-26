@@ -77,6 +77,14 @@
 ## 4. 传输与鉴权
 
 - 本地 `memhub mcp` 继续走 stdio。HTTP 接入默认关闭；启用后由 kb-api 在精确 `/mcp` 路径提供无状态 Streamable HTTP（JSON 响应，不提供 SSE 监听）。协议协商由官方 MCP Python SDK 处理；不复用 stdio 的 JSON-RPC 解析器。
-- HTTP 每个请求须携带独立的 `Authorization: Bearer` 凭据。配置只保存高熵随机令牌的 SHA-256 摘要、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、UTC 有效期与非空库名单。`tools/list` 按作用域裁剪：`mcp:read` 只看到四个读工具，`mcp:write` 看到全部七个。凭据过期、缺失或无效返回 401，浏览器 Cookie 或采集 `device_token` 不授予权限（ADR-0003）。吊销删除该摘要并重启服务；无在线发放接口，不改数据库。
+- HTTP 每个请求须携带独立的 `Authorization: Bearer` 凭据。配置只保存高熵随机令牌的 SHA-256 摘要、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、UTC 有效期、非空库名单与可选的 `name`（展示用，缺失时降级显示摘要前 12 位）。`tools/list` 按作用域裁剪：`mcp:read` 只看到四个读工具，`mcp:write` 看到全部七个。凭据过期、缺失或无效返回 401，浏览器 Cookie 或采集 `device_token` 不授予权限（ADR-0003）。吊销删除该摘要并重启服务；无在线发放接口，不改数据库。
 - HTTP 只接受不带 `Origin` 的机器客户端访问，入口不转发至 SPA。POST 请求体最多 16 KiB；最多一个 POST 在处理，其余返回 429。禁用、非法路径与鉴权失败均不能触发查询。公网接入、真实客户端联调与生产资源预算单独验收。
 - stdio 保留本机全库权限，包括写候选；`tools/list` 返回全部七个工具。
+
+## 5. 可观测性
+
+- HTTP 入口把每次 `tools/call` 与鉴权/路由拒绝记入 `kb_mcp_trace`（ADR-0014，查询接口见 [kb-admin-api.md](kb-admin-api.md) §4.9）。
+- 记录字段限于元数据：时间、请求 id、JSON-RPC id、凭据标识与名称快照、工具、状态、错误码、耗时、结果大小、参数摘要、授权库范围与客户端标识。
+- **不记录**参数原文、查询词、正文或任何会话内容；参数只保留 sha256 摘要。token 与其完整摘要不落库。
+- 记录写入不改变工具返回；写入失败按重试 → 本地 spool 补投处理，不允许静默丢弃。
+- 明细保留 30 天。`initialize`、`tools/list`、`ping` 与通知不属于「调用」，不记录。

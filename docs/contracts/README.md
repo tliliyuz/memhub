@@ -11,7 +11,7 @@
 | [source-registry.md](source-registry.md) | `sources.json` 本地源注册表、采集器行为、隐私边界 | 客户端、collector |
 | [ingest-api.md](ingest-api.md) | 游标、推送、心跳、原始队列清理、错误码、限流、幂等 | 客户端、服务端 |
 | [mcp-tools.md](mcp-tools.md) | 检索组 + 治理组工具、错误码、不变式 | agent、治理 agent、服务端 |
-| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、并发与错误码 | 服务端、管理台前端 |
+| [kb-admin-api.md](kb-admin-api.md) | 本地管理台 kb-api：知识库目录与子图、节点 CRUD、边编辑、回收站、审计、MCP 调用轨迹查询、并发与错误码 | 服务端、管理台前端 |
 
 ## 待定（阻塞项）
 

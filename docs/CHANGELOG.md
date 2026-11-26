@@ -17,6 +17,26 @@
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` 新增 §1.2「归因与信息沉淀」。归因要求先问「为什么会出现」，再判断方案能否从根本上解决问题、泛化性是否足够，不以一次性补丁交付；任何路径得到的长期信息先判断是否会被复用，长期事实必须在同一次变更里落进权威文档、SOP、配置键、脚本、测试或 `.env`，不得只解决当前会话后静默丢弃；无法落盘时须说明它仅在会话内及缺什么前置条件。§2 的 `.env.example` 键名同步规则是它的一个具体应用。ADR 检查：未命中（只约束工作方法，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
 
+## 2026-11-26（MCP 调用轨迹：管理台页面）
+
+- `feat(web)`：治理侧栏新增「调用轨迹」（`/traces`），展示调用总数、成功、失败、拒绝和按工具分布。明细按工具、状态、凭据和近 1/7/30 天筛选，支持分页。请求 ID 悬停显示全值；凭据无名称时显示摘要 ID，两者均缺失时显示 `unknown`。空态提示 30 天明细保留期。汇总接口失败时单独提示，不显示成「没有调用」。
+- `docs`：规格 §7 表格补「请求 ID」列，§9.4 验收 15 的构建命令改为 `pnpm build`。
+- `test`：新增 `web/tests/mcp-traces.test.mjs`（查询参数透传、汇总路径、503 错误码、凭据降级、时间范围换算）。RED：目标模块 `web/src/lib/traces.ts` 不存在，`node --test tests/mcp-traces.test.mjs` 报 `ERR_MODULE_NOT_FOUND`；GREEN 后与既有用例共 10 项通过。
+- 验证（2026-11-26）：`node --test tests/mcp-traces.test.mjs tests/kb-project-archive.test.mjs` 10 passed；`pnpm build`（含 `tsc -b`）通过；ego-browser + 本地模拟查询接口验证治理入口、有数据与空态、分页、工具/状态/凭据/时间范围筛选与清除，验收标签页已关闭。未连接真实数据库做页面联调。
+- ADR 检查：页面属于 [ADR-0014](decisions/ADR-0014-mcp-call-trace.md) 决策 6 的实现范围，未新增架构决策；ADR-0014 状态仍为 `proposed`，待负责人裁决为 accepted。
+
+## 2026-11-25（MCP 调用轨迹：服务端落库与查询接口）
+
+- `feat(mcp)`：`/mcp` 入口把每次 `tools/call`（成功、业务错误、未预期异常）与鉴权/路由拒绝（401/403/405/429）记入新表 `kb_mcp_trace`；`initialize`、`tools/list`、`ping`、通知与非 `/mcp` 路径不记录。只记元数据，参数原文不落库，仅留规范化 JSON 的 sha256。
+- `feat(mcp)`：`Grant` 新增可选 `name`（strip 后 1–64 字符，禁控制字符），随 `Credential` 进入轨迹；旧配置无 `name` 照常启动，展示层按 `name || id || "unknown"` 降级。
+- `feat(mcp)`：可靠落库——独立事务写入，失败退避重试 3 次（共 4 次尝试），仍失败追加到 JSONL spool（flush + fsync），下次成功写入前补投并以 `trace_id` 去重；spool 超 8 MiB 丢最旧行，重写走临时文件加原子替换。spool 也不可用时记 ERROR，这是唯一会丢记录的路径。记录失败不改变 `tools/call` 的返回与状态码。
+- `feat(kb)`：明细保留 30 天，清理挂在写入路径上，按小时节流，失败只记 WARNING。
+- `feat(kb-api)`：新增 `GET /api/v1/kb/mcp-traces`（分页与过滤）与 `/summary`（按状态、工具、凭据聚合；`avg_ms` 只算 ok 与 error）；非 PG 存储返回 503/`2001`。
+- `feat(alembic)`：迁移 `0002_kb_mcp_trace`，含 4 个索引与 `trace_id` 唯一约束。
+- `docs`：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`ENVIRONMENT.md` 的 `MEMHUB_KB_TRACE_SPOOL` 已同步；规格 §2.1 索引改写为升序 B-tree（列表倒序由反向扫描满足），§6.2 补 `avg_ms` 口径。ADR-0014 仍为 `proposed`，待负责人裁决。
+- `test`：新增 `tests/contract/test_mcp_trace.py`（14 个用例，覆盖规格 §9.1–§9.4 的 1–13 条）；`test_kb_migrations.py` 与 `test_kb_models.py` 的表清单补入 `kb_mcp_trace`。
+- 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，单进程）：全量 `pytest` 558 passed / 1 skipped / 1 failed，失败项为 `test_kb_models.py` 硬编码「恰好 6 张表」，补入 `kb_mcp_trace` 后重跑 `test_kb_models.py` + `test_mcp_trace.py` + `test_kb_migrations.py` 共 31 passed（修正后未再跑全量）；`ruff check`、`ruff format --check`、`mypy src`（50 files）、`check_async_io.py`、`check_no_raw_sql.py`、`check_document_format.py`、`check_agent_entrypoints_sync.py` 通过，`check_document_ownership.py --changed` 退出码 0。
+- 未做：管理台「调用轨迹」页面（规格 §7，验收 14–17 的页面部分）与 MCP 发现层改进，另分支处理。
 ## 2026-11-25（`.env.example` 键名同步到 `.env`）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增硬约束：`.env.example` 新增或重命名键名时，必须在同一次变更里把该键同步写入本机 `.env`，值未知就先留空（`KEY=`），不得猜测值或沿用其他键的值。`.env` 被 Git 忽略，值不进仓库。ADR 检查：未命中（只约束本机环境文件的维护动作，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。该规则只约束此后的变更，不回填既有缺口。

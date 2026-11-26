@@ -168,6 +168,53 @@ export type Issue = {
   created_at: string
 }
 
+export type TraceStatus = 'ok' | 'error' | 'rejected'
+
+export type McpTrace = {
+  trace_id: string
+  request_id: string
+  rpc_id: string | null
+  called_at: string
+  credential: { id: string | null; name: string | null }
+  tool: string | null
+  status: TraceStatus
+  http_status: number
+  error_code: number | null
+  error_kind: string | null
+  duration_ms: number
+  result_bytes: number | null
+  projects: string[] | null
+  client: string | null
+}
+
+export type McpTraceParams = {
+  limit?: number
+  offset?: number
+  tool?: string
+  status?: TraceStatus
+  credential?: string
+  since?: string
+  until?: string
+}
+
+export type McpTraceSummary = {
+  since: string
+  days: number
+  total: number
+  ok: number
+  error: number
+  rejected: number
+  tools: {
+    tool: string
+    count: number
+    ok: number
+    error: number
+    rejected: number
+    avg_ms: number
+  }[]
+  credentials: { id: string; name: string | null; count: number }[]
+}
+
 export type WriteResult = {
   id: string
   revision: string
@@ -374,6 +421,12 @@ export const api = {
     request<{ issues: Issue[]; total: number; offset: number; limit: number }>(
       `/api/v1/kb/audit${queryString({ limit })}`,
     ),
+  mcpTraces: (params: McpTraceParams = {}) =>
+    request<{ items: McpTrace[]; total: number; offset: number; limit: number }>(
+      `/api/v1/kb/mcp-traces${queryString({ ...params })}`,
+    ),
+  mcpTracesSummary: (days = 7) =>
+    request<McpTraceSummary>(`/api/v1/kb/mcp-traces/summary${queryString({ days })}`),
   projects: () =>
     request<{ items: KnowledgeBase[]; total: number }>('/api/v1/kb/projects'),
   createProject: (payload: { id: string; name?: string; description?: string }) =>
