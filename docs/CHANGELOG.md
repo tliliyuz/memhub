@@ -21,6 +21,13 @@
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增硬约束：`.env.example` 新增或重命名键名时，必须在同一次变更里把该键同步写入本机 `.env`，值未知就先留空（`KEY=`），不得猜测值或沿用其他键的值。`.env` 被 Git 忽略，值不进仓库。ADR 检查：未命中（只约束本机环境文件的维护动作，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。该规则只约束此后的变更，不回填既有缺口。
 
+## 2026-11-26（补齐采集源原始队列清理接口）
+
+- `fix(ingest)`：实现 `DELETE /ingest/source/{source_id}?device_id=<id>&purge=true`，仅接受 provision token。先核对三个队列根下所有待删文件的设备和源，再清理文件、刷新配额缓存；保留已有知识、游标、去重与批次状态。成功（含空清理）记录 `ingest_purge` 审计。删除路径不再直接引用 Windows 专有的 `stat.FILE_ATTRIBUTE_REPARSE_POINT`（改 `getattr` 安全读取），避免 Linux/macOS 上抛 `AttributeError`。
+- `docs`：采集 API 契约升 0.9，索引升 0.13；同步源注册表与环境键说明。
+- 验证（2026-11-26，测试库 `memhub_dev`）：RED：新增清理用例因路由缺失返回 404，归属冲突与缺设备参数用例随后分别捕获误删（200）和错误信封（422），跨平台回归用例在旧实现下报 `AttributeError`。GREEN：`pytest tests/unit tests/contract -q --tb=line` 为 562 passed / 1 skipped；本地 `curl.exe` 注册、推送、游标、清理、重复清理与游标保留冒烟通过；`ruff check src tests scripts alembic`、同目录格式检查及 `mypy src` 通过。
+
+
 ## 2026-11-25（投影子系统下线：图谱与检索直读 PG）
 
 - `refactor(kb)`：删除 `memhub/kb/projection.py` 与 `tests/contract/test_kb_projection_pg.py`；kb-api 去掉 `GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `_GraphRestarter`，`healthz` 改为只返回 `{ok, store, nodes}`（`store` 恒为 `pg`）。`archive.projection_dirty()` / `clear_projection_dirty()` 与 `PgKnowledgeStore.latest_write()` 一并移除；`archive.MARKER` 保留为历史 journal 的最后一个步骤，恢复流程按原样重放。

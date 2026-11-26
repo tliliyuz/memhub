@@ -759,3 +759,187 @@ def test_invalid_queue_max_bytes_fails_startup(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "not-a-number")
     with pytest.raises(RuntimeError, match="MEMHUB_QUEUE_MAX_BYTES"):
         create_app()
+
+
+PROVISION = "prov-secret"
+PROVISION_AUTH = {"Authorization": f"Bearer {PROVISION}"}
+
+
+@pytest.fixture
+def purge_client(
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[TestClient]:
+    """带 provision token 与 DATA_DIR 的应用；设备 token 走 dev token。"""
+    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
+    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", PROVISION)
+    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
+    with TestClient(create_app(schema=kb_targets)) as test_client:
+        registered = test_client.post(
+            "/devices/register",
+            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+            headers=PROVISION_AUTH,
+        )
+        assert registered.status_code == 200
+        yield test_client
+
+
+def _purge(
+    client: TestClient,
+    source_id: str = "cc-sessions",
+    *,
+    device_id: str | None = DEVICE,
+    headers: dict[str, str] | None = PROVISION_AUTH,
+    purge: str | None = "true",
+) -> tuple[int, dict[str, object]]:
+    params = {}
+    if device_id is not None:
+        params["device_id"] = device_id
+    if purge is not None:
+        params["purge"] = purge
+    response = client.delete(f"/ingest/source/{source_id}", params=params, headers=headers or {})
+    return response.status_code, response.json()
+
+
+def _seed_queue_copies(root: Path, device_id: str, source_id: str) -> None:
+    """把已推送的 raw 批次镜像到 processed_raw 与 pending_review，模拟 worker 处理后的布局。"""
+    for batch in (root / "raw_store" / device_id / source_id).rglob("*.json"):
+        relative = batch.relative_to(root / "raw_store")
+        for queue in ("processed_raw", "pending_review"):
+            target = root / queue / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(batch.read_bytes())
+
+
+@pytest.mark.parametrize("headers", [None, {"Authorization": "Bearer nope"}, AUTH])
+def test_purge_rejects_missing_wrong_and_device_token(
+    purge_client: TestClient, headers: dict[str, str] | None
+) -> None:
+    """设备 token 与错误 token 都不能清理；采集器不得删自己的数据。"""
+    _push(purge_client, [_file("a.jsonl", "hello")])
+    status, body = _purge(purge_client, headers=headers)
+    assert status == 401
+    assert body["code"] == 1001
+
+
+def test_purge_without_configured_provision_token_is_denied(
+    kb_targets: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dev stub 没配 provision token 时也不放开删除。"""
+    monkeypatch.delenv("MEMHUB_PROVISION_TOKEN", raising=False)
+    with TestClient(create_app(schema=kb_targets)) as test_client:
+        status, body = _purge(test_client, headers=AUTH)
+        assert status == 401
+        assert body["code"] == 1001
+        status, _ = _purge(test_client, headers={"Authorization": "Bearer "})
+        assert status == 401
+
+
+def test_purge_removes_only_the_requested_source(purge_client: TestClient, tmp_path: Path) -> None:
+    """删除三个队列根下该 (device, source) 的目录，别的源与别的设备不动。"""
+    _push(purge_client, [_file("a.jsonl", "hello")])
+    _seed_queue_copies(tmp_path, DEVICE, "cc-sessions")
+    other_source = tmp_path / "raw_store" / DEVICE / "other-src" / "aa" / "x.json"
+    other_device = tmp_path / "raw_store" / str(uuid.uuid4()) / "cc-sessions" / "aa" / "x.json"
+    for keep in (other_source, other_device):
+        keep.parent.mkdir(parents=True)
+        keep.write_text("{}", encoding="utf-8")
+
+    status, body = _purge(purge_client)
+
+    assert status == 200
+    assert body == {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "device_id": DEVICE,
+            "source_id": "cc-sessions",
+            "purged": {"raw_store": 1, "processed_raw": 1, "pending_review": 1},
+        },
+    }
+    for queue in ("raw_store", "processed_raw", "pending_review"):
+        assert not (tmp_path / queue / DEVICE / "cc-sessions").exists()
+    assert other_source.exists()
+    assert other_device.exists()
+
+
+def test_purge_refuses_a_directory_shared_with_another_source(
+    purge_client: TestClient, tmp_path: Path
+) -> None:
+    """旧队列名映射不是一一对应，目录名对上不代表内容属于请求的源。"""
+    assert _push(purge_client, [_file("a.jsonl", "hello")])[0] == 200
+    _seed_queue_copies(tmp_path, DEVICE, "cc-sessions")
+    (batch,) = (tmp_path / "pending_review" / DEVICE / "cc-sessions").rglob("*.json")
+    payload = json.loads(batch.read_text(encoding="utf-8"))
+    payload["source_id"] = "CC-SESSIONS"
+    batch.write_text(json.dumps(payload), encoding="utf-8")
+
+    status, body = _purge(purge_client)
+
+    assert status == 400
+    assert body["code"] == 1003
+    assert batch.exists()
+    assert len(list((tmp_path / "raw_store").rglob("*.json"))) == 1
+    assert len(list((tmp_path / "processed_raw").rglob("*.json"))) == 1
+
+
+def test_purge_is_idempotent_and_keeps_cursor(purge_client: TestClient) -> None:
+    """重复清理仍 200 且计数为 0；游标保留，同一内容不会被重新接收。"""
+    first = _file("a.jsonl", "hello")
+    assert _push(purge_client, [first], batch_id="b-1")[0] == 200
+    assert _purge(purge_client)[0] == 200
+    status, body = _purge(purge_client)
+    assert status == 200
+    assert body["data"]["purged"] == {"raw_store": 0, "processed_raw": 0, "pending_review": 0}
+    cursor = purge_client.get(
+        "/ingest/cursor",
+        params={"device_id": DEVICE, "source_id": "cc-sessions"},
+        headers=AUTH,
+    ).json()["data"]
+    assert cursor["files"][0]["offset"] == first["to_offset"]
+
+
+@pytest.mark.parametrize(
+    ("source_id", "device_id", "purge"),
+    [
+        ("cc-sessions", DEVICE, None),
+        ("cc-sessions", DEVICE, "false"),
+        ("cc-sessions", DEVICE, "yes"),
+        ("cc-sessions", None, "true"),
+        ("cc-sessions", "not-a-uuid", "true"),
+        ("%2E%2E", DEVICE, "true"),
+        ("a%20b", DEVICE, "true"),
+        ("cc-sessions", "kb-console", "true"),
+    ],
+)
+def test_purge_rejects_bad_parameters(
+    purge_client: TestClient, tmp_path: Path, source_id: str, device_id: str, purge: str | None
+) -> None:
+    _push(purge_client, [_file("a.jsonl", "hello")])
+    status, body = _purge(purge_client, source_id, device_id=device_id, purge=purge)
+    assert status == 400
+    assert body["code"] == 1003
+    assert len(list((tmp_path / "raw_store").rglob("*.json"))) == 1
+
+
+def test_purge_is_recorded_in_write_audit(
+    purge_client: TestClient, kb_targets: str, test_dsn: str
+) -> None:
+    _push(purge_client, [_file("a.jsonl", "secret-body")])
+    _purge(purge_client)
+
+    async def read_rows() -> list[tuple[str | None, str | None, str | None, str, str]]:
+        store = create_runtime_store(dsn=test_dsn, schema=kb_targets)
+        try:
+            async with store.sessions() as session:
+                rows = (
+                    await session.scalars(
+                        select(KbWriteAudit).where(KbWriteAudit.action == "ingest_purge")
+                    )
+                ).all()
+            return [(row.actor, row.project, row.node_id, row.action, row.result) for row in rows]
+        finally:
+            await store.aclose()
+
+    rows = asyncio.run(read_rows())
+    assert rows == [("provision", None, None, "ingest_purge", "ok")]
+    assert PROVISION not in repr(rows)
