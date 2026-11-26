@@ -1,6 +1,6 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.5（新增 MCP 调用轨迹查询，§4.9）
+> 版本: 0.6（ADR-0014：新建/更新写 canonical，`tier=candidate` 无写入路径，检索默认排除 `deprecated`）
 > 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、当前登录身份。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
@@ -70,7 +70,7 @@ memhub kb --web-dist web/dist --data-dir data   # 端口默认 8701
   "title": "HTTPX trust_env 导致代理 502",
   "body": "先看 trust_env。",
   "project": "memhub",
-  "tier": "candidate",
+  "tier": "canonical",
   "tags": ["httpx"],
   "entity_kind": null,
   "confidence": 0.8,
@@ -81,6 +81,7 @@ memhub kb --web-dist web/dist --data-dir data   # 端口默认 8701
 ```
 
 - `kind` 与 `tier` 取 [node-schema.md](node-schema.md) 的枚举；`kind=entity` 必须给 `entity_kind`，否则 `1012`。
+- 创建与更新一律写 `canonical`（ADR-0014）；显式传 `tier=candidate` 返回 `422`，`candidate` 已无写入路径。
 - `tier=deprecated` 必须给 `superseded_by` 或 `deprecated_reason` 至少一项（走 deprecate 接口更合适）：有替代节点就指向它，结论被证伪则只记原因。管理台 `PUT` 与 `/deprecate` 目前只写 `superseded_by`，`deprecated_reason` 由 MCP 写工具写入。
 - `slug` 缺省由标题生成 kebab-case；中文标题生成不出 slug 时回退 `n-<随机 4 字节 hex>`。同库同 kind 重名 → `1012`。
 - 写入落 `kb_nodes` 一行（`id=<project>/<kind>/<slug>`），正文存 `body` 列；同一事务追加 `kb_node_revisions`。
@@ -112,7 +113,7 @@ memhub kb --web-dist web/dist --data-dir data   # 端口默认 8701
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/v1/kb/search?q=&project=&kinds=a,b&tier=all&limit=` | `{results:[{id, kind, tier, title, score, matched, snippet}]}`；`matched` 固定为 `bm25`，`score` 归一化到 0–1 且只在本次结果内可比（真源为 `kb_*` 表，应用层 BM25Okapi 排序） |
+| GET | `/api/v1/kb/search?q=&project=&kinds=a,b&tier=all&limit=` | `{results:[{id, kind, tier, title, score, matched, snippet}]}`；`tier` 取 `canonical`（默认，排除 `deprecated`）或 `all`；`matched` 固定为 `bm25`，`score` 归一化到 0–1 且只在本次结果内可比（真源为 `kb_*` 表，应用层 BM25Okapi 排序） |
 | GET | `/api/v1/kb/audit?limit=&offset=` | `{issues:[{type, target, …}], total, offset, limit}` |
 
 审计 issue 类型：`contradiction`（矛盾）、`broken_link`（断链 / 未解析边）、`orphan`（孤立节点）、`low_confidence`（置信度低）、`stale`（长期未更新）。修复入口都是节点编辑。

@@ -20,7 +20,7 @@ collector 推送 → ingest-api 校验并落 raw_store
 - `source_type` 现有 `sessions | wiki | docs`，其中 `docs` 已映射到 `wiki` 抽取 profile（`PROMPT_BY_SOURCE`）。
 - worker 只认 raw JSON：`device_id / source_id / source_type / batch_id / path / sha256 / content`；
   `source_id` 在 merge 时就是知识库（project）。
-- 自动写入一律 `tier=candidate`，人工确认后再升 canonical。
+- 自动写入一律 `tier=candidate`，人工确认后再升 canonical。（被 ADR-0014 修订：写入即 `canonical`，取消候选转正门槛。）
 
 结论：上传不需要新的抽取实现，只需要把文档变成 worker 已经认识的 raw 文件。
 

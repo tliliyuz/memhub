@@ -44,7 +44,7 @@ async def test_create_generates_kebab_id_and_frontmatter(store: KnowledgeStore) 
     assert result["id"] == "memhub/fact/httpx-trust-env-502"
     node, body = await store.read(result["id"])
     assert node.title == "HTTPX trust_env 导致代理 502"
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
     assert node.source[0].type.value == "manual"
     assert "trust_env" in body
     assert result["revision"] == await manage.node_revision(store, result["id"])

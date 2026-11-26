@@ -6,7 +6,8 @@
 必须回到规格裁决。
 
 覆盖：
-- §8.4 tier 边界：canonical 上的 `kb_update_candidate` / `kb_deprecate` → `not_candidate`。
+- §8.4 创建者边界：没有创建者记录的节点（直接写入）上调用
+  `kb_update_candidate` / `kb_deprecate` → `not_owner`（ADR-0014 取代 `not_candidate`）。
 - §8.5 去重与拒绝码：slug 冲突、正文哈希去重、证据校验、每日上限；
   `daily_limit_exceeded` 仍是 409/1010（原实现是 `CandidateConflict`，不是 429）。
 """
@@ -103,13 +104,13 @@ async def _create(
 async def test_create_candidate_round_trip(store: KnowledgeStore | PgKnowledgeStore) -> None:
     created = await _create(store)
     assert created["id"] == "sample/fact/mcp-write-fixture"
-    assert created["tier"] == Tier.CANDIDATE.value
+    assert created["tier"] == Tier.CANONICAL.value
     assert REVISION_RE.fullmatch(created["revision"])
     assert created["revision"] == await store.revision(created["id"])
     assert created["commit"] is None or isinstance(created["commit"], str)
 
     node, body = await store.read(created["id"])
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
     assert node.title == "MCP 写候选夹具"
     assert body.rstrip() == BODY.rstrip()
     refs = {source.ref for source in node.source}
@@ -126,7 +127,10 @@ async def test_slug_conflicts_never_overwrite(store: KnowledgeStore | PgKnowledg
     assert (canonical.value.status, canonical.value.code) == (409, ErrorCode.KB_CONFLICT)
     assert (await store.read(node_id))[0].tier is Tier.CANONICAL
 
-    await _create(store, slug="occupied")
+    # `slug_conflict_candidate` 只保留给历史存量 candidate 行。
+    await store.write(
+        "sample/fact/occupied", _node("sample/fact/occupied", tier=Tier.CANDIDATE), "历史候选正文"
+    )
     with pytest.raises(candidates.CandidateConflict) as candidate:
         await _create(store, slug="occupied", title="另一个标题")
     assert candidate.value.data["reason"] == "slug_conflict_candidate"
@@ -184,7 +188,7 @@ async def test_update_and_stale_revision(store: KnowledgeStore | PgKnowledgeStor
     assert (await store.read(created["id"]))[0].title == "改过的标题"
 
 
-async def test_tier_boundary_rejects_canonical(store: KnowledgeStore | PgKnowledgeStore) -> None:
+async def test_unowned_node_rejects_mcp_write(store: KnowledgeStore | PgKnowledgeStore) -> None:
     node_id = "sample/fact/canonical-node"
     await store.write(node_id, _node(node_id, tier=Tier.CANONICAL), "权威正文")
     revision = await store.revision(node_id)
@@ -197,7 +201,7 @@ async def test_tier_boundary_rejects_canonical(store: KnowledgeStore | PgKnowled
             grant_id=GRANT,
             projects=None,
         )
-    assert update.value.data["reason"] == "not_candidate"
+    assert update.value.data["reason"] == "not_owner"
     assert (update.value.status, update.value.code) == (409, ErrorCode.KB_CONFLICT)
 
     with pytest.raises(candidates.CandidateConflict) as deprecate:
@@ -207,7 +211,7 @@ async def test_tier_boundary_rejects_canonical(store: KnowledgeStore | PgKnowled
             grant_id=GRANT,
             projects=None,
         )
-    assert deprecate.value.data["reason"] == "not_candidate"
+    assert deprecate.value.data["reason"] == "not_owner"
     node, body = await store.read(node_id)
     assert node.tier is Tier.CANONICAL
     assert body.rstrip() == "权威正文"

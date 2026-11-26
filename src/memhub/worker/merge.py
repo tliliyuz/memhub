@@ -1,9 +1,8 @@
 """把抽取结果合并进知识真源（PG `kb_*`；文件存储仅测试夹具与迁移工具使用）。
 
-规则：
-- 自动写入一律 `tier=candidate`。
-- 目标已存在且为 `canonical` 时**不修改**，记入 `skipped`（由治理流程处理）。
-- 同一 slug 重复抽取只追加新增段落，不覆盖原文；来源去重。
+规则（ADR-0014：写入即 canonical，取消候选门槛）：
+- 新节点一律 `tier=canonical`，默认检索可见。
+- 已有节点（任意层级）继续追加式合并：追加新增段落与来源，不覆盖标题；同一正文不重复追加。
 - 永不删除。
 """
 
@@ -30,7 +29,6 @@ from memhub.worker.schema import ExtractedNode, Extraction
 class MergeReport:
     created: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
-    skipped_canonical: list[str] = field(default_factory=list)
     edges_added: int = 0
 
     @property
@@ -69,10 +67,6 @@ async def merge(
                 continue
 
             existing, existing_body = await store.read(node_id)
-            if existing.tier is Tier.CANONICAL:
-                report.skipped_canonical.append(node_id)
-                continue
-
             updated = _merge_existing(existing, node, source, moment)
             body = _merge_body(existing_body, node.body, moment)
             await store.write(node_id, updated, body)
@@ -99,7 +93,7 @@ def _new_node(
         kind=node.kind,
         entity_kind=node.entity_kind,
         title=node.title,
-        tier=Tier.CANDIDATE,
+        tier=Tier.CANONICAL,
         confidence=node.confidence,
         project=project,
         tags=node.tags,

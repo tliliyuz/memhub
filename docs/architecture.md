@@ -69,14 +69,14 @@
 
 ### kb-api
 - 管理台：`memhub kb` 在同一进程托管打包前端，`/` 由 nginx 反代；页面直接调 `/api/v1/kb/*`，没有 explorer 子进程，也没有文件投影。
-- 检索：SQL 侧按授权范围与 `kind`/`tier` 过滤候选集，应用层 BM25 排序；向量混合检索按 ADR-0007 另案推进。默认 `tier=canonical`。
+- 检索：按授权范围与 `kind` 过滤后，应用层 BM25 排序；默认排除 `deprecated`（`tier=canonical`），`tier=all` 才包含废弃节点。向量混合检索按 ADR-0007 另案推进。
 - 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
 - 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
 - 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 
 ### mcp-server（首版随 kb-api 进程）
 - 由 kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP，协议解析交给官方 MCP Python SDK；配置了 MCP 凭据才启用，未配置时直接返回 404，不落到管理台。
-- 授权库范围与读写作用域按请求注入。写工具只创建候选，复用 PG 写作用域（事务级 advisory lock）和 `kb_projects` 活动库校验；不修改权威节点。
+- 授权库范围与读写作用域按请求注入。写工具直接创建 `canonical` 节点（ADR-0014），复用 PG 写作用域（事务级 advisory lock）和 `kb_projects` 活动库校验；更新与废弃仅限节点创建者本人。
 - 独立进程与多副本形态尚未实现；拆分需先改本节与 §5 的部署形态。
 
 ## 4. 故障隔离（设计约束，不是建议）

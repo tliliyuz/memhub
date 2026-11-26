@@ -1,7 +1,8 @@
-"""候选区写工具：`kb_update_candidate` 与 `kb_deprecate` 的边界。
+"""写工具的创建者边界：`kb_update_candidate` 与 `kb_deprecate`。
 
-两条工具都只碰 `tier=candidate`：按 revision 做乐观并发，命中 canonical 或
-deprecated 时拒绝且不改动文件；废弃支持「有替代节点」与「只写原因」两种形态。
+两条工具都只碰「创建者为本凭据」的节点（ADR-0014）：按 revision 做乐观并发，
+别人的节点返回 `not_owner`；已 deprecated 的节点不可再改（`deprecated_immutable`）。
+废弃支持「有替代节点」与「只写原因」两种形态。
 """
 
 import json
@@ -10,13 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from memhub.contract import Kind, NodeFrontmatter, Tier
+from memhub.contract import Kind, NodeFrontmatter, SourceKind, SourceRef, Tier
 from memhub.kb import catalog, manage
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import call_tool
 
 GRANT_ID = "abcdef012345"
-BODY = "这是一段至少二十个字符的候选正文，用来作为更新与废弃夹具的起点。"
+OTHER_GRANT = "ffffffffffff"
+BODY = "这是一段至少二十个字符的正文，用来作为更新与废弃夹具的起点。"
 
 
 @pytest.fixture
@@ -52,10 +54,11 @@ async def make_node(
     store: KnowledgeStore,
     slug: str,
     *,
-    tier: Tier = Tier.CANDIDATE,
+    tier: Tier = Tier.CANONICAL,
     body: str = BODY,
-    title: str = "候选夹具",
+    title: str = "夹具节点",
     kind: Kind = Kind.FACT,
+    grant_id: str = GRANT_ID,
 ) -> tuple[str, str]:
     node_id = f"sample/{kind.value}/{slug}"
     now = datetime.now(UTC)
@@ -68,6 +71,7 @@ async def make_node(
         project="sample",
         tier=tier,
         superseded_by="sample/fact/elsewhere" if tier is Tier.DEPRECATED else None,
+        source=[SourceRef(type=SourceKind.MANUAL, ref=f"mcp:{grant_id}")],
         created_at=now,
         updated_at=now,
     )
@@ -112,12 +116,12 @@ async def test_update_changes_body_and_returns_new_revision(store: KnowledgeStor
     )
     assert "code" not in payload
     assert payload["id"] == node_id
-    assert payload["tier"] == "candidate"
+    assert payload["tier"] == "canonical"
     assert payload["revision"] != revision
     node, body = await store.read(node_id)
     assert body == "改正后的正文，长度仍然满足内容门槛要求。"
-    assert node.title == "候选夹具"
-    assert node.tier is Tier.CANDIDATE
+    assert node.title == "夹具节点"
+    assert node.tier is Tier.CANONICAL
     assert node.created_at == node.created_at
 
     again = await invoke(
@@ -160,17 +164,17 @@ async def test_update_revision_conflict_leaves_file_untouched(store: KnowledgeSt
     assert after_body == before_body
 
 
-async def test_update_rejects_canonical(store: KnowledgeStore) -> None:
-    node_id, revision = await make_node(store, "canonical", tier=Tier.CANONICAL)
+async def test_update_rejects_other_owner(store: KnowledgeStore) -> None:
+    node_id, revision = await make_node(store, "canonical", grant_id=OTHER_GRANT)
     payload = await invoke(
         store,
         "kb_update_candidate",
         {"id": node_id, "expected_revision": revision, "title": "越权修改"},
     )
     assert payload["code"] == 1010
-    assert payload["data"]["reason"] == "not_candidate"
+    assert payload["data"]["reason"] == "not_owner"
     node, _ = await store.read(node_id)
-    assert node.title == "候选夹具"
+    assert node.title == "夹具节点"
 
 
 async def test_update_rejects_deprecated(store: KnowledgeStore) -> None:
@@ -181,7 +185,7 @@ async def test_update_rejects_deprecated(store: KnowledgeStore) -> None:
         {"id": node_id, "expected_revision": revision, "title": "越权修改"},
     )
     assert payload["code"] == 1010
-    assert payload["data"]["reason"] == "not_candidate"
+    assert payload["data"]["reason"] == "deprecated_immutable"
 
 
 async def test_update_unknown_node_is_not_found(store: KnowledgeStore) -> None:
@@ -310,15 +314,15 @@ async def test_deprecate_with_successor_records_target(store: KnowledgeStore) ->
     assert node.superseded_by == successor
 
 
-async def test_deprecate_rejects_canonical(store: KnowledgeStore) -> None:
-    node_id, revision = await make_node(store, "authoritative", tier=Tier.CANONICAL)
+async def test_deprecate_rejects_other_owner(store: KnowledgeStore) -> None:
+    node_id, revision = await make_node(store, "authoritative", grant_id=OTHER_GRANT)
     payload = await invoke(
         store,
         "kb_deprecate",
         {"id": node_id, "expected_revision": revision, "reason": "不该生效"},
     )
     assert payload["code"] == 1010
-    assert payload["data"]["reason"] == "not_candidate"
+    assert payload["data"]["reason"] == "not_owner"
     node, _ = await store.read(node_id)
     assert node.tier is Tier.CANONICAL
 
@@ -337,7 +341,7 @@ async def test_deprecate_already_deprecated_is_rejected(store: KnowledgeStore) -
         {"id": node_id, "expected_revision": first["revision"], "reason": "第二轮废弃"},
     )
     assert payload["code"] == 1010
-    assert payload["data"]["reason"] == "not_candidate"
+    assert payload["data"]["reason"] == "deprecated_immutable"
 
 
 async def test_deprecate_rejects_self_successor(store: KnowledgeStore) -> None:
@@ -355,7 +359,7 @@ async def test_deprecate_rejects_self_successor(store: KnowledgeStore) -> None:
     assert payload["code"] == 1003
     assert payload["data"]["reason"] == "superseded_by_invalid"
     node, _ = await store.read(node_id)
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
 
 
 async def test_deprecate_rejects_unknown_successor(store: KnowledgeStore) -> None:
@@ -373,7 +377,7 @@ async def test_deprecate_rejects_unknown_successor(store: KnowledgeStore) -> Non
     assert payload["code"] == 1003
     assert payload["data"]["reason"] == "superseded_by_unavailable"
     node, _ = await store.read(node_id)
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
 
 
 async def test_deprecate_revision_conflict_leaves_file_untouched(store: KnowledgeStore) -> None:
@@ -386,7 +390,7 @@ async def test_deprecate_revision_conflict_leaves_file_untouched(store: Knowledg
     assert payload["code"] == 1010
     assert payload["data"]["reason"] == "revision_conflict"
     node, _ = await store.read(node_id)
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
 
 
 async def test_deprecate_requires_reason(store: KnowledgeStore) -> None:
@@ -436,7 +440,7 @@ async def test_deprecate_rejects_overlong_reason(store: KnowledgeStore) -> None:
     )
     assert payload["code"] == 3004
     node, _ = await store.read(node_id)
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
 
 
 async def test_update_cannot_change_slug_or_kind(store: KnowledgeStore) -> None:

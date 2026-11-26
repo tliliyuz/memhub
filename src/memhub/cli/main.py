@@ -250,7 +250,7 @@ async def _ingest(args: argparse.Namespace) -> int:
 
     source_kind = SourceKind.SESSION if args.profile == "sessions" else SourceKind.WIKI
     device = os.environ.get("MEMHUB_DEVICE_NAME", "local")
-    created = updated = skipped = failed = 0
+    created = updated = failed = 0
 
     try:
         for path in files:
@@ -306,7 +306,6 @@ async def _ingest(args: argparse.Namespace) -> int:
             )
             created += len(report.created)
             updated += len(report.updated)
-            skipped += len(report.skipped_canonical)
             print(
                 f"  ok {path.name}: +{len(report.created)} new, {len(report.updated)} updated,"
                 f" {report.edges_added} edges"
@@ -314,10 +313,7 @@ async def _ingest(args: argparse.Namespace) -> int:
     finally:
         await client.aclose()
 
-    print(
-        f"\n完成: {created} 新建 / {updated} 更新 / {skipped} 跳过(canonical) / {failed} 失败；"
-        "真源=PG（schema kb）"
-    )
+    print(f"\n完成: {created} 新建 / {updated} 更新 / {failed} 失败；真源=PG（schema kb）")
     return 1 if failed else 0
 
 

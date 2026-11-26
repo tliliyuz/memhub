@@ -1,4 +1,4 @@
-# 跨端契约（v0.13）
+# 跨端契约（v0.14）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -23,6 +23,7 @@
 
 ## 变更记录
 
+- 0.14 — 取消候选转正门槛（ADR-0014，[node-schema.md](node-schema.md) 0.5、[mcp-tools.md](mcp-tools.md) 0.7、[kb-admin-api.md](kb-admin-api.md) 0.6）：worker、MCP 与管理台写入一律 `canonical`，存量 `candidate` 由一次性迁移转正；检索默认排除 `deprecated`，`tier` 只保留 `canonical`/`all`；MCP 更新与废弃改为「创建者 actor 与调用方一致」，拒绝码 `not_candidate` 换成 `not_owner`。
 - 0.13 — 补齐采集原始队列清理接口（[ingest-api.md](ingest-api.md) 0.9）：仅接受 provision token，按设备和源清理文件，不重置云端游标或删除已提炼知识。
 - 0.12 — 投影子系统下线（[kb-admin-api.md](kb-admin-api.md) 0.4、[node-schema.md](node-schema.md) 0.4）：删除 `kg.json` 文件投影、`GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `memhub project` / `memhub serve` 命令，图谱与检索直接查询 `kb_*` 真源；`healthz` 只报 `{ok, store, nodes}`。
 - 0.11 — 时间语义收口（[node-schema.md](node-schema.md) 0.3）：`NodeFrontmatter` 的六个时间字段在模型边界统一归一为 UTC——naive 值按 UTC 补齐，带偏移的换算到 UTC；输出统一 `Z` 后缀。此前 API/MCP 传裸日期会按会话时区（生产 +08）落库，与迁移侧哈希口径不一致。`source[].captured_at` 保留原始偏移文本，不在归一范围内。

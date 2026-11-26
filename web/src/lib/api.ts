@@ -477,8 +477,7 @@ export const KINDS: { value: Kind; label: string }[] = [
 ]
 
 export const TIERS: { value: Tier; label: string }[] = [
-  { value: 'canonical', label: '正式' },
-  { value: 'candidate', label: '候选' },
+  { value: 'canonical', label: '有效' },
   { value: 'deprecated', label: '已废弃' },
 ]
 

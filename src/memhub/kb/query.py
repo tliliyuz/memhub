@@ -34,7 +34,7 @@ EDGE_LIMIT = 20
 READ_MAX_CHARS = 8192
 STALE_DAYS = 180
 STALE_REFS = 3
-TIERS = {"canonical", "candidate", "all"}
+TIERS = {"canonical", "all"}
 
 
 class QueryError(Exception):
@@ -154,7 +154,7 @@ async def search(
     tier: str = "canonical",
     limit: int = 8,
 ) -> dict[str, Any]:
-    """关键词检索。`tier` 默认只给 canonical，显式 candidate/all 才看候选。"""
+    """关键词检索。`tier=canonical`（默认）排除 deprecated；`all` 才包含废弃节点。"""
     if tier not in TIERS:
         raise QueryError(f"tier 必须是 {sorted(TIERS)} 之一，收到 {tier!r}")
     wanted_kinds = _validate_kinds(kinds)
@@ -168,7 +168,7 @@ async def search(
     for record in await _records(store, project):
         if wanted_kinds is not None and record.node.kind.value not in wanted_kinds:
             continue
-        if tier != "all" and record.node.tier.value != tier:
+        if tier != "all" and record.node.tier is Tier.DEPRECATED:
             continue
         candidates.append((record, _document_tokens(record)))
     if candidates:
@@ -179,10 +179,7 @@ async def search(
             if raw > 0:
                 scored.append((raw, record))
     if not scored:
-        return {
-            "results": [],
-            "hint": await _empty_hint(store, project, wanted_kinds, tier, terms),
-        }
+        return {"results": [], "hint": _empty_hint()}
 
     scored.sort(key=lambda item: (-item[0], item[1].id))
     ceiling = scored[0][0]
@@ -216,25 +213,7 @@ def _document_tokens(record: NodeRecord) -> list[str]:
     return tokens
 
 
-async def _empty_hint(
-    store: KnowledgeReader,
-    project: str | None,
-    kinds: set[str] | None,
-    tier: str,
-    terms: list[str],
-) -> str:
-    if tier == "all":
-        return "没有匹配节点；换个关键词，或确认 project/kinds 过滤是否过窄"
-    candidates = 0
-    for record in await _records(store, project):
-        if record.node.tier is not Tier.CANDIDATE:
-            continue
-        if kinds is not None and record.node.kind.value not in kinds:
-            continue
-        if _score(record, terms) > 0:
-            candidates += 1
-    if candidates:
-        return f'没有 {tier} 命中；有 {candidates} 个候选节点匹配，传 tier="all" 可检索'
+def _empty_hint() -> str:
     return "没有匹配节点；换个关键词，或确认 project/kinds 过滤是否过窄"
 
 
