@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-11-26（第一性原理归因与信息沉淀）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` 新增 §1.2「归因与信息沉淀」。归因要求先问「为什么会出现」，再判断方案能否从根本上解决问题、泛化性是否足够，不以一次性补丁交付；任何路径得到的长期信息先判断是否会被复用，长期事实必须在同一次变更里落进权威文档、SOP、配置键、脚本、测试或 `.env`，不得只解决当前会话后静默丢弃；无法落盘时须说明它仅在会话内及缺什么前置条件。§2 的 `.env.example` 键名同步规则是它的一个具体应用。ADR 检查：未命中（只约束工作方法，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
+
 ## 2026-11-25（`.env.example` 键名同步到 `.env`）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增硬约束：`.env.example` 新增或重命名键名时，必须在同一次变更里把该键同步写入本机 `.env`，值未知就先留空（`KEY=`），不得猜测值或沿用其他键的值。`.env` 被 Git 忽略，值不进仓库。ADR 检查：未命中（只约束本机环境文件的维护动作，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。该规则只约束此后的变更，不回填既有缺口。
