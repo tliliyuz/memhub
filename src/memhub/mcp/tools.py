@@ -1,4 +1,4 @@
-"""MCP 工具实现，与传输层无关；四个读工具，三个写候选工具。"""
+"""MCP 工具实现，与传输层无关；四个读工具，两个长期记忆读工具，三个写候选工具。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from yaml import YAMLError  # type: ignore[import-untyped]
 from memhub.contract.mcp import (
     AuditInput,
     DeprecateInput,
+    MemoryReadInput,
+    MemorySearchInput,
     ReadInput,
     RelatedInput,
     SearchInput,
@@ -23,10 +25,15 @@ from memhub.contract.mcp import (
     WriteCandidateInput,
 )
 from memhub.kb import candidates, manage, query
+from memhub.kb.bm25 import normalize
 from memhub.kb.candidates import CandidateConflict, CandidateRejected
+from memhub.kb.memory import rank_memories
 from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetUnavailable
+
+_NO_SNAPSHOT_HINT = "长期记忆尚未发布快照；请管理员在管理台发布后再试。"
+_NO_HIT_HINT = "没有匹配的已发布长期记忆；可换关键词或确认快照是否包含相关条目。"
 
 _DEFINITIONS: dict[str, tuple[type[ToolInput], str, str]] = {
     "kb_search": (
@@ -56,6 +63,24 @@ _DEFINITIONS: dict[str, tuple[type[ToolInput], str, str]] = {
         AuditInput,
         "治理审计 / Governance audit",
         "只读分页列出治理问题（矛盾、断链、孤立、低置信、陈旧）；用于健康检查，不是知识检索入口。",
+    ),
+    "kb_memory_search": (
+        MemorySearchInput,
+        "长期记忆检索 / Search memory",
+        (
+            "检索已发布的跨项目长期记忆，返回结论、边界与置信度。长期记忆是判断与归一化准则，"
+            "不是事实证据，引用前须回到原始节点核对。凭据需显式开启记忆权限，否则按不存在处理。"
+            "无结果返回空列表与 hint。"
+        ),
+    ),
+    "kb_memory_read": (
+        MemoryReadInput,
+        "读取长期记忆 / Read memory",
+        (
+            "按 slug 读取一条跨项目长期记忆的结论、失效条件与来源元数据。长期记忆不是事实证据，"
+            "不能直接充当引用依据；只返回已发布快照中的 active 条目。凭据需显式开启记忆权限，"
+            "否则按不存在处理。"
+        ),
     ),
     "kb_write_candidate": (
         WriteCandidateInput,
@@ -90,6 +115,8 @@ _DEFINITIONS: dict[str, tuple[type[ToolInput], str, str]] = {
 }
 # 写工具集合：读凭据看不到，调用也直接拒绝。
 _WRITE_TOOLS = frozenset({"kb_write_candidate", "kb_update_candidate", "kb_deprecate"})
+# 长期记忆工具：凭据未显式开启 `memory` 时不可见，调用按「不存在」拒绝（ADR-0019）。
+_MEMORY_TOOLS = frozenset({"kb_memory_search", "kb_memory_read"})
 TOOLS = [
     {
         "name": name,
@@ -103,9 +130,14 @@ TOOLS = [
 TOOL_NAMES = frozenset(_DEFINITIONS)
 
 
-def tools_for(*, writable: bool) -> list[dict[str, Any]]:
-    """按作用域裁剪工具列表；读凭据看不到写工具。"""
-    return [tool for tool in TOOLS if writable or tool["name"] not in _WRITE_TOOLS]
+def tools_for(*, writable: bool, memory: bool = False) -> list[dict[str, Any]]:
+    """按作用域裁剪工具列表；读凭据看不到写工具，未开启记忆权限时看不到记忆工具。"""
+    return [
+        tool
+        for tool in TOOLS
+        if (writable or tool["name"] not in _WRITE_TOOLS)
+        and (memory or tool["name"] not in _MEMORY_TOOLS)
+    ]
 
 
 def _content(payload: dict[str, Any], *, is_error: bool = False) -> dict[str, Any]:
@@ -129,12 +161,16 @@ async def call_tool(
     *,
     projects: frozenset[str] | None = None,
     writable: bool = False,
+    memory: bool = False,
     grant_id: str = "stdio",
 ) -> dict[str, Any]:
     """`projects=None` 仅用于本机全库调用；空集合没有任何权限。"""
     definition = _DEFINITIONS.get(name)
     if definition is None:
         return _error(-32602, "未知工具")
+    if name in _MEMORY_TOOLS and not memory:
+        # 与「条目不存在」同码，不向未开启的调用方泄露快照或条目的存在性。
+        return _error(3001, "记忆不存在")
     is_write = name in _WRITE_TOOLS
     if is_write and not writable:
         return _error(3004, "该凭据没有写候选的权限")
@@ -151,6 +187,10 @@ async def call_tool(
         return _error(3004, "工具参数不符合输入契约")
     except (TypeError, ValueError):
         return _error(3004, "工具参数不符合输入契约")
+
+    if isinstance(args, (MemorySearchInput, MemoryReadInput)):
+        # 长期记忆是跨项目快照，不按 `projects` 过滤；可见性只由 `memory` 开关决定。
+        return await _memory_tool(args, store)
 
     if projects is not None:
         if (
@@ -207,6 +247,81 @@ async def call_tool(
         return _error(3001, "节点不存在")
     except (OSError, ValueError, TypeError, KeyError, YAMLError):
         return _error(3007, "知识库读取失败")
+
+
+async def _memory_tool(
+    args: MemorySearchInput | MemoryReadInput,
+    store: KnowledgeStore | PgKnowledgeStore,
+) -> dict[str, Any]:
+    """只读当前 `published` 快照；文件存储没有记忆真源，按无快照处理。
+
+    快照是发布时的冻结视图，但废弃要立即生效：这里再用当前条目状态过滤一次，
+    只把现在仍为 active 的条目暴露出去。
+    """
+    if not isinstance(store, PgKnowledgeStore):
+        # 文件存储没有记忆真源，按无快照处理。
+        if isinstance(args, MemorySearchInput):
+            return _content({"results": [], "hint": _NO_SNAPSHOT_HINT})
+        return _error(3001, "记忆不存在")
+    snapshot = await store.published_memory_snapshot()
+    if snapshot is None:
+        if isinstance(args, MemorySearchInput):
+            return _content({"results": [], "hint": _NO_SNAPSHOT_HINT})
+        return _error(3001, "记忆不存在")
+    entries = [entry for entry in snapshot["entries"] if isinstance(entry, dict)]
+    slugs = [str(entry["slug"]) for entry in entries if isinstance(entry.get("slug"), str)]
+    states = await store.memory_states(slugs)
+    active = [
+        entry
+        for entry in entries
+        if states.get(str(entry.get("slug")), {}).get("status") == "active"
+    ]
+    if isinstance(args, MemorySearchInput):
+        ranked = rank_memories(active, args.query)[: args.limit]
+        ceiling = ranked[0][0] if ranked else 0.0
+        payload: dict[str, Any] = {
+            "version": snapshot["version"],
+            "results": [
+                {
+                    "slug": entry["slug"],
+                    "title": entry["title"],
+                    "conclusion": entry["conclusion"],
+                    "boundary": entry["boundary"],
+                    "confidence": entry["confidence"],
+                    "score": normalize(score, ceiling=ceiling),
+                }
+                for score, entry in ranked
+            ],
+        }
+        if not payload["results"]:
+            payload["hint"] = _NO_HIT_HINT
+        return _content(payload)
+    for entry in active:
+        if entry.get("slug") == args.slug:
+            return _content(
+                {
+                    "version": snapshot["version"],
+                    "title": entry["title"],
+                    "conclusion": entry["conclusion"],
+                    "boundary": entry["boundary"],
+                    "invalidation": entry["invalidation"],
+                    "confidence": entry["confidence"],
+                    "status": entry["status"],
+                    "revision": entry["revision"],
+                    # 证据只保留跨项目可复用的来源元数据，裁剪 node_id。
+                    "evidence": [
+                        {
+                            "project": reference.get("project"),
+                            "session": reference.get("session"),
+                            "session_ref": reference.get("session_ref"),
+                            "observed_at": reference.get("observed_at"),
+                        }
+                        for reference in entry.get("evidence") or []
+                        if isinstance(reference, dict)
+                    ],
+                }
+            )
+    return _error(3001, "记忆不存在")
 
 
 async def _write_tool(
