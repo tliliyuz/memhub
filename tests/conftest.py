@@ -3,8 +3,9 @@
 - 事件循环：psycopg 异步实现不支持 Windows 默认的 ProactorEventLoop，本机跑 PG
   测试必须换成 SelectorEventLoop（生产/CI 在 Linux 上不受影响）。
 - kb PG 夹具：每个用例一个独立 schema（schema-per-test，规格 §9.1.4），连接串取
-  `MEMHUB_TEST_DB_URL`（指向云端 `memhub_dev`，角色无 CREATEDB）。未设置时 skip，
-  但 skip **不计为通过**（规格 §8.10）：验收命令必须带上该变量。
+  `MEMHUB_TEST_DB_URL`（指向云端 `memhub_dev`，角色无 CREATEDB）。未设置时依次读
+  仓库根 `.env` 与 worktree 主 checkout 的 `.env`（见 `tests/env_loader.py`）；仍拿不到
+  时 skip，但 skip **不计为通过**（规格 §8.10）。
 """
 
 from __future__ import annotations
@@ -14,11 +15,19 @@ import os
 import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from env_loader import resolve_test_db_url
+
+# 显式环境变量优先；未设置或为空时从 `.env` 读回同一个键（worktree 回落到主 checkout）。
+_resolved_test_dsn = resolve_test_db_url(Path(__file__).resolve().parents[1])
+if _resolved_test_dsn:
+    os.environ["MEMHUB_TEST_DB_URL"] = _resolved_test_dsn
 
 if sys.platform == "win32":
     # 同步 `TestClient` 的 portal 走默认事件循环策略；不换掉 Proactor，
