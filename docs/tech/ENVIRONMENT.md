@@ -46,7 +46,7 @@
 | `MEMHUB_DISK_WARN_PCT` | 否 | `80` | disk-guard | 非法值启动失败 |
 | `MEMHUB_GIT_REMOTE` | 否 | 空 | kb | 空则不自动 push |
 | `MEMHUB_KB_WEB_DIST` | 否 | 空 | kb-api | 留空只提供 API、不托管前端；目录里没有 `index.html` 时同样跳过静态托管 |
-| `MEMHUB_MCP_GRANTS` | 否 | 空（`/mcp` 关闭） | kb-api | MCP HTTP 凭据，JSON 数组；每项含 `sha256`（令牌摘要，64 位小写十六进制）、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、`expires_at`（UTC）、`projects`（1–128 个库 id）与可选 `name`（展示名，1–64 字符；缺失时界面降级显示摘要前 12 位）。空或未设时 `/mcp` 一律 404 且不落到 SPA；配置非法（含重复摘要）启动失败；过期、缺失或不匹配的凭据返回 401。吊销 = 删除该条摘要并重启 kb-api；需安装 `memhub[mcp-http]`，否则启用时报错退出 |
+| `MEMHUB_MCP_GRANTS` | 否 | 空（`/mcp` 关闭） | kb-api | MCP HTTP 凭据，JSON 数组；每项含 `sha256`（令牌摘要，64 位小写十六进制）、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、`expires_at`（UTC）、`projects`（1–128 个库 id）、可选 `name`（展示名，1–64 字符；缺失时界面降级显示摘要前 12 位）与可选 `memory`（布尔，默认 `false`；显式开启才暴露长期记忆读工具，与 `projects` 正交）。空或未设时 `/mcp` 一律 404 且不落到 SPA；配置非法（含重复摘要）启动失败；过期、缺失或不匹配的凭据返回 401。吊销 = 删除该条摘要并重启 kb-api；需安装 `memhub[mcp-http]`，否则启用时报错退出 |
 | `MEMHUB_KB_TRACE_SPOOL` | 否 | `$MEMHUB_DATA_DIR/mcp_trace_spool.jsonl` | kb-api | MCP 调用轨迹的落库失败兜底文件（ADR-0015）。两者都未配置时 spool 关闭，仅记 ERROR 日志；路径不可写不阻断启动，但会在写失败时丢失该条记录。需要该目录对 kb 运行用户可写（容器内 `/var/lib/memhub`） |
 
 ## 3. 模型调用

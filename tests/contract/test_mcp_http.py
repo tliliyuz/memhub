@@ -43,19 +43,23 @@ def http_sdk() -> None:
 
 
 def grant(
-    project: str = "sample", *, expired: bool = False, scope: str = "mcp:read"
+    project: str = "sample",
+    *,
+    expired: bool = False,
+    scope: str = "mcp:read",
+    memory: bool = False,
 ) -> tuple[dict, dict[str, str]]:
     token = secrets.token_urlsafe(32)
     expires = datetime.now(UTC) + timedelta(minutes=-5 if expired else 5)
-    return (
-        {
-            "sha256": hashlib.sha256(token.encode()).hexdigest(),
-            "scope": scope,
-            "expires_at": expires.isoformat(),
-            "projects": [project],
-        },
-        {**HEADERS, "authorization": f"Bearer {token}"},
-    )
+    config: dict = {
+        "sha256": hashlib.sha256(token.encode()).hexdigest(),
+        "scope": scope,
+        "expires_at": expires.isoformat(),
+        "projects": [project],
+    }
+    if memory:
+        config["memory"] = True
+    return config, {**HEADERS, "authorization": f"Bearer {token}"}
 
 
 def configure(monkeypatch: pytest.MonkeyPatch, *, expired: bool = False) -> dict[str, str]:
@@ -226,6 +230,73 @@ async def test_sdk_round_trip_separates_grant_scopes(
                         )
                         assert invalid.is_error
                         assert json.loads(invalid.content[0].text)["code"] == 3004
+
+
+async def test_sdk_memory_grant_exposes_and_reads_memory_tools(
+    web: None, http_sdk: None, monkeypatch: pytest.MonkeyPatch, kb_pg_schema: str
+) -> None:
+    from httpx2 import ASGITransport, AsyncClient
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
+
+    memory_config, memory_headers = grant(scope="mcp:read", memory=True)
+    plain_config, plain_headers = grant(scope="mcp:read")
+    monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([memory_config, plain_config]))
+
+    store = create_runtime_store(schema=kb_pg_schema)
+    await store.create_memory(
+        slug="retry-backoff",
+        title="重试退避",
+        conclusion="重试需要指数退避。",
+        boundary="幂等操作",
+        invalidation="不可重放时不适用。",
+        confidence=0.8,
+        evidence=(),
+        contradicts=(),
+        actor="ui",
+        reason="seed",
+    )
+    await store.publish_memory_snapshot(actor="ui", note="seed")
+    await store.aclose()
+
+    app = create_app(schema=kb_pg_schema)
+    async with app.router.lifespan_context(app):
+        for headers, expected, enabled in (
+            (
+                memory_headers,
+                {
+                    "kb_search",
+                    "kb_read",
+                    "kb_related",
+                    "kb_audit_list",
+                    "kb_memory_search",
+                    "kb_memory_read",
+                },
+                True,
+            ),
+            (
+                plain_headers,
+                {"kb_search", "kb_read", "kb_related", "kb_audit_list"},
+                False,
+            ),
+        ):
+            async with AsyncClient(transport=ASGITransport(app=app), headers=headers) as http:
+                transport = streamable_http_client("http://localhost/mcp", http_client=http)
+                with anyio.fail_after(10):
+                    async with Client(transport) as client:
+                        assert {tool.name for tool in (await client.list_tools()).tools} == expected
+                        search = await client.call_tool("kb_memory_search", {"query": "重试退避"})
+                        payload = json.loads(search.content[0].text)
+                        if not enabled:
+                            assert search.is_error
+                            assert payload["code"] == 3001
+                            continue
+                        assert not search.is_error
+                        assert payload["results"][0]["slug"] == "retry-backoff"
+                        read = await client.call_tool("kb_memory_read", {"slug": "retry-backoff"})
+                        assert not read.is_error
+                        entry = json.loads(read.content[0].text)
+                        assert entry["invalidation"] == "不可重放时不适用。"
 
 
 async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
