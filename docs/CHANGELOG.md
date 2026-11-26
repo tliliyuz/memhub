@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-11-26（意图判断与响应边界）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` 新增 §1.3「意图判断与响应边界」：接到消息先判断意图再动作，禁止在判断意图前建 worktree、改代码或开分支；现象描述、原因追问与现状核对默认只给诊断结论与根因，结论放前面；只有明确要求变更（「改一下」「修一下」「做吧」）或意图清楚指向实现才动手，不得把诊断自动升级成修复；意图含糊时先澄清需求与边界并给出可决策选项。ADR 检查：未命中（只约束响应方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
+
 ## 2026-11-26（本地 Git 不问、验收后强制回 dev，资源占用约束）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 把分支闭环与 Git 授权改为强制约束：任务验收后必须立即把特性分支经 `--no-ff` 合回 `dev`、切回 `dev`，然后删除该分支与自己的 worktree，不得以等待排期或「已提交」为由滞留；本地 Git 操作一律直接执行，禁止征求或等待负责人确认，只有远端操作需要当次授权。新增资源占用约束：验收前查看本项目标签页与进程，只按需启动，禁止多开标签页与常驻 Node/Python 服务进程，验收后全部关闭；多开并发需先确认。ADR 检查：未命中（只约束执行方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
