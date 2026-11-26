@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## 2026-11-26（本地 Git 不问、验收后强制回 dev，资源占用约束）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 把分支闭环与 Git 授权改为强制约束：任务验收后必须立即把特性分支经 `--no-ff` 合回 `dev`、切回 `dev`，然后删除该分支与自己的 worktree，不得以等待排期或「已提交」为由滞留；本地 Git 操作一律直接执行，禁止征求或等待负责人确认，只有远端操作需要当次授权。新增资源占用约束：验收前查看本项目标签页与进程，只按需启动，禁止多开标签页与常驻 Node/Python 服务进程，验收后全部关闭；多开并发需先确认。ADR 检查：未命中（只约束执行方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
+
 ## 2026-11-26（测试入口自动读取 `.env` 的测试库 DSN）
 
 - `test(conftest)`：新增 `tests/env_loader.py`，`tests/conftest.py` 导入时调用 `resolve_test_db_url()`——进程环境变量优先；未设置或为空时依次读仓库根 `.env` 与（worktree 场景）主 checkout 的 `.env`，只读 `MEMHUB_TEST_DB_URL` 一个键，不加载整份文件，避免覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量；两处都拿不到时维持 skip。`pyproject.toml` 的 pytest 配置增加 `pythonpath = ["tests"]`。
