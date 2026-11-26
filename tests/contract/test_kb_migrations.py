@@ -31,6 +31,10 @@ KB_TABLES = {
     "kb_archives",
     "kb_write_audit",
     "kb_mcp_trace",
+    "kb_memory_entries",
+    "kb_memory_revisions",
+    "kb_memory_snapshots",
+    "kb_memory_candidates",
 }
 
 

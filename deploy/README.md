@@ -153,6 +153,7 @@ kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查
 |:---|:---|:---|
 | `memhub purge-expired` | 删 25h 外批次记录 + 30 天外隔离文件 + 裁剪 processed_raw | 0 正常 / 2 配置错 |
 | `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
+| `memhub memory-aggregate --publish` | 聚合跨项目 canonical 节点，写入记忆条目/候选并发布快照 | 0 成功（含无节点）/ 1 聚合或模型失败 / 2 配置错 |
 
 ### timer 完整参数（照抄）
 
@@ -181,6 +182,29 @@ rebuild timer 已随投影子系统下线移除：图谱与检索直读 `kb_*` �
 
 timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer。
 
+### 长期记忆聚合 timer（ADR-0016）
+
+unit 文件在 `deploy/systemd/`：`memhub-memory-aggregate.service`（oneshot，用
+`memhub/app-worker:0.1.0` 跑 `memhub memory-aggregate --publish`）与
+`memhub-memory-aggregate.timer`（`Mon *-*-* 03:00:00`，`Persistent=true`）。
+03:00 与 worker 的 21:00-02:00 提炼窗口错峰；聚合只读写 `kb_*` 表并调用模型，不挂数据卷。
+
+安装（部署变更，按需执行）：
+
+```bash
+install -m 644 deploy/systemd/memhub-memory-aggregate.service \
+  deploy/systemd/memhub-memory-aggregate.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now memhub-memory-aggregate.timer
+systemctl list-timers memhub-memory-aggregate.timer
+```
+
+- `/etc/memhub/env` 必须提供 `MEMHUB_KB_DB_URL`、`MEMHUB_LLM_BASE_URL` / `MEMHUB_LLM_API_KEY`，
+  以及 `MEMHUB_LLM_MODEL_MEMORY`（未设置时回退 `MEMHUB_LLM_MODEL_EXTRACT`）；缺任一则容器退出 2。
+- 聚合发布的快照不会热替换正在运行的 worker：抽取固定使用进程启动时读到的版本，要让新快照生效
+  需重启 worker。管理台「长期记忆」页的发布/回滚/停用同样要重启 worker 才改变注入内容。
+- 首次上线前先手动 `--dry-run` 看聚合计划（仍会调用模型，但不写库），确认门槛与条数符合预期。
+
 ### 知识真源切换（markdown → PG，一次性）
 
 本节覆盖 ADR-0013 的一次性上线：`knowledge/` 从真源降为迁移源，迁移校验通过后删除。
@@ -190,11 +214,26 @@ timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer
    - 在生产 `memhub_prod` 建 schema `kb`，以及两个角色：`memhub_kb_owner`（对 `kb_*` 有 DDL，Alembic 用）与
      `memhub_kb_app`（只对 `kb_*` 做 DML，kb-api 运行时用）。两者 `search_path` 固定 `kb`，**不授予 `public` 的
      `USAGE`**——运行态 5 表在 `public` 里，PG 15+ 默认对 `PUBLIC` 授 `USAGE`，只靠「另建角色」挡不住。
+   - **默认权限（漏了会静默降级）**：`memhub_kb_app` 的 DML 是逐表授予的，后续迁移新建的表不会自动获得。
+     建角色时以 `memhub_kb_owner` 执行一次：
+     ```sql
+     ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_owner IN SCHEMA kb
+       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO memhub_kb_app;
+     ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_owner IN SCHEMA kb
+       GRANT USAGE, SELECT ON SEQUENCES TO memhub_kb_app;
+     ```
+     默认权限只覆盖执行之后由该角色新建的对象；既有表要单独补
+     `GRANT SELECT, INSERT, DELETE ON kb.<表> TO memhub_kb_app` 与
+     `GRANT USAGE ON SEQUENCE kb.<表>_id_seq TO memhub_kb_app`。漏掉这步不会让部署失败：新表对运行态角色
+     不可见，MCP 调用轨迹写入会全部退到 spool、轨迹查询直接报权限错（2026-11-26 发版的 `0002_kb_mcp_trace`
+     已实际命中）。
    - 连接配额建议：`memhub_kb_app` 限 4（连接池 2+2，ADR-0013 §6 的最小可行值），`memhub_kb_owner` 限 2
      （带外 `alembic` 与 `migrate-kb` 各占一条）。加上运行态现有 2+3（ingest）与 1+1（worker），都在
      `max_connections=60` 内。
-   - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）与
-     `MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）。值只经该文件注入；文档与提交信息只写键名。
+   - `/etc/memhub/env`（0600）只追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）。值只经该文件注入；
+     文档与提交信息只写键名。**迁移 DSN 不进常驻 env**：`MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）
+     带 DDL 权限，而 `/etc/memhub/env` 会同时注入 ingest 与 worker，写进去等于把 DDL 凭据发给所有服务；
+     迁移时按第 3 步用一次性 0600 文件注入，用完即删。
    - 另建 `/etc/memhub/env.kb`（0600，归属同前）：kb 容器的独立 env_file，只放 kb 进程读取的键。
      至少 `MEMHUB_KB_DB_URL=` 同一值，且 **DSN 必须自带口令**（`postgresql://memhub_kb_app:<口令>@127.0.0.1:5432/memhub_prod`）：
      独立文件里没有 `PGPASSWORD`，仍按「DSN 不写口令 + PGPASSWORD」写法会直接认证失败。
@@ -206,11 +245,20 @@ timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer
    ingest 可以继续跑（只写 `raw_store/` 队列，不碰 `knowledge/`）。
 3. **建表**（Alembic 带外执行，不在任何容器启动时跑）：
    ```bash
-   docker run --rm --network=host --env-file /etc/memhub/env \
+   umask 077
+   /usr/bin/install -m 600 /dev/null /root/.kb-migrate.env
+   # 手工写入一行 MEMHUB_KB_MIGRATE_DB_URL=<DSN>；不要进 shell 历史、聊天或仓库
+   docker run --rm --network=host --env-file /root/.kb-migrate.env \
      memhub/app-kb:<tag> alembic -c /app/alembic.ini upgrade head
+   shred -u /root/.kb-migrate.env
    ```
    迁移角色只认 `MEMHUB_KB_MIGRATE_DB_URL`，不读 `MEMHUB_DB_URL`。这一步只建 `kb_*` 六表与
    `alembic_version`；运行态 5 表仍由 ingest 启动时自管，两套版本表互不相干。
+   升级后核对运行态角色确实拿到了新表权限（以 `memhub_kb_owner` 连库，结果都应为 `t`）：
+   ```sql
+   SELECT has_table_privilege('memhub_kb_app', 'kb.kb_mcp_trace', 'INSERT');
+   SELECT has_sequence_privilege('memhub_kb_app', 'kb.kb_mcp_trace_id_seq', 'USAGE');
+   ```
    **待负责人裁决**：上面用的是「烘进镜像的 alembic + 一次性容器」。备选是服务器上装宿主 venv 跑
    `alembic -c alembic.ini upgrade head`——但机上只有容器、没有宿主 Python，选它要额外维护一套 venv，
    且与镜像的 alembic 版本可能漂移。两种写法都可行，裁决前不要二选一固化到运维脚本。

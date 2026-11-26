@@ -52,6 +52,9 @@ class TraceEntry:
     args_digest: str | None
     projects: list[str] | None
     client: str | None
+    # 发现层事件（ADR-0018）；旧 spool 行没有这两个键时按调用事件还原。
+    event: str = "call"
+    tool_count: int | None = None
 
     def as_row(self) -> dict[str, object]:
         """spool 用 JSON 兼容行：键与列一致，时间为 ISO-8601 UTC 字符串。"""

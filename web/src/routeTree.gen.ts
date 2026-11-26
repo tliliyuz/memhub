@@ -13,6 +13,7 @@ import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
 import { Route as AppAuditRouteImport } from './routes/_app.audit'
 import { Route as AppGraphRouteImport } from './routes/_app.graph'
+import { Route as AppMemoriesRouteImport } from './routes/_app.memories'
 import { Route as AppTracesRouteImport } from './routes/_app.traces'
 import { Route as AppTrashRouteImport } from './routes/_app.trash'
 import { Route as AppNodesIndexRouteImport } from './routes/_app.nodes.index'
@@ -38,6 +39,11 @@ const AppAuditRoute = AppAuditRouteImport.update({
 const AppGraphRoute = AppGraphRouteImport.update({
   id: '/graph',
   path: '/graph',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppMemoriesRoute = AppMemoriesRouteImport.update({
+  id: '/memories',
+  path: '/memories',
   getParentRoute: () => AppRoute,
 } as any)
 const AppTracesRoute = AppTracesRouteImport.update({
@@ -80,6 +86,7 @@ export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/audit': typeof AppAuditRoute
   '/graph': typeof AppGraphRoute
+  '/memories': typeof AppMemoriesRoute
   '/traces': typeof AppTracesRoute
   '/trash': typeof AppTrashRoute
   '/nodes/$': typeof AppNodesSplatRoute
@@ -91,6 +98,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/audit': typeof AppAuditRoute
   '/graph': typeof AppGraphRoute
+  '/memories': typeof AppMemoriesRoute
   '/traces': typeof AppTracesRoute
   '/trash': typeof AppTrashRoute
   '/': typeof AppIndexRoute
@@ -105,6 +113,7 @@ export interface FileRoutesById {
   '/_app': typeof AppRouteWithChildren
   '/_app/audit': typeof AppAuditRoute
   '/_app/graph': typeof AppGraphRoute
+  '/_app/memories': typeof AppMemoriesRoute
   '/_app/traces': typeof AppTracesRoute
   '/_app/trash': typeof AppTrashRoute
   '/_app/': typeof AppIndexRoute
@@ -120,6 +129,7 @@ export interface FileRouteTypes {
     | '/'
     | '/audit'
     | '/graph'
+    | '/memories'
     | '/traces'
     | '/trash'
     | '/nodes/$'
@@ -131,6 +141,7 @@ export interface FileRouteTypes {
   to:
     | '/audit'
     | '/graph'
+    | '/memories'
     | '/traces'
     | '/trash'
     | '/'
@@ -144,6 +155,7 @@ export interface FileRouteTypes {
     | '/_app'
     | '/_app/audit'
     | '/_app/graph'
+    | '/_app/memories'
     | '/_app/traces'
     | '/_app/trash'
     | '/_app/'
@@ -186,6 +198,13 @@ declare module '@tanstack/react-router' {
       path: '/graph'
       fullPath: '/graph'
       preLoaderRoute: typeof AppGraphRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/memories': {
+      id: '/_app/memories'
+      path: '/memories'
+      fullPath: '/memories'
+      preLoaderRoute: typeof AppMemoriesRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/traces': {
@@ -243,6 +262,7 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppAuditRoute: typeof AppAuditRoute
   AppGraphRoute: typeof AppGraphRoute
+  AppMemoriesRoute: typeof AppMemoriesRoute
   AppTracesRoute: typeof AppTracesRoute
   AppTrashRoute: typeof AppTrashRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -256,6 +276,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppAuditRoute: AppAuditRoute,
   AppGraphRoute: AppGraphRoute,
+  AppMemoriesRoute: AppMemoriesRoute,
   AppTracesRoute: AppTracesRoute,
   AppTrashRoute: AppTrashRoute,
   AppIndexRoute: AppIndexRoute,

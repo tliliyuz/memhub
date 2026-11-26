@@ -1,7 +1,7 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.6（ADR-0014：新建/更新写 canonical，`tier=candidate` 无写入路径，检索默认排除 `deprecated`）
-> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、当前登录身份。
+> 版本: 0.7（ADR-0016：长期记忆管理 API）
+> 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、长期记忆、当前登录身份。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
 ## 1. 定位
@@ -178,21 +178,45 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 
 ### 4.9 MCP 调用轨迹
 
-只读查询 `kb_mcp_trace`（ADR-0015）；服务端在 `/mcp` 入口记录每次 `tools/call` 与鉴权/路由拒绝。
+只读查询 `kb_mcp_trace`（ADR-0015 / ADR-0018）；服务端在 `/mcp` 入口记录每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`。
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/v1/kb/mcp-traces?limit=&offset=&tool=&status=&credential=&since=&until=` | `{items, total, offset, limit}`，`called_at` 倒序 |
-| GET | `/api/v1/kb/mcp-traces/summary?days=` | `{since, days, total, ok, error, rejected, tools:[{tool, count, ok, error, rejected, avg_ms}], credentials:[{id, name, count}]}` |
+| GET | `/api/v1/kb/mcp-traces?limit=&offset=&event=&tool=&status=&credential=&since=&until=` | `{items, total, offset, limit}`，`called_at` 倒序 |
+| GET | `/api/v1/kb/mcp-traces/summary?days=` | `{since, days, total, ok, error, rejected, tools:[{tool, count, ok, error, rejected, avg_ms}], credentials:[{id, name, count}], funnel:{connections, listings, calls, listings_per_connection, calls_per_listing, avg_tools}}` |
 
-- `limit` 1–500（默认 50），`offset` ≥ 0；`status` ∈ `ok/error/rejected`；`credential` 同时匹配 `credential_id` 与 `credential_name`；`days` 1–30（默认 7）。
+- `limit` 1–500（默认 50），`offset` ≥ 0；`event` ∈ `call/list_tools/initialize`，默认 `call`（只看调用与拒绝，保持既有语义）；`status` ∈ `ok/error/rejected`；`credential` 同时匹配 `credential_id` 与 `credential_name`；`days` 1–30（默认 7）。
 - `avg_ms` 为该工具 `ok` 与 `error` 调用耗时的平均值（取整），`rejected` 不参与，无可算调用时为 0。
-- 每项字段：`trace_id, request_id, rpc_id, called_at, credential:{id,name}, tool, status, http_status, error_code, error_kind, duration_ms, result_bytes, projects, client`。
+- 漏斗口径：`connections` = `initialize` 成功行数，`listings` = `tools/list` 成功行数，`calls` = `call` 的 `ok + error` 行数（拒绝不计入调用）；`listings_per_connection`、`calls_per_listing` 分母为 0 时记 `0.0`；`avg_tools` 为成功列工具行的 `tool_count` 平均值，无行时为 0。
+- 每项字段：`trace_id, request_id, rpc_id, called_at, credential:{id,name}, event, tool, status, http_status, error_code, error_kind, duration_ms, result_bytes, tool_count, projects, client`。
+- `event` 为 `initialize` / `list_tools` 时 `tool` 为 `null`；`tool_count` 仅在 `tools/list` 成功时非空。
 - 凭据未配置 `name` 时 `credential.name=null`，**展示层**按 `name || id || "unknown"` 降级；契约不固化展示文案。
 - 只记元数据：不含参数原文、正文与 token；参数仅留 `args_digest`。明细保留 30 天，更早数据由写入路径节流清理。
 - 非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
 
-### 4.10 前端
+### 4.10 长期记忆（ADR-0016）
+
+只服务管理台与聚合排障；会话抽取的注入由 worker 在进程内读取已发布快照，不经过本入口。
+非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
+
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| GET | `/api/v1/kb/memories?status=&q=&limit=&offset=` | `status` ∈ `active/deprecated/all`（默认 `all`）；`q` 同时匹配标题与结论；返回 `{items,total,offset,limit}`，`updated_at` 倒序 |
+| GET | `/api/v1/kb/memories/{slug}` | 单条 + 最近 20 条修订（`revisions`，按时间正序） |
+| PATCH | `/api/v1/kb/memories/{slug}` | 部分更新；必填 `expected_revision`；可改 `title/conclusion/boundary/invalidation/confidence/contradicts`，多传字段返回 422/`1012`，全部省略也返回 422/`1012` |
+| POST | `/api/v1/kb/memories/{slug}/deprecate` | `{expected_revision, reason, superseded_by?, actor?}`；只允许废弃 `active` 条目，替代条目必须存在且为 `active` |
+| GET | `/api/v1/kb/memories/candidates?status=&limit=` | `status` ∈ `pending/conflict/promoted/all`（默认 `pending`）；返回 `{items,total}`，不分页，`last_seen_at` 倒序 |
+| GET | `/api/v1/kb/memories/snapshots?limit=` | 版本倒序；返回 `{items,total}`，每项含冻结的 `entries` 与 `item_count` |
+| POST | `/api/v1/kb/memories/snapshots` | 发布；body `{note?, actor?}`；把当前全部 `active` 条目冻结为新版本，旧 `published` 置 `superseded` |
+| POST | `/api/v1/kb/memories/snapshots/{version}/activate` | 回滚到旧快照；`disabled` 快照不可重新激活（409/`1010`） |
+| POST | `/api/v1/kb/memories/snapshots/{version}/disable` | 停用当前 `published` 快照；body `{reason?, actor?}`；停用后没有 `published`，抽取不再注入 |
+
+- 条目主键是全局 kebab-case `slug`，不挂知识库，不进入 `kb_nodes` 检索；不提供删除，只能废弃。
+- 更新、废弃按条目 `revision` 做乐观锁：不匹配 409/`1010`；条目或版本不存在 404/`1011`。
+- 同一时刻至多一个 `published` 快照；发布、回滚、停用各写一条 `kb_write_audit`（`memory_snapshot` = 版本号）。
+- 响应里的 `evidence` 只含节点 id 与来源定位，不含正文；管理台只展示元数据与结论。
+
+### 4.11 前端
 
 `MEMHUB_KB_WEB_DIST` 指向打包产物时，非 `/api` 路径回退到 `index.html`（SPA）；`/api/...` 未知路径返回 404 + `1011`。
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -19,6 +20,7 @@ from memhub.contract import Cursor, FileCursor, IngestRequest, IngestResult
 from memhub.queue.rawstore import BatchTargetConflict
 
 REPLAY_WINDOW = timedelta(hours=24)
+SEEN_MESSAGE_BATCH = 1000
 
 
 class CursorConflict(Exception):
@@ -51,6 +53,19 @@ class StateStore(Protocol):
         """落一批增量：幂等重放、游标冲突、去重、更新游标，一次事务完成。"""
         ...
 
+    # -- 消息去重索引（ADR-0017） ----------------------------------------
+    async def seen_messages(self, project: str, source_id: str, uuids: Sequence[str]) -> set[str]:
+        """返回 `uuids` 中已成功抽取过的集合；空输入不查库。"""
+        ...
+
+    async def mark_messages_seen(self, project: str, source_id: str, uuids: Sequence[str]) -> None:
+        """幂等记账；空输入不落写。"""
+        ...
+
+    async def forget_messages(self, project: str, *, source_id: str | None = None) -> int:
+        """删除该库（可选限定源）的已见记录并返回行数；`source_id=None` 清整库。"""
+        ...
+
 
 @dataclass
 class SourceState:
@@ -75,6 +90,7 @@ class MemoryStore:
         self.sources: dict[tuple[str, str], SourceState] = {}
         self.batches: dict[tuple[str, str], ReplayedBatch] = {}
         self.seen_shas: set[tuple[str, str]] = set()
+        self.seen_message_keys: set[tuple[str, str, str]] = set()
 
     # -- devices ---------------------------------------------------------
     async def register_device(self, device_id: str, *, name: str = "", platform: str = "") -> None:
@@ -165,6 +181,22 @@ class MemoryStore:
         )
         self.batches[key] = ReplayedBatch(at=now, result=result, project=request.project)
         return result
+
+    # -- 消息去重索引（ADR-0017） ----------------------------------------
+    async def seen_messages(self, project: str, source_id: str, uuids: Sequence[str]) -> set[str]:
+        return {uuid for uuid in uuids if (project, source_id, uuid) in self.seen_message_keys}
+
+    async def mark_messages_seen(self, project: str, source_id: str, uuids: Sequence[str]) -> None:
+        self.seen_message_keys.update((project, source_id, uuid) for uuid in uuids)
+
+    async def forget_messages(self, project: str, *, source_id: str | None = None) -> int:
+        removed = {
+            key
+            for key in self.seen_message_keys
+            if key[0] == project and (source_id is None or key[1] == source_id)
+        }
+        self.seen_message_keys -= removed
+        return len(removed)
 
 
 __all__ = [

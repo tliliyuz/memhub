@@ -26,6 +26,7 @@
  │           → runtime state (PostgreSQL: 设备/游标/批次幂等, memhub_prod)   │
  │  worker:  value_filter(cheap) → extract(expensive) → merge              │
  │  merge → PostgreSQL 知识真源 kb_* (schema kb)                             │
+ │  memory-aggregate（周任务）→ kb_memory_* → 已发布快照 → 会话抽取注入       │
  │  检索：应用层 BM25（向量混合按 ADR-0007 另案）                             │
  └─────────────────────────────────────────────────────────────────────────┘
            ▲
@@ -66,12 +67,15 @@
 ### worker（服务端，单机串行 + 少量并发）
 - 先确认队列来源和目标授权，再按类型抽取；写入作用域内再次确认。明确不合规的队列项隔离，暂不能核验时留队。管理台凭据不与设备授权混用。
 - 会话只从有出处的对话提炼候选，允许零结果；文档和 wiki 继续走文档提炼管线。合并直接写 PG `kb_*` 表（一次写入 = 一个事务），不再落 markdown。
+- 会话抽取注入已发布的长期记忆（ADR-0016）：worker 启动时固定一个快照版本，按 BM25 取 top-k 并受字符预算约束，`extract_session` 审计记录版本；手工 `memhub ingest --profile sessions` 走同一口径。记忆只作判断与归一化准则，不能充当逐字证据。
+- 长期记忆由独立命令 `memhub memory-aggregate` 周期聚合跨项目 canonical 节点，产出条目/候选并发布快照；worker 的抽取路径不写记忆，也不把记忆当模型输入。
 
 ### kb-api
 - 管理台：`memhub kb` 在同一进程托管打包前端，`/` 由 nginx 反代；页面直接调 `/api/v1/kb/*`，没有 explorer 子进程，也没有文件投影。
 - 检索：按授权范围与 `kind` 过滤后，应用层 BM25 排序；默认排除 `deprecated`（`tier=canonical`），`tier=all` 才包含废弃节点。向量混合检索按 ADR-0007 另案推进。
 - 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
 - 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
+- 长期记忆：`/api/v1/kb/memories*` 提供条目、候选与快照的查询和治理动作，管理台「长期记忆」页只展示元数据与结论；会话抽取的注入不经过该入口。
 - 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 
 ### mcp-server（首版随 kb-api 进程）
@@ -92,7 +96,7 @@
 
 - Docker Compose：`ingest-api` / `worker` / `kb-api` / `nginx`（nginx 也可用宿主机的）；`/mcp` 由
   kb-api 进程提供，不单列服务。
-- systemd timer：`disk-guard.timer`；知识库备份由部署侧定时 `pg_dump` 承担。
+- systemd timer：`disk-guard.timer`、`memory-aggregate.timer`（每周聚合并发布长期记忆快照）；知识库备份由部署侧定时 `pg_dump` 承担。
 - 知识真源在 PostgreSQL（`memhub_prod` 的 `kb` schema），随实例备份；`knowledge/` 只作为一次性迁移源，迁移校验通过后从服务器删除。
 - 配置与密钥：`.env`（600）+ systemd `EnvironmentFile`；不写进镜像。
 

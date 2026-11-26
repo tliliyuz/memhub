@@ -170,12 +170,15 @@ export type Issue = {
 
 export type TraceStatus = 'ok' | 'error' | 'rejected'
 
+export type TraceEvent = 'call' | 'list_tools' | 'initialize'
+
 export type McpTrace = {
   trace_id: string
   request_id: string
   rpc_id: string | null
   called_at: string
   credential: { id: string | null; name: string | null }
+  event: TraceEvent
   tool: string | null
   status: TraceStatus
   http_status: number
@@ -183,6 +186,7 @@ export type McpTrace = {
   error_kind: string | null
   duration_ms: number
   result_bytes: number | null
+  tool_count: number | null
   projects: string[] | null
   client: string | null
 }
@@ -190,6 +194,7 @@ export type McpTrace = {
 export type McpTraceParams = {
   limit?: number
   offset?: number
+  event?: TraceEvent
   tool?: string
   status?: TraceStatus
   credential?: string
@@ -213,6 +218,14 @@ export type McpTraceSummary = {
     avg_ms: number
   }[]
   credentials: { id: string; name: string | null; count: number }[]
+  funnel: {
+    connections: number
+    listings: number
+    calls: number
+    listings_per_connection: number
+    calls_per_listing: number
+    avg_tools: number
+  }
 }
 
 export type WriteResult = {
@@ -220,6 +233,104 @@ export type WriteResult = {
   revision: string
   commit: string | null
   node?: NodeDetail
+}
+
+export type MemoryStatus = 'active' | 'deprecated'
+
+export type MemoryEvidence = {
+  node_id: string
+  project: string
+  session: string | null
+  session_ref: string | null
+  observed_at: string | null
+}
+
+export type MemoryEntry = {
+  slug: string
+  title: string
+  conclusion: string
+  boundary: string
+  invalidation: string
+  evidence: MemoryEvidence[]
+  confidence: number
+  status: MemoryStatus
+  deprecated_reason: string | null
+  superseded_by: string | null
+  contradicts: string[]
+  revision: string
+  created_at: string
+  updated_at: string
+}
+
+export type MemoryRevision = {
+  id: number
+  slug: string
+  revision: string
+  actor: string | null
+  reason: string | null
+  before: MemoryEntry
+  after: MemoryEntry
+  created_at: string
+}
+
+export type MemoryDetail = MemoryEntry & { revisions: MemoryRevision[] }
+
+export type MemoryListParams = {
+  status?: MemoryStatus | 'all'
+  q?: string
+  limit?: number
+  offset?: number
+}
+
+export type MemoryUpdatePayload = {
+  expected_revision: string
+  title?: string
+  conclusion?: string
+  boundary?: string
+  invalidation?: string
+  confidence?: number
+  contradicts?: string[]
+}
+
+export type MemoryDeprecatePayload = {
+  expected_revision: string
+  reason: string
+  superseded_by?: string
+}
+
+export type MemoryCandidateStatus = 'pending' | 'conflict' | 'promoted'
+
+export type MemoryCandidate = {
+  id: number
+  slug: string
+  title: string
+  conclusion: string
+  boundary: string
+  invalidation: string
+  evidence: MemoryEvidence[]
+  confidence: number
+  session_count: number
+  project_count: number
+  status: MemoryCandidateStatus
+  reason: string
+  contradicts: string[]
+  first_seen_at: string
+  last_seen_at: string
+  created_at: string
+  updated_at: string
+}
+
+export type MemorySnapshotStatus = 'published' | 'superseded' | 'disabled'
+
+export type MemorySnapshot = {
+  version: number
+  status: MemorySnapshotStatus
+  entries: MemoryEntry[]
+  item_count: number
+  note: string
+  actor: string | null
+  created_at: string
+  published_at: string | null
 }
 
 export type UploadRejectionReason =
@@ -427,6 +538,46 @@ export const api = {
     ),
   mcpTracesSummary: (days = 7) =>
     request<McpTraceSummary>(`/api/v1/kb/mcp-traces/summary${queryString({ days })}`),
+  /** 长期记忆条目；`status=all` 等价于不过滤。 */
+  memories: (params: MemoryListParams = {}) =>
+    request<{ items: MemoryEntry[]; total: number; offset: number; limit: number }>(
+      `/api/v1/kb/memories${queryString({ ...params })}`,
+    ),
+  memory: (slug: string) =>
+    request<MemoryDetail>(`/api/v1/kb/memories/${encodeURIComponent(slug)}`),
+  updateMemory: (slug: string, payload: MemoryUpdatePayload) =>
+    request<MemoryEntry>(`/api/v1/kb/memories/${encodeURIComponent(slug)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+  deprecateMemory: (slug: string, payload: MemoryDeprecatePayload) =>
+    request<MemoryEntry>(`/api/v1/kb/memories/${encodeURIComponent(slug)}/deprecate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  /** 聚合候选留在独立路由，避免被 `{slug}` 详情吞掉。 */
+  memoryCandidates: (params: { status?: MemoryCandidateStatus | 'all'; limit?: number } = {}) =>
+    request<{ items: MemoryCandidate[]; total: number }>(
+      `/api/v1/kb/memories/candidates${queryString({ ...params })}`,
+    ),
+  memorySnapshots: (limit?: number) =>
+    request<{ items: MemorySnapshot[]; total: number }>(
+      `/api/v1/kb/memories/snapshots${queryString({ limit })}`,
+    ),
+  publishMemorySnapshot: (note = '') =>
+    request<MemorySnapshot>('/api/v1/kb/memories/snapshots', {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    }),
+  activateMemorySnapshot: (version: number) =>
+    request<MemorySnapshot>(`/api/v1/kb/memories/snapshots/${version}/activate`, {
+      method: 'POST',
+    }),
+  disableMemorySnapshot: (version: number, reason = '') =>
+    request<MemorySnapshot>(`/api/v1/kb/memories/snapshots/${version}/disable`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
   projects: () =>
     request<{ items: KnowledgeBase[]; total: number }>('/api/v1/kb/projects'),
   createProject: (payload: { id: string; name?: string; description?: string }) =>

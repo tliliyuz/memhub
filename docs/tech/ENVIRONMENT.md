@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-25 |
+| 最后更新 | 2026-11-26 |
 | 适用范围 | 环境变量键集、默认值、读取方、失败语义 |
 | 不负责 | 部署拓扑、契约字段 |
 
@@ -31,8 +31,12 @@
 | `MEMHUB_LLM_API_KEY` | 是 | — | worker | 启动失败；日志中永不出现 |
 | `MEMHUB_LLM_MODEL_FILTER` | 是 | — | worker/value_filter | 启动失败 |
 | `MEMHUB_LLM_MODEL_EXTRACT` | 是 | — | worker/extract | 启动失败 |
+| `MEMHUB_LLM_MODEL_MEMORY` | 否 | 空（回退 `MEMHUB_LLM_MODEL_EXTRACT`） | `memory-aggregate` | 两者都为空时退出 2 |
 | `MEMHUB_LLM_MAX_TOKENS` | 否 | `32000` | worker | 单次调用的输出预算（含 thinking）；非法值或非正数退出 2。8000 会被思考吃光、`stop_reason=max_tokens` 且无 text 块（线上首跑已踩） |
 | `MEMHUB_WINDOW_TZ` | 否 | 空（系统本地） | worker | `--window` 的时区：`UTC` / `+08:00` / IANA 名；非法值退出 2。容器默认 UTC，不设时 `21:00-02:00` 实际跑在 05:00-10:00 CST（线上踩过）；生产用显式偏移 `+08:00`，不依赖镜像 tzdata |
+| `MEMHUB_MEMORY_TOP_K` | 否 | `8` | worker / `memhub ingest` | 每次会话窗口最多注入的条目数；非 1–10 整数退出 2 |
+| `MEMHUB_MEMORY_INJECT_CHARS` | 否 | `4000` | worker / `memhub ingest` | 记忆块字符预算；非正整数退出 2 |
+| `MEMHUB_MEMORY_INJECT_DISABLED_PROJECTS` | 否 | 空 | worker / `memhub ingest` | 逗号分隔的库 id，命中则不注入；忽略空白项，不校验库是否存在 |
 | `MEMHUB_KB_API_URL` | 否 | `http://127.0.0.1:8701` | ingest | `/ingest/projects` 只读列表的同机 kb-api 上游：GET 取列表元数据后按已登记且活动过滤；上游不可用返回 `500/2001`。raw 的目标校验直接读本地登记，不依赖此 URL；建库只在管理台 |
 | `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
 | `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；为 `/devices/register` 与 `DELETE /ingest/source/{source_id}` 校验 Bearer 凭据；清理接口未配置该键时也返回 401（含 dev） |

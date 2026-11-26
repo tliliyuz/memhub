@@ -1,0 +1,23 @@
+[Unit]
+Description=memhub 长期记忆周期聚合与快照发布
+Documentation=file:///opt/memhub/app/deploy/README.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# 与 purge 一致：一次性容器、只读根文件系统、host 网络（PostgreSQL 只听回环）。
+# 聚合只读写 kb_* 表并调用模型，不写 /var/lib/memhub，因此不挂数据卷。
+# /etc/memhub/env 必须提供 MEMHUB_KB_DB_URL、MEMHUB_LLM_BASE_URL / API_KEY 与
+# MEMHUB_LLM_MODEL_MEMORY（或回退的 MEMHUB_LLM_MODEL_EXTRACT）。
+ExecStart=/usr/bin/docker run --rm --name memhub-memory-aggregate \
+  --user 999:987 \
+  --env-file /etc/memhub/env \
+  --network host \
+  --read-only \
+  --tmpfs /tmp:size=64m,mode=1777 \
+  --log-driver json-file --log-opt max-size=50m --log-opt max-file=3 \
+  memhub/app-worker:0.1.0 \
+  memhub memory-aggregate --publish
+# 退出码：0 成功（含「没有可聚合节点」）；1 聚合或模型失败；2 配置错误。
+# 不设 SuccessExitStatus，失败要能从 `systemctl --failed` 看到。

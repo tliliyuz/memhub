@@ -54,6 +54,7 @@ ADR 检查与裁决
 - 背景与进入条件以权威文档状态（CHANGELOG、对应契约文档）为准，不通过运行测试判断。
 - 新增依赖前说明用途、维护状态、体积和替代方案。
 - 注释、项目文档和提交信息用中文；代码标识符遵循语言社区惯例用英文。
+- 使用 ego-lite（ego-browser）做页面验收只用一个 space：不得为本任务另开第二个 space，不得占用、接管或关闭用户正在使用的 space 与标签页，需要用户现场操作时先让出；分步验收在同一标签内导航，不一步一个新标签；验收结束后关闭本次打开的全部标签页与 space，不残留，避免占用浏览器资源、干扰后续会话或误认页面状态。归属无法确认时先问负责人，不允许以「不确定是不是自己开的」为由默认保留。
 - 资源占用：验收前先查看本项目当前占用的浏览器标签页与进程；只在验收期间启动所需的浏览器与服务进程，禁止多开标签页（ego-lite/ego-browser 验收只开本次需要的标签页），禁止让 Node/Python 服务进程常驻不关；验收结束必须关闭本次打开的全部标签页并结束本次启动的进程，不擅自占用宿主机资源。需要多开并发进程或并行验收时，先取得负责人确认。
 - 代码审查按需触发，遵循 [DEVELOPMENT](docs/guides/DEVELOPMENT.md) §5 的提交与验证规范。
 
@@ -65,7 +66,7 @@ ADR 检查与裁决
 | 对外契约：节点 schema、源注册表、采集 API、MCP 工具 | `docs/contracts/`（`README.md` 为索引） |
 | 环境变量：键名、读取方与失败语义 | `docs/tech/ENVIRONMENT.md` |
 | 开发环境、命令、验证矩阵、提交粒度、分支与 worktree 闭环 | `docs/guides/DEVELOPMENT.md` |
-| 重要架构决策 | `docs/decisions/README.md`（具体决策：`docs/decisions/ADR-NNNN-*.md`） |
+| 重要架构决策 | `docs/decisions/README.md`（治理规则与索引；具体决策：`docs/decisions/ADR-NNNN-*.md`） |
 | 行为变更记录（按日期追加） | `docs/CHANGELOG.md` |
 | 知识真源 | PostgreSQL 的 `kb_*` 表（ADR-0013；markdown 仅作一次性迁移源） |
 

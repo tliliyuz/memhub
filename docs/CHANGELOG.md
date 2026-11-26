@@ -1,5 +1,106 @@
 # CHANGELOG
 
+## 2026-11-26（长期记忆第一期：聚合、快照与会话抽取注入，ADR-0016）
+
+- `feat(db)`：新增 Alembic `0005_long_term_memory`（合入 dev 时因已有 `0004_mcp_trace_funnel` 而后移，`down_revision` 指向它）：四张表 `kb_memory_entries`（条目，slug 全局唯一）、`kb_memory_revisions`（不可变修订）、`kb_memory_snapshots`（版本化快照，部分唯一索引保证至多一个 `published`）、`kb_memory_candidates`（未达门槛或冲突候选，每 slug 一行）；`kb_write_audit` 增加可空 `memory_snapshot`。`downgrade` 逆序删列删表。
+- `feat(kb)`：新增 `memhub.kb.memory` 计划函数与 `PgKbStore` 记忆方法：证据覆盖 ≥3 个独立会话且 ≥2 个项目才写 active 条目，少一个条件只留 `pending` 候选；同 slug 结论相同合并证据并重算计数，结论不同只写 `conflict` 候选且不改现有条目，已废弃条目不复活；新建/更新/废弃都追加修订快照并重算 `revision`，过期 `expected_revision` 返回冲突且不覆盖。快照发布把旧 `published` 置 `superseded`，回滚把目标置 `published`，停用后没有 `published`；三种生命周期各写一条 `kb_write_audit`（`memory_snapshot_publish` / `_activate` / `_disable`）并记录版本。
+- `feat(worker)`：新增 `memhub.worker.memory`：聚合只读跨项目 canonical 节点与 `source` 元数据，不读记忆表（避免自证循环）；worker 与 ingest 启动时固定当前已发布快照，按 BM25 取分数 >0 的 active 条目注入 `extract_session`，遵守 `MEMHUB_MEMORY_TOP_K`（默认 8）、`MEMHUB_MEMORY_INJECT_CHARS`（默认 4000）与 `MEMHUB_MEMORY_INJECT_DISABLED_PROJECTS` 按项目停用；每次抽取（含空结果）写 `extract_session` 审计并记录所用快照版本；提示词明确记忆只用于判断、归一化与去重，不能作为逐字证据或覆盖原文。
+- `feat(cli)`：新增 `memhub memory-aggregate`：`--since-days 7`、`--min-sessions 3`、`--min-projects 2`、`--max-nodes 100`、`--dry-run`（仍调模型、不写库）、`--publish`；退出码 0 成功（含无节点）/ 1 聚合或模型失败 / 2 配置错误。模型键 `MEMHUB_LLM_MODEL_MEMORY` 未设时回退 `MEMHUB_LLM_MODEL_EXTRACT`，两者皆空退出 2。
+- `feat(api)`：实现 `kb-admin-api.md` 0.7 §4.10 的九条 `/api/v1/kb/memories*` 路由：条目列表（status/limit/offset，按 updated_at 倒序）、详情（含最近 20 条修订）、乐观锁 PATCH、废弃、候选列表、快照列表、发布、回滚、停用；错误映射 404 / `1011`、409 / `1010`、422 / `1012`，非 PG 存储 503 / `2001`；不提供删除，证据只回元数据。
+- `feat(web)`：侧栏「治理 → 长期记忆」页面：条目（状态筛选、搜索、分页、带原因废弃）、候选（只读、冲突标记）、快照（发布/回滚/停用、失败行内提示与刷新）；`api.ts` 记忆客户端与类型；前端单测覆盖查询串与错误映射。
+- 文档与部署：`kb-admin-api.md` 0.7、`contracts/README.md` 0.17（合入 dev 后接在 0.16 之后重新编号）、`architecture.md`（拓扑、worker 注入/冻结/审计、kb-api 路由、timer 清单）、`tech/ENVIRONMENT.md` 与 `.env.example` 新增四个键、`deploy/README.md` 与 `deploy/systemd/memhub-memory-aggregate.{service,timer}`（周一 03:00，`Persistent=true`，一次性 docker run）。规格 §8 原先的错误映射与权威契约不一致，按文档矩阵改为契约口径并留裁决记录。
+- 范围：只做 ADR 第一期（会话抽取注入）；MCP 记忆工具、影子抽取、向量检索、项目检索与 `kb_nodes` 中的记忆均未实现。
+- RED：先写 `test_memory_store.py`、`test_memory.py`、`test_memory_worker.py`、`test_cli_memory.py`、`test_kb_api.py` 记忆用例与前端 `memories.test.mjs`，分别观察到目标模块缺失、路由 404 与 `api.* is not a function` 等失败后才进入实现；全量首跑暴露 `test_kb_models.py` 的 kb 表全集断言未含新表（1 failed），补入四张记忆表后通过。
+- 验证（2026-11-26，worktree `.claude/worktree/long-term-memory`）：全量 `pytest` 664 passed / 1 skipped（skip 为未启动 MCP 服务器的无关用例，非本次范围）；`ruff check .`、`ruff format --check .`（600 files）、`mypy src`（51 files）、`check_no_raw_sql.py`、`check_async_io.py`、`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`（31 键）与 `git diff --check` 通过；前端 `node --test web/tests/*.test.mjs` 15 passed（含 5 条记忆用例），`tsc -b` 与 `vite build` 通过。`deploy/systemd` 两个单元文件只做了静态审阅：本机为 Windows、无 systemd，未执行 `systemd-analyze verify`，需在部署机复核。合入 dev 后（迁移接在 `0004_mcp_trace_funnel` 之后）全量 `pytest` 702 passed / 1 skipped；合并首跑因两个 `0004` 迁移头出现 4 failed / 3 errors，改为 `0005_long_term_memory` 后通过，`ruff check`、`ruff format --check`、`mypy src`（52 files）、文档门禁与 `git diff --check` 复核通过，前端 `node --test web/tests/*.test.mjs` 17 passed。
+- ADR 检查：实现 [ADR-0016](decisions/ADR-0016-long-term-memory.md)（accepted），未新增架构决策。
+
+## 2026-11-26（长期记忆：ADR 转 accepted 并进入实施规格）
+
+- `docs(adr)`：ADR-0016 由 `proposed` 转为 `accepted`，索引同步。负责人当次指示继续实现；本轮按 ADR 默认值落规格，不另行调整方向。
+- `docs(plans)`：新增 [long-term-memory-spec.md](plans/long-term-memory-spec.md)，状态 `specified`。规格确定四张表（条目/修订/快照/候选）、聚合门槛、快照发布/回滚/停用入口、会话抽取注入参数与审计字段、管理 API 与管理台页面；MCP 第一期不暴露记忆。
+- 范围：本轮进入测试与实现，仍只做 ADR 第一期（会话抽取注入），不含 MCP 只读工具、影子抽取与向量检索。
+- 验证：纯文档变更，无业务 RED；执行 `git diff --check`、`check_adr_governance.py`、`check_document_format.py`、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`（若动键集）并在提交信息中记录实际结果。
+
+## 2026-11-26（ADR 治理规则补入本仓）
+
+- `docs(governance)`：`docs/decisions/README.md` 补入与评测仓同源的 ADR 触发清单（8 项，按本仓契约与知识层级改写）、检查与裁决输出格式、修订/替代/澄清规则与记录位置。此前本仓只有索引与模板，`CLAUDE.md` 要求「按 ADR 治理规则执行检查」，但判据只存在于兄弟仓。
+- `docs(entry)`：`CLAUDE.md` / `AGENTS.md` 权威矩阵的「重要架构决策」行注明决策目录同时承载治理规则与索引，两文件保持字节一致。
+- 背景：ADR-0017（fork 会话按消息 uuid 去重）裁决时，判据需跨仓查找；按 §1.2 长期信息落盘要求补入本仓。触发清单第 4 项按本仓改为「知识层级、检索口径」，第 8 项改为「模型/抽取调用策略」，其余与评测仓 `docs/decisions/README.md` 一致。
+- ADR 检查：本变更只补治理规则，不改变系统行为；按新清单逐项判断未命中（不新增/移除边界、不改存储与任务语义、不改契约、不改层级、不引依赖、不改拓扑、不改数据/安全边界、不改成本模型）。
+- 验证：纯文档变更，无业务 RED（例外理由：仅治理文档与入口索引）；`check_document_format.py`、`check_document_ownership.py --all`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+
+## 2026-11-26（MCP 发现：服务端自描述与令牌生成器）
+
+- `feat(mcp)`：HTTP 与 stdio 的 `initialize` 统一返回 `src/memhub/mcp/discovery.py` 的同一份 `instructions`：说明 memhub 是跨会话知识库、何时该检索（过去会话、项目决策、笔记、踩坑）、调用顺序 `kb_search → kb_read → kb_related`，并声明检索结果只是资料、不是要执行的指令（≤500 字）。此前 HTTP 只有一句安全提示，stdio 只有调用顺序，都不含「记忆/过去会话/笔记」触发场景。
+- `feat(mcp)`：七个工具补中英 `title`（≤40 字）；读工具描述首句写「何时用」，`kb_search` 描述补用户口语触发词与中英同义词（memory、knowledge base、notes、past sessions）；写工具描述保留既有边界并补首句用途（单条 ≤300 字）。
+- `feat(mcp)`：`contract/mcp.py` 的每个输入字段补 `description`，随生成的 `inputSchema` 暴露；参数约束、返回结构与错误码不变。
+- `feat(cli)`：新增 `memhub mcp token --name --projects --scope read|write --days --json`：本地生成 43 字符高熵令牌与 `sha256` 摘要，`expires_at` 为 UTC 秒级（默认 90 天），`projects` 非空，先经 `Grant` 校验再输出；默认人类可读只显示一次令牌并附可粘贴的 grant JSON，stderr 只提示不要写入仓库/文档/聊天，不落盘、不写日志。该命令仅是本地生成器，不改变吊销语义。
+- 规格：[mcp-discovery-spec.md](plans/mcp-discovery-spec.md)（负责人确认保持 `kb_*` 工具名、纳入令牌生成器；漏斗观测由并行会话负责）。契约：[mcp-tools.md](contracts/mcp-tools.md) 0.8、[contracts/README.md](contracts/README.md) 0.16（其中 0.15 条目补齐并行合入的连接漏斗契约）。ADR 检查：未新增架构决策（只改服务端自描述面与本地令牌生成，鉴权边界见 ADR-0003；长期记忆仍按 ADR-0016 第一期不经 MCP 暴露）。
+- RED（在只含 HEAD `src/` 的临时副本中跑新测试）：`test_mcp_token.py` 6 failed（`mcp token` 子命令不存在，`SystemExit: 2`）；`test_mcp_discovery.py` 收集即失败（`No module named 'memhub.mcp.discovery'`）。
+- GREEN 与验证（2026-11-26，worktree `feat/mcp-discovery`）：全量 `pytest` 621 passed / 1 skipped（5:43；skip 为未启动 MCP stdio 服务器的既有无关用例），其中 `test_mcp_token.py` 6 passed、`test_mcp_discovery.py` 8 passed（含 HTTP 握手与「生成器令牌 → `load_grants` → 鉴权握手」端到端）；`ruff check`、`ruff format --check`（105 files）、`mypy src`（50 files）通过；文档门禁 `check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- 发现命中验收（条件 9）：独立临时 schema + 本地 kb-api，空目录（无 `CLAUDE.md`/`AGENTS.md`）的 `claude -p` 会话 3 种问法 × 3 次，9/9 次都调用 `mcp__memhub__kb_search`，共新增 44 条 `kb_search` 轨迹；客户端先以内置 `ToolSearch` 加载延迟披露的 MCP schema，再首轮检索，与规格 §4 客户端矩阵一致。记录见 [规格 §9](plans/mcp-discovery-spec.md)。
+- 资源：未打开浏览器 space/标签页；临时启动的 1 个本地 kb-api 与 11 个 headless 会话（含 2 次冒烟）验收后全部结束，临时 schema 与含令牌的临时配置已删除，端口无监听。
+- 合并 dev（轨迹漏斗，ADR-0018）后复验：全量 `pytest` 622 passed / 1 skipped（5:37）；`ruff check`、`ruff format --check src tests alembic`（110 files）、`mypy src`（50 files）与全部文档门禁通过。
+
+## 2026-11-26（消息 uuid 去重实现，ADR-0017）
+
+- `feat(worker)`：`SessionBlock` 携带消息 `uuid`（`message_id`）；`process_file` 在会话分支先过滤已见消息、再按 `max_input_chars` 截断；抽取与 merge 成功后记账，整片命中时不调用模型并记入 `RoundReport.deduped`；索引不可用抛 `MessageIndexUnavailable` 推迟文件（不调 LLM、不计失败），记账失败只记 ERROR、文件照常完成。`WorkerConfig.state` 缺省时去重关闭，行为与现状一致。
+- `feat(ingest)`：运行态迁移 `0002_seen_messages` 新增 `seen_messages` 表；`StateStore` 新增 `seen_messages` / `mark_messages_seen` / `forget_messages`，内存与 PG 实现语义一致（PG 按 1000 个一批查询与写入）。
+- `feat(cli)`：新增 `memhub forget-messages --project <库> [--source <源>]`，只清已见消息索引，不动游标与 raw；缺 `MEMHUB_DB_URL` 退出 2；`worker` 入口把已有 `state` 传给 `WorkerConfig`。
+- RED：先写规格 T1–T11 的验收测试并实际观察失败——渲染/存储/迁移用例 12 failed（缺 `message_id`、`0002_seen_messages`、三个 StateStore 方法），CLI 用例收集期 `ImportError: _forget_messages`，daemon 用例 6 failed（`WorkerConfig` 无 `state` 参数）。
+- GREEN：同一批用例 98 passed；其中一处验收断言按规格修正——T6 只要求「不被去重跳过」，重复内容 merge 后可能是更新而非新建，改为断言 `processed/deduped/calls`，不再钉死 `created`。
+- 迁移态：迁移号 `0002_seen_messages`（运行态库；前向追加，只应用一次并写入 `schema_migrations`）；变更类型为新增表，无存量数据转换；回滚为代码回退、表保留无害；部署顺序必须先升级并重启 ingest（启动 `migrate()` 建表）再升级 worker，顺序反了 worker 持续 `defer: message_index_unavailable`，不丢数据不付费；验证为内存+PG 契约用例与迁移幂等用例。
+- 验证（2026-11-26，worktree `.claude/worktree/message-uuid-dedupe`）：全量 `pytest` 631 passed / 1 skipped（skip 为未启动 MCP HTTP 服务器的无关用例）；`ruff check .`、`ruff format --check .`、`mypy src`（49 files）、`check_env_example_keys.py`、`check_document_format.py`、`check_document_ownership.py --all`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- ADR 检查：实现 ADR-0017，不新增决策；`duplicates` 仍为切片级，客户端契约不变。
+
+## 2026-11-26（消息 uuid 去重实施规格）
+
+- `docs(plans)`：新增 [message-uuid-dedupe-spec](plans/message-uuid-dedupe-spec.md)（`specified`，2026-11-26 负责人评审通过），承接 ADR-0017。规格要点：运行态表 `seen_messages`（前向迁移 `0002_seen_messages`）；`StateStore` 新增 `seen_messages` / `mark_messages_seen` / `forget_messages`；worker 渲染产出消息 `uuid`，先过滤已见块再截断，抽取与 merge 成功后记账；前置查询失败推迟文件、记账失败只记 ERROR 不重复付费；新增 CLI `memhub forget-messages`；验收场景 T1–T11。
+- 范围：规格已获批，按 T1–T11 导出验收测试后进入 RED → GREEN。
+- ADR 检查：实现 ADR-0017，不新增决策。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
+## 2026-11-26（ADR-0017 转 accepted）
+
+- `docs(adr)`：[ADR-0017](decisions/ADR-0017-session-message-uuid-dedupe.md)「会话去重单位改为消息 uuid，fork 不再重复抽取」由 `proposed` 转为 `accepted`，`decisions/README.md` 索引同步。裁决内容不变：去重单位改为消息 `uuid`，作用点在 worker 渲染/抽取之前，索引键 `(project, source_id, uuid)`，raw 与客户端契约不动。
+- 下一步：按 SDD 先写实施规格与验收测试，再实现；规格获批前不动代码。
+- ADR 检查：本条为既有 ADR 状态流转，不新增决策。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
+## 2026-11-26（MCP 发现层事件并入轨迹与连接漏斗，ADR-0018）
+
+- `feat(trace)`：HTTP 入口经 MCP SDK `Server.middleware` 记录 `initialize` 与 `tools/list`，与既有 `tools/call`、鉴权/路由拒绝同表；新增 `event`（`call` / `list_tools` / `initialize`）与 `tool_count`（成功列工具数），仍只记元数据，`notifications/*` 与 `ping` 不记录。决策见 [ADR-0018](decisions/ADR-0018-mcp-discovery-trace.md)，规格见 [mcp-trace-spec](plans/mcp-trace-spec.md)。
+- `feat(db)`：Alembic `0004_mcp_trace_funnel` 为 `kb_mcp_trace` 增加 `event`（存量行回填 `call`）与 `tool_count`，并建 `(event, called_at)` 索引；`downgrade` 删除索引与两列。
+- `feat(kb)`：列表接口新增 `event` 过滤（默认 `call`，保持既有语义）；汇总新增 `funnel`（`connections` / `listings` / `calls`、两段转化率、`avg_tools`），既有 `total` / `ok` / `error` / `rejected` / `tools` / `credentials` 只统计 `call`。非 PG 存储仍返回 503/`2001`。
+- `feat(web)`：`/traces` 增加连接漏斗区块；分母为 0 时显示 `—`；工具、状态、凭据、时间筛选与分页不变。
+- 契约与文档：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`decisions/README.md` 与 `mcp-trace-spec.md` 同步；ADR-0015 正文不改。
+- RED：先改 `tests/contract/test_mcp_trace.py`，观察到 3 个目标用例因行为缺失失败：`test_ok_call_records_metadata`（无 `event` 列，KeyError）、`test_list_endpoint_filters_and_orders`、`test_summary_funnel_counts_discovery_events`（发现层行混入 `total`，断言 `((6+2)+1) == 4` 失败）。
+- GREEN：`pytest tests/contract/test_mcp_trace.py -k "ok_call_records_metadata or summary_funnel or list_endpoint or summary_endpoint or rejections or error_call"` → 6 passed；随后轨迹 / 迁移 / 模型三个契约文件 → 33 passed。
+- 验证（2026-11-26，worktree `.claude/worktree/trace-funnel`）：全量 `pytest` 608 passed / 1 skipped（skip 为未启动 MCP 服务器的无关用例，非本次范围）；`node --test web/tests/mcp-traces.test.mjs` 7 passed；`pnpm build` 通过；`ruff check`、`ruff format --check src tests alembic`（107 files）、`mypy src`（49 files）通过；`check_adr_governance.py`、`check_document_format.py`、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- ADR 检查：本变更实现 ADR-0018；ADR-0015 保持 `accepted`，不修改正文。
+
+## 2026-11-26（会话 fork 重复采集：消息 uuid 去重 ADR 草案）
+
+- `docs(adr)`：新增 [ADR-0017](decisions/ADR-0017-session-message-uuid-dedupe.md)「会话去重单位改为消息 uuid，fork 不再重复抽取」，状态 `proposed`。裁决要点：去重单位从「文件切片 sha256」改为消息 `uuid`；作用点在 worker 渲染/抽取之前，ingest 协议层与 raw 队列保持原样；索引键为 `(project, source_id, uuid)`、存运行态库；只在抽取与 merge 成功后记账；整片命中跳过 LLM；客户端契约与 `duplicates` 语义不变；重扫只补未见消息。备选（ingest 落盘前过滤、客户端识别 fork、切片哈希归一化、merge 层正文去重、source 级键、按会话级 fork 标记跳文件）均已记录否决理由。
+- 背景：agent-console 2026-11-26 实测 `--fork-session` 产生新 `.jsonl`，fork 点前消息原样复制、仅每行 `sessionId` 改写；31 行会话 fork 后 36 行，18 条消息 `uuid` 相同但无一字节相同，jsonl 无行级 fork 标记。服务端现有键 `(source_id, 切片 sha256)` 与 `(device_id, source_id, path)` 均无法识别，导致整段重传、重复抽取与近似重复知识。
+- 范围：本次只写 ADR，不含规格、测试与实现；ADR 转为 `accepted` 前不进入后续阶段。ADR 检查：本条即新增 ADR，编号 0017 未被占用（各分支现有编号最大为 0016）。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 均通过。
+
+## 2026-11-26（浏览器 space 约束补齐并纳入验收结论）
+
+- `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 新增与 eval-platform-for-ai 一致的 space 约束：ego-lite 页面验收只用一个 space，不得另开第二个或占用用户的 space 与标签页，验收结束后关闭本次打开的全部标签页与 space；补写「归属无法确认时先问负责人，不允许以不确定为由默认保留」。
+- `docs(guides)`：`DEVELOPMENT` §4 验证矩阵后新增验收结论要求：逐项写明本次打开的 space、标签页与进程（未打开写「无」）及验收后均已关闭，缺少该项不算完成。
+- 背景：DynamicFocusGroup 的同类约束只写了标签页、未写 space，且无机制核对，导致验收后残留 space；本次三仓（memhub、eval-platform-for-ai、DynamicFocusGroup）口径一致。
+- ADR 检查：未命中（只约束验收时的资源记录，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
+## 2026-11-26（长期记忆子系统 ADR 草案）
+
+- `docs(adr)`：新增 [ADR-0016](decisions/ADR-0016-long-term-memory.md)「长期记忆独立成域，并反向注入会话抽取」，状态 `proposed`。裁决要点：长期记忆与 `kb_*` 知识库分层，不新增 `Kind`、不作为采集目标、不进项目库检索；由周期聚合任务以跨项目 canonical 节点为主证据提炼，门槛为 ≥3 个独立会话且 ≥2 个项目；记忆按版本化快照周发布，第一期只注入会话抽取提示词，每次抽取记录所用记忆版本；聚合任务自身不读记忆，避免自证循环。备选方案（新 `Kind`+`global` 库、每项目各存、`scope` 字段、抽取时产出、立即生效、原始会话为主证据）均已记录否决理由。
+- 范围：本次只写 ADR，不含规格、测试与实现；ADR 转为 `accepted` 前不进入后续阶段。ADR 检查：本条即新增 ADR，编号 0016 未被占用。验证：纯文档变更，无业务 RED；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 均通过。
+
+## 2026-11-26（部署文档：kb 新表默认权限与迁移 DSN 注入方式）
+
+- `docs(deploy)`：`deploy/README.md`「知识真源切换」第 1 步补「默认权限」要求：建角色时以 `memhub_kb_owner` 执行 `ALTER DEFAULT PRIVILEGES ... GRANT ... ON TABLES / SEQUENCES TO memhub_kb_app`，并给出存量表的补授权语句与升级后 `has_table_privilege` / `has_sequence_privilege` 核对 SQL。缺这步不会让迁移失败，而是新表对运行态角色不可见：MCP 调用轨迹写入全部退到 spool、轨迹查询报权限错（2026-11-26 发版的 `0002_kb_mcp_trace` 已实际命中，机上以手工 `GRANT` 绕过）。
+- `docs(deploy)`：第 1 步明确 `/etc/memhub/env` 只放 `MEMHUB_KB_DB_URL`；`MEMHUB_KB_MIGRATE_DB_URL` 带 DDL 权限，不得写进同时注入 ingest 与 worker 的常驻 env。第 3 步改为「一次性 0600 env-file 只注入迁移 DSN → 执行 alembic → `shred -u`」的写法。
+- 验证：纯文档修订，无业务 RED（例外理由：只改部署步骤说明，不涉及运行时代码与契约）；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py` 与 `git diff --check` 通过。ADR 检查：未命中（补 ADR-0013 角色的运维步骤，不新增架构决策）。
+
 ## 2026-11-26（取消候选门槛：写入即 canonical，ADR-0014）
 
 - `feat(kb)`：worker 合并、MCP `kb_write_candidate` 与管理台新建/更新一律写 `tier=canonical`；已有节点（任意层级）不再跳过，继续追加式合并，`MergeReport.skipped_canonical` 与 CLI 的跳过计数一并删除。规格见 [tier-canonical-spec](plans/tier-canonical-spec.md)，决策见 [ADR-0014](decisions/ADR-0014-drop-candidate-tier-gate.md)。

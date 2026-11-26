@@ -21,13 +21,13 @@ import json
 import re
 import secrets
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, select
+from sqlalchemy import CursorResult, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -42,10 +42,21 @@ from memhub.kb.errors import (
     TargetUnavailable,
     WriteDeferred,
 )
+from memhub.kb.memory import (
+    CandidateReason,
+    CandidateWrite,
+    EvidenceRef,
+    MemoryPlan,
+    normalize_memory_slug,
+)
 from memhub.kb.models import (
     KbArchive,
     KbEdge,
     KbMcpTrace,
+    KbMemoryCandidate,
+    KbMemoryEntry,
+    KbMemoryRevision,
+    KbMemorySnapshot,
     KbNode,
     KbNodeRevision,
     KbProject,
@@ -135,6 +146,77 @@ def _node_from_row(row: KbNode) -> NodeFrontmatter:
 
 def _stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime(_TRASH_STAMP)
+
+
+def _memory_entry_snapshot(row: KbMemoryEntry) -> dict[str, Any]:
+    """条目对外形状；时间转 ISO 字符串，供 API 与 JSONB 快照共用。"""
+    return {
+        "slug": row.slug,
+        "title": row.title,
+        "conclusion": row.conclusion,
+        "boundary": row.boundary,
+        "invalidation": row.invalidation,
+        "evidence": list(row.evidence or []),
+        "confidence": row.confidence,
+        "status": row.status,
+        "deprecated_reason": row.deprecated_reason,
+        "superseded_by": row.superseded_by,
+        "contradicts": list(row.contradicts or []),
+        "revision": row.revision,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _memory_snapshot_snapshot(row: KbMemorySnapshot) -> dict[str, Any]:
+    return {
+        "version": row.version,
+        "status": row.status,
+        "entries": list(row.entries or []),
+        "item_count": row.item_count,
+        "note": row.note,
+        "actor": row.actor,
+        "created_at": row.created_at.isoformat(),
+        "published_at": row.published_at.isoformat() if row.published_at else None,
+    }
+
+
+def _candidate_snapshot(row: KbMemoryCandidate) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "slug": row.slug,
+        "title": row.title,
+        "conclusion": row.conclusion,
+        "boundary": row.boundary,
+        "invalidation": row.invalidation,
+        "evidence": list(row.evidence or []),
+        "confidence": row.confidence,
+        "session_count": row.session_count,
+        "project_count": row.project_count,
+        "status": row.status,
+        "reason": row.reason,
+        "contradicts": list(row.contradicts or []),
+        "first_seen_at": row.first_seen_at.isoformat(),
+        "last_seen_at": row.last_seen_at.isoformat(),
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _evidence_keys(value: object) -> frozenset[tuple[str, str | None]]:
+    """证据去重键集合；聚合计划重校验用它确认条目证据没有被别人改过。"""
+    if not isinstance(value, list):
+        return frozenset()
+    keys: set[tuple[str, str | None]] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        node_id = item.get("node_id")
+        if not isinstance(node_id, str):
+            continue
+        session = item.get("session")
+        keys.add((node_id, session if isinstance(session, str) else None))
+    return frozenset(keys)
 
 
 class PgKnowledgeStore:
@@ -1102,10 +1184,12 @@ class PgKnowledgeStore:
         node_id: str | None,
         action: str,
         result: str,
+        memory_snapshot: int | None = None,
     ) -> None:
         """一条不含正文与 token 的写入审计；自成事务，写路径失败也不能吞掉它。
 
         审计写入失败按原样上抛：审计缺失必须显式失败，不能静默丢记录。
+        `memory_snapshot` 记录本次会话抽取使用的记忆版本，不记录记忆正文。
         """
         async with self._session() as session:
             session.add(
@@ -1115,9 +1199,598 @@ class PgKnowledgeStore:
                     node_id=node_id,
                     action=action,
                     result=result,
+                    memory_snapshot=memory_snapshot,
                     created_at=_now(),
                 )
             )
+
+    # -- 长期记忆（ADR-0016，规格 §3–§6） ----------------------------------
+
+    async def create_memory(
+        self,
+        *,
+        slug: str,
+        title: str,
+        conclusion: str,
+        boundary: str = "",
+        invalidation: str = "",
+        confidence: float = 0.5,
+        evidence: Iterable[EvidenceRef] = (),
+        contradicts: Iterable[str] = (),
+        actor: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """新建 active 条目；slug 已存在即冲突，不覆盖人工或聚合结果。"""
+        clean = normalize_memory_slug(slug)
+        if not clean or clean != slug:
+            raise InvalidError(f"记忆 slug 不合法：{slug!r}")
+        now = _now()
+        revision = new_revision()
+        async with self.write_scope(), self._session() as session:
+            if await session.get(KbMemoryEntry, clean) is not None:
+                raise ConflictError("记忆条目已存在", {"slug": clean})
+            row = KbMemoryEntry(
+                slug=clean,
+                title=title.strip(),
+                conclusion=conclusion.strip(),
+                boundary=boundary.strip(),
+                invalidation=invalidation.strip(),
+                evidence=[item.as_dict() for item in evidence],
+                confidence=min(1.0, max(0.0, float(confidence))),
+                status="active",
+                contradicts=list(dict.fromkeys(contradicts)),
+                revision=revision,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+            session.add(
+                KbMemoryRevision(
+                    slug=clean,
+                    revision=revision,
+                    actor=actor,
+                    reason=reason,
+                    before={},
+                    after=_memory_entry_snapshot(row),
+                    created_at=now,
+                )
+            )
+            await session.flush()
+            return _memory_entry_snapshot(row)
+
+    async def update_memory(
+        self,
+        slug: str,
+        *,
+        expected_revision: str,
+        patch: dict[str, Any],
+        actor: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """按乐观锁更新条目；只允许改内容字段，不改 status/deprecated_reason。"""
+        allowed = {"title", "conclusion", "boundary", "invalidation", "confidence", "contradicts"}
+        unknown = set(patch) - allowed
+        if unknown:
+            raise InvalidError("不允许更新这些字段", {"fields": sorted(unknown)})
+        async with self.write_scope(), self._session() as session:
+            row = await session.get(KbMemoryEntry, slug, with_for_update=True)
+            if row is None:
+                raise NotFoundError(f"记忆不存在: {slug}")
+            if expected_revision != row.revision:
+                raise RevisionConflict(slug, expected=expected_revision, current=row.revision)
+            before = _memory_entry_snapshot(row)
+            for key, value in patch.items():
+                if key == "confidence":
+                    row.confidence = min(1.0, max(0.0, float(value)))
+                elif key == "contradicts":
+                    row.contradicts = list(dict.fromkeys(str(item) for item in value))
+                elif key in {"title", "conclusion"}:
+                    setattr(row, key, str(value).strip())
+                else:
+                    setattr(row, key, str(value).strip())
+            row.revision = new_revision()
+            row.updated_at = _now()
+            session.add(
+                KbMemoryRevision(
+                    slug=slug,
+                    revision=row.revision,
+                    actor=actor,
+                    reason=reason,
+                    before=before,
+                    after=_memory_entry_snapshot(row),
+                    created_at=row.updated_at,
+                )
+            )
+            await session.flush()
+            return _memory_entry_snapshot(row)
+
+    async def deprecate_memory(
+        self,
+        slug: str,
+        *,
+        expected_revision: str,
+        reason: str,
+        superseded_by: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        """废弃条目：保留证据与修订，不物理删除，也不允许被聚合任务复活。"""
+        async with self.write_scope(), self._session() as session:
+            row = await session.get(KbMemoryEntry, slug, with_for_update=True)
+            if row is None:
+                raise NotFoundError(f"记忆不存在: {slug}")
+            if expected_revision != row.revision:
+                raise RevisionConflict(slug, expected=expected_revision, current=row.revision)
+            if row.status != "active":
+                raise ConflictError("记忆已废弃", {"slug": slug, "status": row.status})
+            if superseded_by is not None:
+                target = await session.get(KbMemoryEntry, superseded_by, with_for_update=True)
+                if target is None or target.status != "active" or superseded_by == slug:
+                    raise ConflictError(
+                        "替代条目不存在或不是 active", {"superseded_by": superseded_by}
+                    )
+            before = _memory_entry_snapshot(row)
+            row.status = "deprecated"
+            row.deprecated_reason = reason.strip()
+            row.superseded_by = superseded_by
+            row.revision = new_revision()
+            row.updated_at = _now()
+            session.add(
+                KbMemoryRevision(
+                    slug=slug,
+                    revision=row.revision,
+                    actor=actor,
+                    reason=reason,
+                    before=before,
+                    after=_memory_entry_snapshot(row),
+                    created_at=row.updated_at,
+                )
+            )
+            await session.flush()
+            return _memory_entry_snapshot(row)
+
+    async def get_memory(self, slug: str) -> dict[str, Any]:
+        async with self._session() as session:
+            row = await session.get(KbMemoryEntry, slug)
+            if row is None:
+                raise NotFoundError(f"记忆不存在: {slug}")
+            return _memory_entry_snapshot(row)
+
+    async def list_memories(
+        self,
+        *,
+        status: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """条目列表；`status=all` 等价于不过滤。"""
+        stmt = select(KbMemoryEntry)
+        count = select(func.count()).select_from(KbMemoryEntry)
+        if status and status != "all":
+            stmt = stmt.where(KbMemoryEntry.status == status)
+            count = count.where(KbMemoryEntry.status == status)
+        if q:
+            needle = f"%{q}%"
+            condition = or_(
+                KbMemoryEntry.title.ilike(needle), KbMemoryEntry.conclusion.ilike(needle)
+            )
+            stmt = stmt.where(condition)
+            count = count.where(condition)
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+        async with self._session() as session:
+            total = int(await session.scalar(count) or 0)
+            rows = (
+                await session.scalars(
+                    stmt.order_by(KbMemoryEntry.updated_at.desc(), KbMemoryEntry.slug)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).all()
+        return {
+            "items": [_memory_entry_snapshot(row) for row in rows],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
+
+    async def memory_revisions(self, slug: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """最近 `limit` 条修订，按时间正序返回（最早在前，便于比对前后值）。"""
+        async with self._session() as session:
+            rows = (
+                await session.scalars(
+                    select(KbMemoryRevision)
+                    .where(KbMemoryRevision.slug == slug)
+                    .order_by(KbMemoryRevision.created_at.desc(), KbMemoryRevision.id.desc())
+                    .limit(max(1, min(limit, 100)))
+                )
+            ).all()
+        return [
+            {
+                "id": row.id,
+                "slug": row.slug,
+                "revision": row.revision,
+                "actor": row.actor,
+                "reason": row.reason,
+                "before": row.before,
+                "after": row.after,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in reversed(rows)
+        ]
+
+    async def upsert_memory_candidate(
+        self, candidate: CandidateWrite, *, now: datetime | None = None
+    ) -> None:
+        """写入该 slug 的最新候选；`first_seen_at` 保留首次观察时间。"""
+        moment = now or _now()
+        values = {
+            "slug": candidate.slug,
+            "title": candidate.title,
+            "conclusion": candidate.conclusion,
+            "boundary": candidate.boundary,
+            "invalidation": candidate.invalidation,
+            "evidence": [item.as_dict() for item in candidate.evidence],
+            "confidence": candidate.confidence,
+            "session_count": candidate.session_count,
+            "project_count": candidate.project_count,
+            "status": candidate.status,
+            "reason": candidate.reason,
+            "contradicts": list(candidate.contradicts),
+            "first_seen_at": moment,
+            "last_seen_at": moment,
+            "created_at": moment,
+            "updated_at": moment,
+        }
+        stmt = (
+            pg_insert(KbMemoryCandidate)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=[KbMemoryCandidate.slug],
+                set_={
+                    key: value
+                    for key, value in values.items()
+                    if key not in {"slug", "created_at", "first_seen_at"}
+                },
+            )
+        )
+        async with self.write_scope(), self._session() as session:
+            await session.execute(stmt)
+
+    async def list_memory_candidates(
+        self, *, status: str | None = None, limit: int = 100
+    ) -> dict[str, Any]:
+        stmt = select(KbMemoryCandidate)
+        if status and status != "all":
+            stmt = stmt.where(KbMemoryCandidate.status == status)
+        async with self._session() as session:
+            rows = (
+                await session.scalars(
+                    stmt.order_by(
+                        KbMemoryCandidate.last_seen_at.desc(), KbMemoryCandidate.slug
+                    ).limit(max(1, min(limit, 500)))
+                )
+            ).all()
+        return {"items": [_candidate_snapshot(row) for row in rows], "total": len(rows)}
+
+    async def memory_states(self, slugs: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """聚合规划用的现有条目状态；只取 status/conclusion/evidence。"""
+        wanted = list(dict.fromkeys(slugs))
+        if not wanted:
+            return {}
+        async with self._session() as session:
+            rows = (
+                await session.scalars(select(KbMemoryEntry).where(KbMemoryEntry.slug.in_(wanted)))
+            ).all()
+        return {
+            row.slug: {
+                "status": row.status,
+                "conclusion": row.conclusion,
+                "evidence": list(row.evidence),
+            }
+            for row in rows
+        }
+
+    async def apply_memory_plan(
+        self,
+        plan: MemoryPlan,
+        *,
+        expected_states: Mapping[str, Mapping[str, Any]],
+        actor: str | None = None,
+        reason: str | None = None,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """把聚合计划原子落库；规划后状态漂移则整批冲突、一条不写。
+
+        调用方在模型响应后读取 `memory_states` 再规划；这里在同一写锁事务内重读并
+        比对 status/conclusion/证据键，避免覆盖规划期间的人工修改。
+        """
+        moment = now or _now()
+        slugs = list(
+            dict.fromkeys(
+                [write.slug for write in plan.writes] + [item.slug for item in plan.candidates]
+            )
+        )
+        async with self.write_scope(), self._session() as session:
+            rows: dict[str, KbMemoryEntry] = {}
+            candidates: dict[str, KbMemoryCandidate] = {}
+            if slugs:
+                entries = (
+                    await session.scalars(
+                        select(KbMemoryEntry).where(KbMemoryEntry.slug.in_(slugs)).with_for_update()
+                    )
+                ).all()
+                rows = {row.slug: row for row in entries}
+                existing_candidates = (
+                    await session.scalars(
+                        select(KbMemoryCandidate)
+                        .where(KbMemoryCandidate.slug.in_(slugs))
+                        .with_for_update()
+                    )
+                ).all()
+                candidates = {row.slug: row for row in existing_candidates}
+
+            for write in plan.writes:
+                current = rows.get(write.slug)
+                expected = expected_states.get(write.slug)
+                if write.action == "create":
+                    drifted = current is not None or expected is not None
+                else:
+                    drifted = (
+                        current is None
+                        or current.status != "active"
+                        or expected is None
+                        or str(expected.get("status")) != "active"
+                        or current.conclusion != expected.get("conclusion")
+                        or _evidence_keys(current.evidence)
+                        != _evidence_keys(expected.get("evidence"))
+                    )
+                if drifted:
+                    raise ConflictError("记忆状态已变化，请重新聚合", {"slug": write.slug})
+
+            written: list[dict[str, Any]] = []
+            for write in plan.writes:
+                current = rows.get(write.slug)
+                if write.action == "create":
+                    row = KbMemoryEntry(
+                        slug=write.slug,
+                        title=write.title.strip(),
+                        conclusion=write.conclusion.strip(),
+                        boundary=write.boundary.strip(),
+                        invalidation=write.invalidation.strip(),
+                        evidence=[item.as_dict() for item in write.evidence],
+                        confidence=min(1.0, max(0.0, float(write.confidence))),
+                        status="active",
+                        contradicts=list(dict.fromkeys(write.contradicts)),
+                        revision=new_revision(),
+                        created_at=moment,
+                        updated_at=moment,
+                    )
+                    session.add(row)
+                    session.add(
+                        KbMemoryRevision(
+                            slug=write.slug,
+                            revision=row.revision,
+                            actor=actor,
+                            reason=reason,
+                            before={},
+                            after=_memory_entry_snapshot(row),
+                            created_at=moment,
+                        )
+                    )
+                    written.append(_memory_entry_snapshot(row))
+                    existing = candidates.get(write.slug)
+                    await self.upsert_memory_candidate(
+                        CandidateWrite(
+                            slug=write.slug,
+                            title=write.title,
+                            conclusion=write.conclusion,
+                            boundary=write.boundary,
+                            invalidation=write.invalidation,
+                            confidence=write.confidence,
+                            evidence=write.evidence,
+                            contradicts=write.contradicts,
+                            session_count=write.session_count,
+                            project_count=write.project_count,
+                            status="promoted",
+                            # 候选表只允许三种 reason；转正保留它原先为何停在候选。
+                            reason=cast(
+                                CandidateReason,
+                                existing.reason if existing is not None else "below_threshold",
+                            ),
+                        ),
+                        now=moment,
+                    )
+                    continue
+
+                assert current is not None  # 已在上面的重校验里确认存在
+                before = _memory_entry_snapshot(current)
+                current.title = write.title.strip()
+                current.conclusion = write.conclusion.strip()
+                current.boundary = write.boundary.strip()
+                current.invalidation = write.invalidation.strip()
+                current.evidence = [item.as_dict() for item in write.evidence]
+                current.confidence = min(1.0, max(0.0, float(write.confidence)))
+                current.contradicts = list(dict.fromkeys(write.contradicts))
+                current.revision = new_revision()
+                current.updated_at = moment
+                session.add(
+                    KbMemoryRevision(
+                        slug=write.slug,
+                        revision=current.revision,
+                        actor=actor,
+                        reason=reason,
+                        before=before,
+                        after=_memory_entry_snapshot(current),
+                        created_at=moment,
+                    )
+                )
+                written.append(_memory_entry_snapshot(current))
+
+            promoted = {write.slug for write in plan.writes}
+            for candidate in plan.candidates:
+                if candidate.slug in promoted:
+                    continue
+                await self.upsert_memory_candidate(candidate, now=moment)
+            await session.flush()
+            return written
+
+    async def recent_memory_inputs(self, *, since: datetime, limit: int) -> list[dict[str, Any]]:
+        """聚合输入：最近更新的 canonical 活动节点（不读记忆表）。"""
+        kinds = ("fact", "decision", "procedure", "pitfall")
+        async with self._session() as session:
+            rows = (
+                await session.scalars(
+                    select(KbNode)
+                    .where(
+                        KbNode.archived_at.is_(None),
+                        KbNode.tier == "canonical",
+                        KbNode.kind.in_(kinds),
+                        KbNode.updated_at >= since,
+                    )
+                    .order_by(KbNode.updated_at.desc(), KbNode.id)
+                    .limit(max(1, min(limit, 1000)))
+                )
+            ).all()
+        return [
+            {
+                "id": row.id,
+                "project": row.project,
+                "kind": row.kind,
+                "title": row.title,
+                "body": row.body,
+                "source": list(row.source),
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+
+    async def publish_memory_snapshot(
+        self, *, actor: str | None = None, note: str = ""
+    ) -> dict[str, Any]:
+        """把当前全部 active 条目冻结成新快照并发布；旧 published 置 superseded。"""
+        now = _now()
+        async with self.write_scope(), self._session() as session:
+            rows = (
+                await session.scalars(
+                    select(KbMemoryEntry)
+                    .where(KbMemoryEntry.status == "active")
+                    .order_by(KbMemoryEntry.slug)
+                )
+            ).all()
+            current = await session.scalar(
+                select(KbMemorySnapshot)
+                .where(KbMemorySnapshot.status == "published")
+                .with_for_update()
+            )
+            if current is not None:
+                current.status = "superseded"
+                await session.flush()
+            snapshot = KbMemorySnapshot(
+                status="published",
+                entries=[_memory_entry_snapshot(row) for row in rows],
+                item_count=len(rows),
+                note=note.strip(),
+                actor=actor,
+                created_at=now,
+                published_at=now,
+            )
+            session.add(snapshot)
+            await session.flush()
+            session.add(
+                KbWriteAudit(
+                    actor=actor,
+                    project=None,
+                    node_id=None,
+                    action="memory_snapshot_publish",
+                    result="ok",
+                    memory_snapshot=snapshot.version,
+                    created_at=now,
+                )
+            )
+            return _memory_snapshot_snapshot(snapshot)
+
+    async def activate_memory_snapshot(
+        self, version: int, *, actor: str | None = None
+    ) -> dict[str, Any]:
+        """回滚到旧快照；disabled 不能重新激活。"""
+        now = _now()
+        async with self.write_scope(), self._session() as session:
+            target = await session.get(KbMemorySnapshot, version, with_for_update=True)
+            if target is None:
+                raise NotFoundError(f"记忆快照不存在: {version}")
+            if target.status == "published":
+                return _memory_snapshot_snapshot(target)
+            if target.status == "disabled":
+                raise ConflictError("已停用的快照不能重新激活", {"version": version})
+            current = await session.scalar(
+                select(KbMemorySnapshot)
+                .where(KbMemorySnapshot.status == "published")
+                .with_for_update()
+            )
+            if current is not None:
+                current.status = "superseded"
+                await session.flush()
+            target.status = "published"
+            target.published_at = now
+            session.add(
+                KbWriteAudit(
+                    actor=actor,
+                    project=None,
+                    node_id=None,
+                    action="memory_snapshot_activate",
+                    result="ok",
+                    memory_snapshot=version,
+                    created_at=now,
+                )
+            )
+            await session.flush()
+            return _memory_snapshot_snapshot(target)
+
+    async def disable_memory_snapshot(
+        self, version: int, *, actor: str | None = None
+    ) -> dict[str, Any]:
+        """整体停用当前快照；停用后没有 published，抽取不再注入。"""
+        now = _now()
+        async with self.write_scope(), self._session() as session:
+            target = await session.get(KbMemorySnapshot, version, with_for_update=True)
+            if target is None:
+                raise NotFoundError(f"记忆快照不存在: {version}")
+            if target.status != "published":
+                raise ConflictError("只能停用当前已发布的快照", {"version": version})
+            target.status = "disabled"
+            session.add(
+                KbWriteAudit(
+                    actor=actor,
+                    project=None,
+                    node_id=None,
+                    action="memory_snapshot_disable",
+                    result="ok",
+                    memory_snapshot=version,
+                    created_at=now,
+                )
+            )
+            await session.flush()
+            return _memory_snapshot_snapshot(target)
+
+    async def list_memory_snapshots(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        async with self._session() as session:
+            rows = (
+                await session.scalars(
+                    select(KbMemorySnapshot)
+                    .order_by(KbMemorySnapshot.version.desc())
+                    .limit(max(1, min(limit, 200)))
+                )
+            ).all()
+        return [_memory_snapshot_snapshot(row) for row in rows]
+
+    async def published_memory_snapshot(self) -> dict[str, Any] | None:
+        """worker 启动时读一次并固定；不提供热切换入口。"""
+        async with self._session() as session:
+            row = await session.scalar(
+                select(KbMemorySnapshot).where(KbMemorySnapshot.status == "published")
+            )
+        return _memory_snapshot_snapshot(row) if row is not None else None
 
     # -- MCP 调用轨迹（ADR-0015） ------------------------------------------
 
@@ -1128,6 +1801,7 @@ class PgKnowledgeStore:
             request_id=entry.request_id,
             rpc_id=entry.rpc_id,
             called_at=entry.called_at,
+            event=entry.event,
             credential_id=entry.credential_id,
             credential_name=entry.credential_name,
             tool=entry.tool,
@@ -1140,6 +1814,7 @@ class PgKnowledgeStore:
             args_digest=entry.args_digest,
             projects=entry.projects,
             client=entry.client,
+            tool_count=entry.tool_count,
         )
         statement = statement.on_conflict_do_nothing(index_elements=["trace_id"])
         async with self._session() as session:
