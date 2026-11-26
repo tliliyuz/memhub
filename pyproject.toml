@@ -55,6 +55,8 @@ memhub = "memhub.cli.main:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 测试辅助模块（如 env_loader）放在 tests/ 下，供 conftest 与用例直接导入。
+pythonpath = ["tests"]
 # StateStore 契约测试是 async 的；auto 模式省掉每个用例的 mark。
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

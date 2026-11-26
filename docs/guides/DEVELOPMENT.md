@@ -66,7 +66,7 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|
 | 测试 | `pytest` |
 | 契约测试 | `pytest tests/contract` |
-| PG 契约测试 | 先让 `MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，再 `pytest tests/contract`。未设置时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
+| PG 契约测试 | 在仓库根 `.env` 写入 `MEMHUB_TEST_DB_URL`（或只在当前 shell 导出），再 `pytest tests/contract`。测试入口在变量未设置时自动读取该键，显式环境变量优先，worktree 无需复制 `.env`；都拿不到时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
 | 检查 | `ruff check .` |
 | 格式 | `ruff format --check .` |
 | 类型 | `python -m mypy src` |
@@ -75,7 +75,7 @@ prompts/      各 source_type 的抽取 profile
 | 启动依赖 | `docker compose -f deploy/compose.yml up -d` |
 | 本机运行 | `memhub --version` |
 
-`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。单独导出这一个键即可，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
+`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。测试入口只从 `.env` 读这一个键，写进 `.env` 后直接 `pytest` 即可；若用 shell 导出，也只导出这一个键，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
 
 本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
