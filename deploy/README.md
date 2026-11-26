@@ -190,11 +190,26 @@ timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer
    - 在生产 `memhub_prod` 建 schema `kb`，以及两个角色：`memhub_kb_owner`（对 `kb_*` 有 DDL，Alembic 用）与
      `memhub_kb_app`（只对 `kb_*` 做 DML，kb-api 运行时用）。两者 `search_path` 固定 `kb`，**不授予 `public` 的
      `USAGE`**——运行态 5 表在 `public` 里，PG 15+ 默认对 `PUBLIC` 授 `USAGE`，只靠「另建角色」挡不住。
+   - **默认权限（漏了会静默降级）**：`memhub_kb_app` 的 DML 是逐表授予的，后续迁移新建的表不会自动获得。
+     建角色时以 `memhub_kb_owner` 执行一次：
+     ```sql
+     ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_owner IN SCHEMA kb
+       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO memhub_kb_app;
+     ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_owner IN SCHEMA kb
+       GRANT USAGE, SELECT ON SEQUENCES TO memhub_kb_app;
+     ```
+     默认权限只覆盖执行之后由该角色新建的对象；既有表要单独补
+     `GRANT SELECT, INSERT, DELETE ON kb.<表> TO memhub_kb_app` 与
+     `GRANT USAGE ON SEQUENCE kb.<表>_id_seq TO memhub_kb_app`。漏掉这步不会让部署失败：新表对运行态角色
+     不可见，MCP 调用轨迹写入会全部退到 spool、轨迹查询直接报权限错（2026-11-26 发版的 `0002_kb_mcp_trace`
+     已实际命中）。
    - 连接配额建议：`memhub_kb_app` 限 4（连接池 2+2，ADR-0013 §6 的最小可行值），`memhub_kb_owner` 限 2
      （带外 `alembic` 与 `migrate-kb` 各占一条）。加上运行态现有 2+3（ingest）与 1+1（worker），都在
      `max_connections=60` 内。
-   - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）与
-     `MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）。值只经该文件注入；文档与提交信息只写键名。
+   - `/etc/memhub/env`（0600）只追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）。值只经该文件注入；
+     文档与提交信息只写键名。**迁移 DSN 不进常驻 env**：`MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）
+     带 DDL 权限，而 `/etc/memhub/env` 会同时注入 ingest 与 worker，写进去等于把 DDL 凭据发给所有服务；
+     迁移时按第 3 步用一次性 0600 文件注入，用完即删。
    - 另建 `/etc/memhub/env.kb`（0600，归属同前）：kb 容器的独立 env_file，只放 kb 进程读取的键。
      至少 `MEMHUB_KB_DB_URL=` 同一值，且 **DSN 必须自带口令**（`postgresql://memhub_kb_app:<口令>@127.0.0.1:5432/memhub_prod`）：
      独立文件里没有 `PGPASSWORD`，仍按「DSN 不写口令 + PGPASSWORD」写法会直接认证失败。
@@ -206,11 +221,20 @@ timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer
    ingest 可以继续跑（只写 `raw_store/` 队列，不碰 `knowledge/`）。
 3. **建表**（Alembic 带外执行，不在任何容器启动时跑）：
    ```bash
-   docker run --rm --network=host --env-file /etc/memhub/env \
+   umask 077
+   /usr/bin/install -m 600 /dev/null /root/.kb-migrate.env
+   # 手工写入一行 MEMHUB_KB_MIGRATE_DB_URL=<DSN>；不要进 shell 历史、聊天或仓库
+   docker run --rm --network=host --env-file /root/.kb-migrate.env \
      memhub/app-kb:<tag> alembic -c /app/alembic.ini upgrade head
+   shred -u /root/.kb-migrate.env
    ```
    迁移角色只认 `MEMHUB_KB_MIGRATE_DB_URL`，不读 `MEMHUB_DB_URL`。这一步只建 `kb_*` 六表与
    `alembic_version`；运行态 5 表仍由 ingest 启动时自管，两套版本表互不相干。
+   升级后核对运行态角色确实拿到了新表权限（以 `memhub_kb_owner` 连库，结果都应为 `t`）：
+   ```sql
+   SELECT has_table_privilege('memhub_kb_app', 'kb.kb_mcp_trace', 'INSERT');
+   SELECT has_sequence_privilege('memhub_kb_app', 'kb.kb_mcp_trace_id_seq', 'USAGE');
+   ```
    **待负责人裁决**：上面用的是「烘进镜像的 alembic + 一次性容器」。备选是服务器上装宿主 venv 跑
    `alembic -c alembic.ini upgrade head`——但机上只有容器、没有宿主 Python，选它要额外维护一套 venv，
    且与镜像的 alembic 版本可能漂移。两种写法都可行，裁决前不要二选一固化到运维脚本。
