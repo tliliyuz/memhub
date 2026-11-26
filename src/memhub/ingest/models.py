@@ -94,4 +94,21 @@ class SeenSha(Base):
     )
 
 
-__all__ = ["Base", "Batch", "Device", "FileCursor", "SeenSha", "Source"]
+class SeenMessage(Base):
+    """已成功抽取的消息 uuid（ADR-0017）。
+
+    键按 `(project, source_id)` 隔离：同一 uuid 在另一个库或源里仍是新消息。
+    不建外键——源清理后保留记录，避免重推时重复抽取；清理走 `forget_messages`。
+    """
+
+    __tablename__ = "seen_messages"
+
+    project: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    uuid: Mapped[str] = mapped_column(Text, primary_key=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+__all__ = ["Base", "Batch", "Device", "FileCursor", "SeenMessage", "SeenSha", "Source"]

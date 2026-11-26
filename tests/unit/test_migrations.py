@@ -47,3 +47,12 @@ def test_second_migration_is_a_noop() -> None:
     assert ensure_schema(conn) == [version for version, _ in MIGRATIONS]
     assert ensure_schema(conn) == [], "第二次必须是空操作，不能重复执行 DDL"
     assert len(conn.ddl) == _statement_count()
+
+
+def test_seen_messages_migration_is_appended() -> None:
+    """消息 uuid 去重索引必须由前向迁移建表，不能靠模型 create_all。"""
+    by_version = dict(MIGRATIONS)
+    assert "0002_seen_messages" in by_version
+    ddl = " ".join(" ".join(by_version["0002_seen_messages"]).split())
+    assert "CREATE TABLE IF NOT EXISTS seen_messages" in ddl
+    assert "PRIMARY KEY (project, source_id, uuid)" in ddl

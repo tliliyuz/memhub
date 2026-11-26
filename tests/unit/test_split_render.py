@@ -142,3 +142,61 @@ def test_plaintext_session_blocks_keep_paragraphs_and_truncate_by_content() -> N
         ("b0002", "Second"),
     ]
     assert render.truncate_blocks(blocks, 0) == []
+
+
+def _event(uuid: str, text: str, *, session_id: str = "session-a") -> str:
+    return json.dumps(
+        {
+            "type": "user",
+            "uuid": uuid,
+            "sessionId": session_id,
+            "message": {"role": "user", "content": text},
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_session_blocks_carry_message_uuid() -> None:
+    blocks = render.render_session_blocks(_event("msg-1", "需要保留消息身份。"))
+    assert [(block.id, block.message_id) for block in blocks] == [("b0001", "msg-1")]
+
+
+def test_fork_copy_keeps_uuid_and_gets_the_same_message_id() -> None:
+    """fork 只改写 sessionId；消息 uuid 与块身份必须保持不变。"""
+    parent = _event("msg-1", "同一条消息。", session_id="parent")
+    fork = _event("msg-1", "同一条消息。", session_id="fork")
+    assert render.render_session_blocks(parent) == render.render_session_blocks(fork)
+    assert render.render_session_blocks(fork)[0].message_id == "msg-1"
+
+
+def test_long_message_fragments_share_message_uuid() -> None:
+    blocks = render.render_session_blocks(_event("msg-2", "x" * 25), max_block_chars=10)
+    assert [block.id for block in blocks] == ["b0001.1", "b0001.2", "b0001.3"]
+    assert {block.message_id for block in blocks} == {"msg-2"}
+
+
+def test_events_without_uuid_or_plaintext_have_no_message_id() -> None:
+    without_uuid = json.dumps(
+        {"type": "user", "message": {"role": "user", "content": "no uuid here"}}
+    )
+    assert render.render_session_blocks(without_uuid)[0].message_id is None
+    assert render.render_plaintext_blocks("plain text")[0].message_id is None
+
+
+def test_multiple_text_blocks_from_one_event_share_message_uuid() -> None:
+    event = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "msg-3",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "first reply"},
+                    {"type": "text", "text": "second reply"},
+                ],
+            },
+        }
+    )
+    blocks = render.render_session_blocks(event)
+    assert [block.text for block in blocks] == ["first reply", "second reply"]
+    assert {block.message_id for block in blocks} == {"msg-3"}

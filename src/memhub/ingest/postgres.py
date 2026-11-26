@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -30,14 +31,21 @@ from memhub.ingest.migrations import ensure_schema
 from memhub.ingest.models import (
     Batch,
     Device,
+    SeenMessage,
     SeenSha,
     Source,
 )
 from memhub.ingest.models import (
     FileCursor as FileCursorRow,
 )
-from memhub.ingest.store import REPLAY_WINDOW, CursorConflict
+from memhub.ingest.store import REPLAY_WINDOW, SEEN_MESSAGE_BATCH, CursorConflict
 from memhub.queue.rawstore import BatchTargetConflict
+
+
+def _chunks(values: Sequence[str], size: int = SEEN_MESSAGE_BATCH) -> Iterator[Sequence[str]]:
+    """按批切分，避开 PG 单语句参数上限。"""
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def _async_dsn(dsn: str) -> str:
@@ -307,6 +315,53 @@ class PostgresStore:
                 )
             )
             return result
+
+    # -- 消息去重索引（ADR-0017） ----------------------------------------
+    async def seen_messages(self, project: str, source_id: str, uuids: Sequence[str]) -> set[str]:
+        if not uuids:
+            return set()
+        found: set[str] = set()
+        async with self.sessions() as session:
+            for chunk in _chunks(uuids):
+                rows = await session.scalars(
+                    select(SeenMessage.uuid).where(
+                        SeenMessage.project == project,
+                        SeenMessage.source_id == source_id,
+                        SeenMessage.uuid.in_(chunk),
+                    )
+                )
+                found.update(rows.all())
+        return found
+
+    async def mark_messages_seen(self, project: str, source_id: str, uuids: Sequence[str]) -> None:
+        if not uuids:
+            return
+        async with self.sessions() as session, session.begin():
+            for chunk in _chunks(uuids):
+                await session.execute(
+                    pg_insert(SeenMessage)
+                    .values(
+                        [
+                            {"project": project, "source_id": source_id, "uuid": uuid}
+                            for uuid in chunk
+                        ]
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            SeenMessage.project,
+                            SeenMessage.source_id,
+                            SeenMessage.uuid,
+                        ]
+                    )
+                )
+
+    async def forget_messages(self, project: str, *, source_id: str | None = None) -> int:
+        stmt = delete(SeenMessage).where(SeenMessage.project == project)
+        if source_id is not None:
+            stmt = stmt.where(SeenMessage.source_id == source_id)
+        async with self.sessions() as session, session.begin():
+            outcome = await session.execute(stmt)
+        return int(cast(CursorResult[Any], outcome).rowcount)
 
     # -- maintenance -----------------------------------------------------
     async def purge_expired(self, *, keep: timedelta = timedelta(hours=25)) -> int:
