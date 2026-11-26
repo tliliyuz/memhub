@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-25（补齐采集源原始队列清理接口）
+
+- `fix(ingest)`：实现 `DELETE /ingest/source/{source_id}?device_id=<id>&purge=true`，仅接受 provision token。先核对三个队列根下所有待删文件的设备和源，再清理文件、刷新配额缓存；保留已有知识、游标、去重与批次状态。成功（含空清理）记录 `ingest_purge` 审计。
+- `docs`：采集 API 契约升 0.9，索引升 0.13；同步源注册表与环境键说明。
+- 验证（2026-11-25，测试库 `memhub_dev`）：RED：新增清理用例因路由缺失返回 404，归属冲突与缺设备参数用例随后分别捕获误删（200）和错误信封（422）。GREEN：`pytest tests/unit tests/contract -q --tb=line` 为 561 passed / 1 skipped；本地 `curl.exe` 注册、推送、游标、清理、重复清理与游标保留冒烟通过；`ruff check src tests scripts alembic`、同目录格式检查及 `mypy src` 通过。
+
 ## 2026-11-25（投影子系统下线：图谱与检索直读 PG）
 
 - `refactor(kb)`：删除 `memhub/kb/projection.py` 与 `tests/contract/test_kb_projection_pg.py`；kb-api 去掉 `GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `_GraphRestarter`，`healthz` 改为只返回 `{ok, store, nodes}`（`store` 恒为 `pg`）。`archive.projection_dirty()` / `clear_projection_dirty()` 与 `PgKnowledgeStore.latest_write()` 一并移除；`archive.MARKER` 保留为历史 journal 的最后一个步骤，恢复流程按原样重放。

@@ -11,12 +11,14 @@ import pytest
 from anyio import Path as AsyncPath
 
 from memhub.contract import BatchFile, IngestRequest
+from memhub.queue import rawstore
 from memhub.queue.rawstore import (
     BatchTargetConflict,
     QuotaExceeded,
     RawStoreQuota,
     batch_dir,
     estimate_new_bytes,
+    purge_source_files,
     save_batch,
     tree_size,
 )
@@ -162,3 +164,17 @@ async def test_quota_rescans_after_invalidate(tmp_path: Path) -> None:
     await save_batch(tmp_path, _request("hello"))
     await quota.invalidate()
     assert await quota.used_bytes() > 0
+
+
+async def test_purge_works_without_windows_reparse_constant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _request("hello", device="device-a")
+    await save_batch(tmp_path, request)
+    monkeypatch.delattr(rawstore.stat, "FILE_ATTRIBUTE_REPARSE_POINT", raising=False)
+
+    assert await purge_source_files(tmp_path, "device-a", "cc-sessions") == {
+        "raw_store": 1,
+        "processed_raw": 0,
+        "pending_review": 0,
+    }

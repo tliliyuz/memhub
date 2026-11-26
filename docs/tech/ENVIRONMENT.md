@@ -35,7 +35,7 @@
 | `MEMHUB_WINDOW_TZ` | 否 | 空（系统本地） | worker | `--window` 的时区：`UTC` / `+08:00` / IANA 名；非法值退出 2。容器默认 UTC，不设时 `21:00-02:00` 实际跑在 05:00-10:00 CST（线上踩过）；生产用显式偏移 `+08:00`，不依赖镜像 tzdata |
 | `MEMHUB_KB_API_URL` | 否 | `http://127.0.0.1:8701` | ingest | `/ingest/projects` 只读列表的同机 kb-api 上游：GET 取列表元数据后按已登记且活动过滤；上游不可用返回 `500/2001`。raw 的目标校验直接读本地登记，不依赖此 URL；建库只在管理台 |
 | `MEMHUB_DEVICE_TOKEN_SECRET` | 是（prod） | — | ingest | prod 缺失启动失败；签发 `v1.<device>.<HMAC>` per-device token，轮换即令全部 token 失效 |
-| `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；`/devices/register` 必须带 `Authorization: Bearer <provision_token>`，否则 401——用户体系未落地前用它关闭开放注册 |
+| `MEMHUB_PROVISION_TOKEN` | 是（prod） | — | ingest | prod 缺失启动失败；为 `/devices/register` 与 `DELETE /ingest/source/{source_id}` 校验 Bearer 凭据；清理接口未配置该键时也返回 401（含 dev） |
 | `MEMHUB_DEV_TOKEN` | 否 | 空 | ingest（dev） | 仅本地联调用的共享 token；`MEMHUB_ENV=prod` 时**被忽略**（代码层不读取） |
 | `MEMHUB_QUEUE_MAX_BYTES` | 否 | `1073741824` | ingest / kb-api | raw_store 用量上限；ingest 超限返回 `1008`、kb 上传返回 `1013`（只按新增 sha 计，重放不受影响）；非法值启动失败 |
 | `MEMHUB_PROCESSED_MAX_BYTES` | 否 | `2147483648` | purge-expired | `processed_raw/` 总量上限，配合 7 天保留期按最旧优先裁剪；非法值退出 2 |

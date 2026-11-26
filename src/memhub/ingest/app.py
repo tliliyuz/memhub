@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -55,6 +56,7 @@ from memhub.queue.rawstore import (
     RawStoreQuota,
     collector_device_reserved,
     estimate_new_bytes,
+    purge_source_files,
     queue_write_lock,
     save_batch,
 )
@@ -147,6 +149,10 @@ class RawIngestRequest(IngestRequest):
 
 
 DEFAULT_KB_API_URL = "http://127.0.0.1:8701"
+_SOURCE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+_DEVICE_ID = re.compile(
+    r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 async def _kb_api_request(
@@ -529,6 +535,55 @@ def create_app(
             raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
         await _audit(body.device_id, project, "accept")
         return _ok(result.model_dump(mode="json"))
+
+    @app.delete("/ingest/source/{source_id}")
+    async def purge_source(
+        source_id: str,
+        device_id: Annotated[str | None, Query()] = None,
+        purge: Annotated[str | None, Query()] = None,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        """按用户 provision token 清理一个设备源的原始队列，不改运行态与知识。"""
+        supplied = ""
+        if authorization and authorization.startswith("Bearer "):
+            supplied = authorization.removeprefix("Bearer ")
+        if not provision_token or not hmac.compare_digest(
+            supplied.encode(), provision_token.encode()
+        ):
+            raise ApiError(ErrorCode.TOKEN_INVALID, "invalid provision token")
+        if (
+            purge != "true"
+            or device_id is None
+            or _DEVICE_ID.fullmatch(device_id) is None
+            or _SOURCE_ID.fullmatch(source_id) is None
+            or source_id in {".", ".."}
+            or collector_device_reserved(device_id)
+        ):
+            raise ApiError(ErrorCode.BAD_REQUEST, "invalid purge target")
+
+        counts = {"raw_store": 0, "processed_raw": 0, "pending_review": 0}
+        try:
+            async with queue_lock:
+                if raw_root is not None:
+                    async with queue_write_lock(raw_root):
+                        counts = await purge_source_files(raw_root, device_id, source_id)
+                        if quota is not None:
+                            await quota.invalidate()
+        except BatchTargetConflict as exc:
+            raise ApiError(ErrorCode.BAD_REQUEST, "invalid purge target") from exc
+        except OSError as exc:
+            if quota is not None:
+                await quota.invalidate()
+            raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
+
+        await kb_store.record_write_audit(
+            actor="provision",
+            project=None,
+            node_id=None,
+            action="ingest_purge",
+            result="ok",
+        )
+        return _ok({"device_id": device_id, "source_id": source_id, "purged": counts})
 
     @app.post("/ingest/heartbeat")
     async def heartbeat(
