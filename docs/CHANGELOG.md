@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-26（ADR 重编号为 0015 并转 accepted；门禁自检修复）
+
+- `docs(adr)`：MCP 调用轨迹 ADR 由 `ADR-0014-mcp-call-trace.md` 重编号为 [ADR-0015](decisions/ADR-0015-mcp-call-trace.md)，状态由 `proposed` 转 `accepted`（负责人裁决）。另一份 `ADR-0014-drop-candidate-tier-gate.md` 保持原编号；两份 ADR 此前同时占用 0014，索引与仓库内引用均按本次裁决更新。
+- `scripts`：`check_adr_governance.py` 增加编号唯一性检查：同一四位编号被多份 `ADR-*.md` 使用时失败并列出文件名。此前门禁只校验索引链接、状态词与状态行数量，编号冲突可以静默合入。
+- `fix(guard)`：`.claude/hooks/guard-git-write.py` 的远端操作提示改为括号包裹的隐式字符串拼接，消除 `ISC004`；这是 dev 上 `ruff check .` 唯一失败项，来自钩子自身的提交。钩子行为不变：`git push` 仍返回 `ask`，本地 `git commit` 放行（stdin 冒烟验证）。
+- RED/GREEN：把当前脚本放入含两份 `ADR-0014-*.md` 的临时仓库，退出码 0（缺口）；加入重复检测后同仓退出码 1 并输出「ADR 编号 0014 被 2 份文件重复使用：ADR-0014-alpha.md、ADR-0014-beta.md」；真实仓库仍退出码 0（13 份 ADR）。
+- 验证（2026-11-26，worktree `chore/adr-0015-gate-fixes`）：`check_document_format.py`、`check_document_ownership.py --all`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`（27 键）、`check_no_raw_sql.py`、`check_async_io.py`、`git diff --check` 均通过；`ruff check .`、`ruff format --check .`（585 files）、`mypy src`（49 files）通过。本次只改治理脚本、ADR 与文档，`src/` 与 `tests/` 未变，未重跑全量 pytest；dev 基线为 587 passed / 1 skipped。
+
 ## 2026-11-26（意图判断与响应边界）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` 新增 §1.3「意图判断与响应边界」：接到消息先判断意图再动作，禁止在判断意图前建 worktree、改代码或开分支；现象描述、原因追问与现状核对默认只给诊断结论与根因，结论放前面；只有明确要求变更（「改一下」「修一下」「做吧」）或意图清楚指向实现才动手，不得把诊断自动升级成修复；意图含糊时先澄清需求与边界并给出可决策选项。ADR 检查：未命中（只约束响应方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
@@ -27,7 +35,7 @@
 - `docs`：规格 §7 表格补「请求 ID」列，§9.4 验收 15 的构建命令改为 `pnpm build`。
 - `test`：新增 `web/tests/mcp-traces.test.mjs`（查询参数透传、汇总路径、503 错误码、凭据降级、时间范围换算）。RED：目标模块 `web/src/lib/traces.ts` 不存在，`node --test tests/mcp-traces.test.mjs` 报 `ERR_MODULE_NOT_FOUND`；GREEN 后与既有用例共 10 项通过。
 - 验证（2026-11-26）：`node --test tests/mcp-traces.test.mjs tests/kb-project-archive.test.mjs` 10 passed；`pnpm build`（含 `tsc -b`）通过；ego-browser + 本地模拟查询接口验证治理入口、有数据与空态、分页、工具/状态/凭据/时间范围筛选与清除，验收标签页已关闭。未连接真实数据库做页面联调。
-- ADR 检查：页面属于 [ADR-0014](decisions/ADR-0014-mcp-call-trace.md) 决策 6 的实现范围，未新增架构决策；ADR-0014 状态仍为 `proposed`，待负责人裁决为 accepted。
+- ADR 检查：页面属于 [ADR-0015](decisions/ADR-0015-mcp-call-trace.md) 决策 6 的实现范围，未新增架构决策；该 ADR 当时仍为 `proposed`，2026-11-26 经负责人裁决由 ADR-0014 重编号为 ADR-0015 并转 `accepted`（见同日记录）。
 
 ## 2026-11-25（MCP 调用轨迹：服务端落库与查询接口）
 
@@ -37,7 +45,7 @@
 - `feat(kb)`：明细保留 30 天，清理挂在写入路径上，按小时节流，失败只记 WARNING。
 - `feat(kb-api)`：新增 `GET /api/v1/kb/mcp-traces`（分页与过滤）与 `/summary`（按状态、工具、凭据聚合；`avg_ms` 只算 ok 与 error）；非 PG 存储返回 503/`2001`。
 - `feat(alembic)`：迁移 `0002_kb_mcp_trace`，含 4 个索引与 `trace_id` 唯一约束。
-- `docs`：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`ENVIRONMENT.md` 的 `MEMHUB_KB_TRACE_SPOOL` 已同步；规格 §2.1 索引改写为升序 B-tree（列表倒序由反向扫描满足），§6.2 补 `avg_ms` 口径。ADR-0014 仍为 `proposed`，待负责人裁决。
+- `docs`：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`ENVIRONMENT.md` 的 `MEMHUB_KB_TRACE_SPOOL` 已同步；规格 §2.1 索引改写为升序 B-tree（列表倒序由反向扫描满足），§6.2 补 `avg_ms` 口径。ADR-0015（原 ADR-0014）当时仍为 `proposed`，后于 2026-11-26 转 `accepted`。
 - `test`：新增 `tests/contract/test_mcp_trace.py`（14 个用例，覆盖规格 §9.1–§9.4 的 1–13 条）；`test_kb_migrations.py` 与 `test_kb_models.py` 的表清单补入 `kb_mcp_trace`。
 - 验证（2026-11-25，本地，`MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，单进程）：全量 `pytest` 558 passed / 1 skipped / 1 failed，失败项为 `test_kb_models.py` 硬编码「恰好 6 张表」，补入 `kb_mcp_trace` 后重跑 `test_kb_models.py` + `test_mcp_trace.py` + `test_kb_migrations.py` 共 31 passed（修正后未再跑全量）；`ruff check`、`ruff format --check`、`mypy src`（50 files）、`check_async_io.py`、`check_no_raw_sql.py`、`check_document_format.py`、`check_agent_entrypoints_sync.py` 通过，`check_document_ownership.py --changed` 退出码 0。
 - 未做：管理台「调用轨迹」页面（规格 §7，验收 14–17 的页面部分）与 MCP 发现层改进，另分支处理。

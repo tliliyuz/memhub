@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """检查 ADR 索引边界、状态与链接，以及根级治理镜像。
 
-只验证可机械裁决的部分：索引里出现的文件存在、状态词合法、每份 ADR 只有一个
-状态行、Markdown 链接可解析、「拟部分替代」这类未决措辞已清除。
+只验证可机械裁决的部分：索引里出现的文件存在、编号唯一、状态词合法、每份 ADR
+只有一个状态行、Markdown 链接可解析、「拟部分替代」这类未决措辞已清除。
 
 不替代负责人裁决、规格评审或业务验收测试。
 """
@@ -18,6 +18,7 @@ DECISIONS = REPO_ROOT / "docs" / "decisions"
 INDEX = DECISIONS / "README.md"
 
 LINK_RE = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
+NUMBER_RE = re.compile(r"^ADR-(\d{4})-")
 STATUS_RE = re.compile(r"^\|\s*状态\s*\|\s*(\S+)\s*\|")
 VALID_STATUS = {"proposed", "accepted", "superseded", "deprecated"}
 PENDING_WORDING_RE = re.compile(r"拟部分替代|待负责人裁决为 accepted")
@@ -37,6 +38,18 @@ def main() -> int:
     adr_files = sorted(path for path in DECISIONS.glob("ADR-*.md"))
     if not adr_files:
         report("docs/decisions/ 下没有任何 ADR", failed)
+
+    by_number: dict[str, list[str]] = {}
+    for path in adr_files:
+        number = NUMBER_RE.match(path.name)
+        if number:
+            by_number.setdefault(number.group(1), []).append(path.name)
+    for number, names in sorted(by_number.items()):
+        if len(names) > 1:
+            report(
+                f"ADR 编号 {number} 被 {len(names)} 份文件重复使用：{'、'.join(sorted(names))}",
+                failed,
+            )
 
     for path in adr_files:
         text = path.read_text(encoding="utf-8")

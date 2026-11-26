@@ -58,7 +58,7 @@ prompts/      各 source_type 的抽取 profile
 
 新增顶层目录或改分层：先改 [architecture](../architecture.md)，再改本表。
 
-治理门禁与评测仓同源（`scripts/` 下脚本 + pre-commit）：`check_document_format.py --staged`（结构、H2 编号、链接、入口镜像）、`check_document_ownership.py --staged`（权威文档归属、实施历史与密钥形态）、`check_adr_governance.py`（ADR 索引与状态词）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁工具署名行）、`check_no_raw_sql.py`、`check_async_io.py`、`check_env_example_keys.py`。`knowledge/` 与 `prompts/` 不是治理文档，文档类检查自动排除。
+治理门禁与评测仓同源（`scripts/` 下脚本 + pre-commit）：`check_document_format.py --staged`（结构、H2 编号、链接、入口镜像）、`check_document_ownership.py --staged`（权威文档归属、实施历史与密钥形态）、`check_adr_governance.py`（ADR 索引、状态词与编号唯一性）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁工具署名行）、`check_no_raw_sql.py`、`check_async_io.py`、`check_env_example_keys.py`。`knowledge/` 与 `prompts/` 不是治理文档，文档类检查自动排除。
 
 ## 3. 常用命令
 

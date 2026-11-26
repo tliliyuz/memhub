@@ -152,7 +152,7 @@ class KbWriteAudit(Base):
 
 
 class KbMcpTrace(Base):
-    """MCP 调用轨迹（ADR-0014）；只记元数据，不含参数原文、正文与 token。
+    """MCP 调用轨迹（ADR-0015）；只记元数据，不含参数原文、正文与 token。
 
     `trace_id` 每次记录一个 UUID4 hex，重试与 spool 补投复用同一值，
     配合唯一约束实现幂等写入。不设外键：调用可能发生在任何库都存在之前。
