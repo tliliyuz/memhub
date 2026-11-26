@@ -136,6 +136,7 @@ def _row(trace_id: str, called_at: datetime, **overrides: Any) -> dict[str, Any]
         "request_id": f"req-{trace_id}",
         "rpc_id": "2",
         "called_at": called_at,
+        "event": "call",
         "credential_id": "a1b2c3d4e5f6",
         "credential_name": "fixture",
         "tool": "kb_search",
@@ -148,9 +149,15 @@ def _row(trace_id: str, called_at: datetime, **overrides: Any) -> dict[str, Any]
         "args_digest": None,
         "projects": ["sample"],
         "client": "fixture/1",
+        "tool_count": None,
     }
     values.update(overrides)
     return values
+
+
+def _call_rows(dsn: str, schema: str) -> list[dict[str, Any]]:
+    """只取 `event=call` 的行；发现层事件另有断言。"""
+    return [row for row in _traces(dsn, schema) if row["event"] == "call"]
 
 
 def _entry(
@@ -218,7 +225,7 @@ async def _ids(store: PgKnowledgeStore) -> list[str]:
 def test_ok_call_records_metadata(
     web: Path, http_sdk: None, monkeypatch: pytest.MonkeyPatch, test_dsn: str, kb_pg_schema: str
 ) -> None:
-    """成功的 tools/call 落一行；initialize / notifications / tools/list 不记录。"""
+    """一次连接产生 initialize / tools/list / tools/call 三行；通知不记录（§9.1）。"""
     _seed(test_dsn, kb_pg_schema)
     config, headers = _grant(name="claude-code-laptop")
     monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([config]))
@@ -228,26 +235,45 @@ def test_ok_call_records_metadata(
             "/mcp", headers=ready, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
         )
         assert listed.status_code == 200
+        pong = client.post(
+            "/mcp", headers=ready, json={"jsonrpc": "2.0", "id": 9, "method": "ping"}
+        )
+        assert pong.status_code == 200
         response = _call(client, ready, "kb_search", {"query": "合成样本"}, rpc_id=3)
         assert response.status_code == 200
         assert not response.json()["result"]["isError"]
 
     rows = _traces(test_dsn, kb_pg_schema)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["status"] == "ok"
-    assert row["tool"] == "kb_search"
-    assert row["http_status"] == 200
-    assert row["rpc_id"] == "3"
-    assert row["request_id"]
-    assert row["called_at"] is not None
-    assert row["duration_ms"] >= 0
-    assert row["result_bytes"] and row["result_bytes"] > 0
-    assert row["credential_id"] == config["sha256"][:12]
-    assert row["credential_name"] == "claude-code-laptop"
-    assert row["projects"] == ["sample"]
-    assert row["error_code"] is None
-    assert row["error_kind"] is None
+    assert [row["event"] for row in rows] == ["initialize", "list_tools", "call"]
+
+    init, listing, call = rows
+    assert init["status"] == "ok"
+    assert init["rpc_id"] == "1"
+    assert init["tool"] is None
+    assert init["tool_count"] is None
+    assert init["credential_id"] == config["sha256"][:12]
+    assert init["credential_name"] == "claude-code-laptop"
+    assert init["client"]
+
+    assert listing["status"] == "ok"
+    assert listing["rpc_id"] == "2"
+    assert listing["tool"] is None
+    assert listing["tool_count"] == 4  # mcp:read 的四个读工具
+    assert listing["credential_id"] == config["sha256"][:12]
+
+    assert call["status"] == "ok"
+    assert call["tool"] == "kb_search"
+    assert call["http_status"] == 200
+    assert call["rpc_id"] == "3"
+    assert call["request_id"]
+    assert call["called_at"] is not None
+    assert call["duration_ms"] >= 0
+    assert call["result_bytes"] and call["result_bytes"] > 0
+    assert call["credential_id"] == config["sha256"][:12]
+    assert call["credential_name"] == "claude-code-laptop"
+    assert call["projects"] == ["sample"]
+    assert call["error_code"] is None
+    assert call["error_kind"] is None
 
 
 def test_error_call_records_business_code(
@@ -264,7 +290,7 @@ def test_error_call_records_business_code(
         assert result["isError"]
         assert json.loads(result["content"][0]["text"])["code"] == 3003
 
-    row = _traces(test_dsn, kb_pg_schema)[0]
+    row = _call_rows(test_dsn, kb_pg_schema)[0]
     assert row["status"] == "error"
     assert row["tool"] == "kb_search"
     assert row["error_code"] == 3003
@@ -282,7 +308,7 @@ def test_credential_name_degrades_to_null_without_grant_name(
         ready = _open(client, headers)
         assert _call(client, ready, "kb_search", {"query": "合成样本"}).status_code == 200
 
-    row = _traces(test_dsn, kb_pg_schema)[0]
+    row = _call_rows(test_dsn, kb_pg_schema)[0]
     assert row["credential_id"] == config["sha256"][:12]
     assert row["credential_name"] is None
 
@@ -304,7 +330,7 @@ def test_rejections_are_recorded(
         )
         assert client.get("/mcp", headers=ready).status_code == 405
 
-    rows = _traces(test_dsn, kb_pg_schema)
+    rows = [row for row in _traces(test_dsn, kb_pg_schema) if row["status"] == "rejected"]
     assert [(row["status"], row["error_kind"], row["http_status"]) for row in rows] == [
         ("rejected", "unauthorized", 401),
         ("rejected", "forbidden", 403),
@@ -313,6 +339,7 @@ def test_rejections_are_recorded(
     assert rows[0]["credential_id"] is None
     assert rows[1]["credential_id"] == config["sha256"][:12]
     assert all(row["tool"] is None for row in rows)
+    assert all(row["event"] == "call" for row in rows)
 
 
 def test_arguments_are_not_persisted(
@@ -331,7 +358,10 @@ def test_arguments_are_not_persisted(
     canonical = json.dumps(
         {"query": MARKER}, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
-    assert rows[0]["args_digest"] == hashlib.sha256(canonical.encode()).hexdigest()
+    assert (
+        _call_rows(test_dsn, kb_pg_schema)[0]["args_digest"]
+        == hashlib.sha256(canonical.encode()).hexdigest()
+    )
 
 
 # ---- §9.2 可靠落库 --------------------------------------------------------
@@ -453,6 +483,23 @@ def test_list_endpoint_filters_and_orders(web: Path, test_dsn: str, kb_pg_schema
             credential_id="bbbbbbbbbbbb",
             credential_name=None,
         ),
+        _row(
+            "d1",
+            base + timedelta(minutes=3),
+            event="initialize",
+            tool=None,
+            rpc_id="1",
+            result_bytes=None,
+        ),
+        _row(
+            "d2",
+            base + timedelta(minutes=4),
+            event="list_tools",
+            tool=None,
+            rpc_id="2",
+            result_bytes=None,
+            tool_count=7,
+        ),
     )
     with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
         body = client.get("/api/v1/kb/mcp-traces").json()
@@ -461,6 +508,15 @@ def test_list_endpoint_filters_and_orders(web: Path, test_dsn: str, kb_pg_schema
         assert (body["total"], body["offset"], body["limit"]) == (3, 0, 50)
         assert body["items"][0]["credential"] == {"id": "bbbbbbbbbbbb", "name": None}
         assert body["items"][1]["error_code"] == 3001
+        assert body["items"][0]["event"] == "call"
+
+        listings = client.get("/api/v1/kb/mcp-traces", params={"event": "list_tools"}).json()
+        assert [item["trace_id"] for item in listings["items"]] == ["d2"]
+        assert listings["items"][0]["tool_count"] == 7
+        assert listings["items"][0]["tool"] is None
+
+        inits = client.get("/api/v1/kb/mcp-traces", params={"event": "initialize"}).json()
+        assert [item["trace_id"] for item in inits["items"]] == ["d1"]
 
         by_tool = client.get("/api/v1/kb/mcp-traces", params={"tool": "kb_search"}).json()
         assert [item["trace_id"] for item in by_tool["items"]] == ["t3", "t1"]
@@ -507,6 +563,83 @@ def test_summary_endpoint_aggregates(web: Path, test_dsn: str, kb_pg_schema: str
     assert tools["kb_search"]["avg_ms"] == 20
     assert tools["kb_read"]["rejected"] == 1
     assert body["credentials"] == [{"id": "a1b2c3d4e5f6", "name": "fixture", "count": 3}]
+    assert body["funnel"] == {
+        "connections": 0,
+        "listings": 0,
+        "calls": 2,
+        "listings_per_connection": 0.0,
+        "calls_per_listing": 0.0,
+        "avg_tools": 0,
+    }
+
+
+def test_summary_funnel_counts_discovery_events(
+    web: Path, test_dsn: str, kb_pg_schema: str
+) -> None:
+    """漏斗只数成功连接/列工具与 ok+error 调用；拒绝不算实际调用（§6.2）。"""
+    now = datetime.now(UTC) - timedelta(minutes=5)
+    _insert(
+        test_dsn,
+        kb_pg_schema,
+        _row("i1", now, event="initialize", tool=None, result_bytes=None, rpc_id="1"),
+        _row(
+            "i2",
+            now + timedelta(seconds=1),
+            event="initialize",
+            tool=None,
+            result_bytes=None,
+            rpc_id="1",
+        ),
+        _row(
+            "i3",
+            now + timedelta(seconds=2),
+            event="initialize",
+            tool=None,
+            result_bytes=None,
+            rpc_id="1",
+            status="error",
+            error_kind="internal",
+        ),
+        _row(
+            "l1",
+            now + timedelta(seconds=3),
+            event="list_tools",
+            tool=None,
+            result_bytes=None,
+            tool_count=4,
+        ),
+        _row(
+            "l2",
+            now + timedelta(seconds=4),
+            event="list_tools",
+            tool=None,
+            result_bytes=None,
+            tool_count=6,
+        ),
+        _row("c1", now + timedelta(seconds=5), tool="kb_search", status="ok"),
+        _row("c2", now + timedelta(seconds=6), tool="kb_search", status="ok"),
+        _row("c3", now + timedelta(seconds=7), tool="kb_read", status="error", error_code=3001),
+        _row(
+            "c4",
+            now + timedelta(seconds=8),
+            tool=None,
+            status="rejected",
+            http_status=401,
+            error_kind="unauthorized",
+            event="call",
+        ),
+    )
+    with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
+        body = client.get("/api/v1/kb/mcp-traces/summary", params={"days": 1}).json()
+    assert body["total"] == body["ok"] + body["error"] + body["rejected"] == 4
+    assert body["funnel"] == {
+        "connections": 2,
+        "listings": 2,
+        "calls": 3,
+        "listings_per_connection": 1.0,
+        "calls_per_listing": 1.5,
+        "avg_tools": 5,
+    }
 
 
 def test_non_pg_store_returns_503(

@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-11-26（MCP 发现层事件并入轨迹与连接漏斗，ADR-0018）
+
+- `feat(trace)`：HTTP 入口经 MCP SDK `Server.middleware` 记录 `initialize` 与 `tools/list`，与既有 `tools/call`、鉴权/路由拒绝同表；新增 `event`（`call` / `list_tools` / `initialize`）与 `tool_count`（成功列工具数），仍只记元数据，`notifications/*` 与 `ping` 不记录。决策见 [ADR-0018](decisions/ADR-0018-mcp-discovery-trace.md)，规格见 [mcp-trace-spec](plans/mcp-trace-spec.md)。
+- `feat(db)`：Alembic `0004_mcp_trace_funnel` 为 `kb_mcp_trace` 增加 `event`（存量行回填 `call`）与 `tool_count`，并建 `(event, called_at)` 索引；`downgrade` 删除索引与两列。
+- `feat(kb)`：列表接口新增 `event` 过滤（默认 `call`，保持既有语义）；汇总新增 `funnel`（`connections` / `listings` / `calls`、两段转化率、`avg_tools`），既有 `total` / `ok` / `error` / `rejected` / `tools` / `credentials` 只统计 `call`。非 PG 存储仍返回 503/`2001`。
+- `feat(web)`：`/traces` 增加连接漏斗区块；分母为 0 时显示 `—`；工具、状态、凭据、时间筛选与分页不变。
+- 契约与文档：`kb-admin-api.md` §4.9、`mcp-tools.md` §5、`decisions/README.md` 与 `mcp-trace-spec.md` 同步；ADR-0015 正文不改。
+- RED：先改 `tests/contract/test_mcp_trace.py`，观察到 3 个目标用例因行为缺失失败：`test_ok_call_records_metadata`（无 `event` 列，KeyError）、`test_list_endpoint_filters_and_orders`、`test_summary_funnel_counts_discovery_events`（发现层行混入 `total`，断言 `((6+2)+1) == 4` 失败）。
+- GREEN：`pytest tests/contract/test_mcp_trace.py -k "ok_call_records_metadata or summary_funnel or list_endpoint or summary_endpoint or rejections or error_call"` → 6 passed；随后轨迹 / 迁移 / 模型三个契约文件 → 33 passed。
+- 验证（2026-11-26，worktree `.claude/worktree/trace-funnel`）：全量 `pytest` 608 passed / 1 skipped（skip 为未启动 MCP 服务器的无关用例，非本次范围）；`node --test web/tests/mcp-traces.test.mjs` 7 passed；`pnpm build` 通过；`ruff check`、`ruff format --check src tests alembic`（107 files）、`mypy src`（49 files）通过；`check_adr_governance.py`、`check_document_format.py`、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- ADR 检查：本变更实现 ADR-0018；ADR-0015 保持 `accepted`，不修改正文。
+
 ## 2026-11-26（会话 fork 重复采集：消息 uuid 去重 ADR 草案）
 
 - `docs(adr)`：新增 [ADR-0017](decisions/ADR-0017-session-message-uuid-dedupe.md)「会话去重单位改为消息 uuid，fork 不再重复抽取」，状态 `proposed`。裁决要点：去重单位从「文件切片 sha256」改为消息 `uuid`；作用点在 worker 渲染/抽取之前，ingest 协议层与 raw 队列保持原样；索引键为 `(project, source_id, uuid)`、存运行态库；只在抽取与 merge 成功后记账；整片命中跳过 LLM；客户端契约与 `duplicates` 语义不变；重扫只补未见消息。备选（ingest 落盘前过滤、客户端识别 fork、切片哈希归一化、merge 层正文去重、source 级键、按会话级 fork 标记跳文件）均已记录否决理由。

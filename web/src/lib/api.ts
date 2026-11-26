@@ -170,12 +170,15 @@ export type Issue = {
 
 export type TraceStatus = 'ok' | 'error' | 'rejected'
 
+export type TraceEvent = 'call' | 'list_tools' | 'initialize'
+
 export type McpTrace = {
   trace_id: string
   request_id: string
   rpc_id: string | null
   called_at: string
   credential: { id: string | null; name: string | null }
+  event: TraceEvent
   tool: string | null
   status: TraceStatus
   http_status: number
@@ -183,6 +186,7 @@ export type McpTrace = {
   error_kind: string | null
   duration_ms: number
   result_bytes: number | null
+  tool_count: number | null
   projects: string[] | null
   client: string | null
 }
@@ -190,6 +194,7 @@ export type McpTrace = {
 export type McpTraceParams = {
   limit?: number
   offset?: number
+  event?: TraceEvent
   tool?: string
   status?: TraceStatus
   credential?: string
@@ -213,6 +218,14 @@ export type McpTraceSummary = {
     avg_ms: number
   }[]
   credentials: { id: string; name: string | null; count: number }[]
+  funnel: {
+    connections: number
+    listings: number
+    calls: number
+    listings_per_connection: number
+    calls_per_listing: number
+    avg_tools: number
+  }
 }
 
 export type WriteResult = {
