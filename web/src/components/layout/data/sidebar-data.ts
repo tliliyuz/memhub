@@ -1,4 +1,5 @@
 import {
+  Activity,
   Database,
   Layers,
   LayoutDashboard,
@@ -35,6 +36,7 @@ export const sidebarData: SidebarData = {
       title: '治理',
       items: [
         { title: '审计', url: '/audit', icon: ShieldCheck },
+        { title: '调用轨迹', url: '/traces', icon: Activity },
         { title: '回收站', url: '/trash', icon: Trash2 },
       ],
     },

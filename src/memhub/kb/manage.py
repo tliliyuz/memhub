@@ -6,7 +6,7 @@
 （ADR-0013，规格 §7）。
 
 删除不是硬删：存储层置 `archived_at`（文件版移入 `_trash/<时间戳>/`），并清掉
-与之相连的边。投影（kg.json）不由本模块维护，调用方写完自行 rebuild。
+与之相连的边。图谱与检索都直读真源，本模块不再维护任何文件投影。
 """
 
 from __future__ import annotations
@@ -116,6 +116,8 @@ class Storage(query.KnowledgeReader, Protocol):
     async def exists(self, node_id: str) -> bool: ...
 
     async def revision(self, node_id: str) -> str | None: ...
+
+    async def creating_actor(self, node_id: str) -> str | None: ...
 
     async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]: ...
 
@@ -260,7 +262,7 @@ class NodeDraft:
     title: str
     body: str = ""
     project: str = "memhub"
-    tier: Tier = Tier.CANDIDATE
+    tier: Tier = Tier.CANONICAL
     tags: list[str] = field(default_factory=list)
     entity_kind: EntityKind | None = None
     confidence: float | None = None
@@ -322,6 +324,8 @@ async def _enter_write(
 
 
 async def create_node(store: Storage, draft: NodeDraft) -> dict[str, Any]:
+    if draft.tier is Tier.CANDIDATE:
+        raise InvalidError("新建节点只能是 canonical（ADR-0014 取消候选写入）")
     slug = draft.slug or slugify(draft.title) or f"n-{os.urandom(4).hex()}"
     _validate_path_parts(draft.project, draft.kind.value, slug)
     node_id = f"{draft.project}/{draft.kind.value}/{slug}"
@@ -424,6 +428,8 @@ async def update_node(
     expected_revision: str,
     patch: NodePatch,
 ) -> dict[str, Any]:
+    if patch.tier is Tier.CANDIDATE:
+        raise InvalidError("tier 不允许写回 candidate（ADR-0014）")
     project = node_id.split("/", 1)[0]
     async with _enter_write(store, project):
         try:

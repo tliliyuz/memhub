@@ -19,7 +19,7 @@
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev,engine]"   # engine = semantica + explorer；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
+python -m pip install -e ".[dev,engine]"   # engine = 上传依赖 python-multipart（含投影下线后暂留的 semantica，依赖清理另案）；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
 cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
 ```
 
@@ -31,7 +31,7 @@ src/memhub/
   queue/      raw_store 落盘与配额（ingest 采集、kb 上传共用）
   ingest/     鉴权、游标、幂等、入队
   worker/     value_filter / extract / merge
-  kb/         PG 存储（kb_*）、检索、投影重建
+  kb/         PG 存储（kb_*）、检索、管理台 API
   mcp/        MCP 工具
   cli/        运维命令
 alembic/      kb_* 的 DDL 版本化（带外执行，门禁同样覆盖）
@@ -58,7 +58,7 @@ prompts/      各 source_type 的抽取 profile
 
 新增顶层目录或改分层：先改 [architecture](../architecture.md)，再改本表。
 
-治理门禁与评测仓同源（`scripts/` 下脚本 + pre-commit）：`check_document_format.py --staged`（结构、H2 编号、链接、入口镜像）、`check_document_ownership.py --staged`（权威文档归属、实施历史与密钥形态）、`check_adr_governance.py`（ADR 索引与状态词）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁工具署名行）、`check_no_raw_sql.py`、`check_async_io.py`、`check_env_example_keys.py`。`knowledge/` 与 `prompts/` 不是治理文档，文档类检查自动排除。
+治理门禁与评测仓同源（`scripts/` 下脚本 + pre-commit）：`check_document_format.py --staged`（结构、H2 编号、链接、入口镜像）、`check_document_ownership.py --staged`（权威文档归属、实施历史与密钥形态）、`check_adr_governance.py`（ADR 索引、状态词与编号唯一性）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁工具署名行）、`check_no_raw_sql.py`、`check_async_io.py`、`check_env_example_keys.py`。`knowledge/` 与 `prompts/` 不是治理文档，文档类检查自动排除。
 
 ## 3. 常用命令
 
@@ -66,7 +66,7 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|
 | 测试 | `pytest` |
 | 契约测试 | `pytest tests/contract` |
-| PG 契约测试 | 先让 `MEMHUB_TEST_DB_URL` 指向 `memhub_dev`，再 `pytest tests/contract`。未设置时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
+| PG 契约测试 | 在仓库根 `.env` 写入 `MEMHUB_TEST_DB_URL`（或只在当前 shell 导出），再 `pytest tests/contract`。测试入口在变量未设置时自动读取该键，显式环境变量优先，worktree 无需复制 `.env`；都拿不到时 PG 用例 skip，**skip 不计为通过**（ADR-0013 §10） |
 | 检查 | `ruff check .` |
 | 格式 | `ruff format --check .` |
 | 类型 | `python -m mypy src` |
@@ -75,7 +75,7 @@ prompts/      各 source_type 的抽取 profile
 | 启动依赖 | `docker compose -f deploy/compose.yml up -d` |
 | 本机运行 | `memhub --version` |
 
-`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。单独导出这一个键即可，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
+`MEMHUB_TEST_DB_URL` 的值只经 `.env` 或当前 shell 注入，不写进仓库、文档或提交信息。测试入口只从 `.env` 读这一个键，写进 `.env` 后直接 `pytest` 即可；若用 shell 导出，也只导出这一个键，不要整份 source 环境文件——那会顺带覆盖 `MEMHUB_DB_URL`、`PG*` 等运行态变量，测试结果不再可信。
 
 本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
@@ -98,7 +98,7 @@ prompts/      各 source_type 的抽取 profile
 
 - 一次提交只做一件事：一个行为、一次重构、一份文档。
 - 格式：`<type>(<scope>): <中文摘要>`，`type ∈ feat|fix|docs|refactor|test|chore|perf`，摘要 ≤50 字。
-- 不提交 `.env`、`data/`、`raw_store/`、投影产物、真实会话内容。
+- 不提交 `.env`、`data/`、`raw_store/`、真实会话内容。
 - 提交信息只描述实际改动，**不加 `Co-Authored-By` 等工具署名行**；`scripts/check_commit_message.py` 在 `commit-msg` 阶段强制（与评测仓同源）。署名属于提交信息正文，不属于源码、文档或发布物。
 
 ## 6. 分支、Git 授权与 worktree 闭环
@@ -114,6 +114,7 @@ worktree 闭环（硬约束）：
 - `main` 是稳定分支，只有负责人明确允许后才能合入；发版只从 `main` 出，不从特性分支或 worktree 出。`dev` 是日常开发的集成分支，`dev` 合入 `main` 由负责人决定。
 - **所有**代码修改（含功能、Bug 修复、文档与治理变更）都在从 `dev` 创建的独立分支 + 独立 worktree 中完成，禁止直接在 `main` 或 `dev` 上实现。例外：负责人对当次操作显式授权的直提（如小型仓库的急救修复）。
 - worktree 必须由 `git worktree add .claude/worktree/<主题> -b <分支> dev` 创建；复制目录、只切分支不建 worktree 均不满足闭环。
+- worktree 目录只允许单数 `.claude/worktree/<主题>`；**禁止**用 `EnterWorktree` 工具创建 worktree（含其默认路径）：该工具的托管根硬编码为复数 `.claude/worktrees/`，传入任何自选路径都会被判为 permission-root relocation 而弹出手动确认，`permissions.allow` 与 CLAUDE.md 都无法消除。复数目录故意不加入 `.gitignore`：一旦出现 `.claude/worktrees/`，说明有工具路径绕过本闭环，应删除并改用 `git worktree add`。
 - 完成后：验证 → 提交 → 合并回 `dev` → `git worktree remove` + `git branch -d` 清理，不长期停留在特性分支 → 在 [CHANGELOG](../CHANGELOG.md) 记录实际变化；涉及迁移的，同时记录迁移态六要素。
 
 ## 7. 依赖引入
@@ -142,17 +143,13 @@ MEMHUB_KB_MIGRATE_DB_URL=<迁移角色 DSN> alembic -c alembic.ini upgrade head
 # 1) 抽取：会话 jsonl → kb_nodes / kb_edges（库必须已登记且未归档）
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main ingest \
   --path .scratch/sessions --profile sessions --project memhub --limit 3 --create-project
-# 2) 投影：库里 → kg.json（只供旧 explorer 与 /api/v1/kb/projection 状态，管理台图谱页直读 PG）
-PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main project --out kb/kg.json
-# 3) 管理台：http://127.0.0.1:8701/
+# 2) 管理台：http://127.0.0.1:8701/
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb \
-  --graph-out kb/kg.json --web-dist web/dist --data-dir data
+  --web-dist web/dist --data-dir data
 ```
 
 - `ingest` 只写提取出的节点，来源是本地文件；真源本身仍是库。`--create-project` 等价于先在管理台建库。
-- `kb/kg.json` 是投影，随时可从库重建，不入库；MCP 与管理台都直读 `kb_*` 表，不读它。
-- `serve`（旧 semantica explorer）仍可用来看投影，但它是 ADR-0013 后果里标注的待删项，不作为验收入口；
-  管理台的 `/graph` 直接读 `GET /api/v1/kb/graph`，不受影响。
+- 图谱与检索都直读 `kb_*` 表，不再生成或依赖任何文件投影。
 - 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
 
 ### 9.1 一次性迁移（markdown → PostgreSQL）与归档恢复

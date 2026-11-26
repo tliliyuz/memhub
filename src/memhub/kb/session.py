@@ -68,8 +68,12 @@ def _environ() -> Mapping[str, str]:
     return os.environ
 
 
-def _async_dsn(dsn: str) -> str:
-    """`postgresql://` 换成 SQLAlchemy 异步方言；已带方言或未知格式原样返回。"""
+def psycopg_dsn(dsn: str) -> str:
+    """`postgresql://` 换成 psycopg 3 方言；已带方言或未知格式原样返回。
+
+    运行态（异步引擎）与迁移（Alembic 同步引擎）都用这一条：镜像里只有 psycopg 3，
+    不归一化时 SQLAlchemy 会去找 psycopg2，在连库之前就以 ModuleNotFoundError 失败。
+    """
     if "+" in dsn.split("://", 1)[0]:
         return dsn
     for prefix in ("postgresql://", "postgres://"):
@@ -104,7 +108,7 @@ def create_engine_from_env(
     `schema` 默认 `KB_SCHEMA`（生产专用 schema）；显式传 `None` 不设 search_path，
     传测试 schema 则用于隔离场景。
     """
-    return create_async_engine(_async_dsn(dsn or kb_dsn(environ)), **runtime_engine_kwargs(schema))
+    return create_async_engine(psycopg_dsn(dsn or kb_dsn(environ)), **runtime_engine_kwargs(schema))
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

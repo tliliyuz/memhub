@@ -42,8 +42,17 @@ from memhub.kb.errors import (
     TargetUnavailable,
     WriteDeferred,
 )
-from memhub.kb.models import KbArchive, KbEdge, KbNode, KbNodeRevision, KbProject, KbWriteAudit
+from memhub.kb.models import (
+    KbArchive,
+    KbEdge,
+    KbMcpTrace,
+    KbNode,
+    KbNodeRevision,
+    KbProject,
+    KbWriteAudit,
+)
 from memhub.kb.store import TrashEntry
+from memhub.mcp.trace import TraceEntry
 
 REVISION_RE = re.compile(r"^[0-9a-f]{16}$")
 _PROJECT_SEP = "/"
@@ -314,6 +323,20 @@ class PgKnowledgeStore:
         """当前 revision；节点不存在或已软删返回 None（调用方据此报 404）。"""
         async with self._session() as session:
             stmt = select(KbNode.revision).where(KbNode.id == node_id, KbNode.archived_at.is_(None))
+            return cast("str | None", await session.scalar(stmt))
+
+    async def creating_actor(self, node_id: str) -> str | None:
+        """创建者标记：`kb_node_revisions` 最早一条修订的 actor（ADR-0014）。
+
+        没有修订历史（历史直写行）返回 None，视为不可归属。
+        """
+        async with self._session() as session:
+            stmt = (
+                select(KbNodeRevision.actor)
+                .where(KbNodeRevision.node_id == node_id)
+                .order_by(KbNodeRevision.created_at.asc(), KbNodeRevision.id.asc())
+                .limit(1)
+            )
             return cast("str | None", await session.scalar(stmt))
 
     async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]:
@@ -1069,18 +1092,6 @@ class PgKnowledgeStore:
             edges = await session.scalar(select(func.count()).select_from(KbEdge))
         return {"nodes": int(nodes or 0), "edges": int(edges or 0)}
 
-    async def latest_write(self) -> datetime | None:
-        """真源最近一次写入时间；投影过期判断的文件 mtime 替代品。
-
-        取修订流与边表的最大时间：每次写节点（含软删、归档、恢复）都会追加修订，
-        普通写入也会更新节点，两者都落在这两条时间线上。
-        """
-        async with self._session() as session:
-            revision_at = await session.scalar(select(func.max(KbNodeRevision.created_at)))
-            edge_at = await session.scalar(select(func.max(KbEdge.created_at)))
-        moments = [moment for moment in (revision_at, edge_at) if moment is not None]
-        return max(moments) if moments else None
-
     # -- 写入审计（规格 §3.6） --------------------------------------------
 
     async def record_write_audit(
@@ -1107,6 +1118,39 @@ class PgKnowledgeStore:
                     created_at=_now(),
                 )
             )
+
+    # -- MCP 调用轨迹（ADR-0015） ------------------------------------------
+
+    async def record_mcp_trace(self, entry: TraceEntry) -> None:
+        """一行调用轨迹；`trace_id` 冲突视为重放，直接忽略保证幂等。"""
+        statement = pg_insert(KbMcpTrace).values(
+            trace_id=entry.trace_id,
+            request_id=entry.request_id,
+            rpc_id=entry.rpc_id,
+            called_at=entry.called_at,
+            credential_id=entry.credential_id,
+            credential_name=entry.credential_name,
+            tool=entry.tool,
+            status=entry.status,
+            http_status=entry.http_status,
+            error_code=entry.error_code,
+            error_kind=entry.error_kind,
+            duration_ms=entry.duration_ms,
+            result_bytes=entry.result_bytes,
+            args_digest=entry.args_digest,
+            projects=entry.projects,
+            client=entry.client,
+        )
+        statement = statement.on_conflict_do_nothing(index_elements=["trace_id"])
+        async with self._session() as session:
+            await session.execute(statement)
+
+    async def cleanup_mcp_traces(self, cutoff: datetime) -> int:
+        """删除 `cutoff` 之前的轨迹明细，返回删除行数。"""
+        async with self._session() as session:
+            result = await session.execute(delete(KbMcpTrace).where(KbMcpTrace.called_at < cutoff))
+            rowcount = getattr(result, "rowcount", 0)
+            return int(rowcount or 0)
 
 
 __all__ = [

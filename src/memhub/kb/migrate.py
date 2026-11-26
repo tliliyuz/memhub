@@ -142,6 +142,18 @@ def _project_revision(kb_id: str, created_at: datetime, updated_at: datetime) ->
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _utc(value: datetime | None) -> datetime | None:
+    """naive 时间按 UTC 补齐，带时区的换算到 UTC。
+
+    目标列是 `timestamptz`：PG 遇到 naive 值会按**会话时区**解释（生产迁移
+    容器是 +08），裸日期就会落成前一天 16:00Z，`--verify-only` 重算哈希与
+    磁盘不一致。磁盘侧先在解析时就钉成 UTC，写入与校验才同口径。
+    """
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def _parse_time(value: object, default: datetime) -> datetime:
     """登记/边文件里的时间字符串（可能带 Z 或偏移）；解析不了就用默认值，不静默丢行。"""
     if isinstance(value, str):
@@ -189,16 +201,16 @@ def _frontmatter_row(
         "tags": list(node.tags),
         "body": body,
         "source": [item.model_dump(mode="json") for item in node.source],
-        "valid_from": node.valid_from,
-        "valid_until": node.valid_until,
+        "valid_from": _utc(node.valid_from),
+        "valid_until": _utc(node.valid_until),
         "supersedes": list(node.supersedes),
         "superseded_by": node.superseded_by,
         "deprecated_reason": node.deprecated_reason,
-        "occurred_at": node.occurred_at,
-        "decided_at": node.decided_at,
+        "occurred_at": _utc(node.occurred_at),
+        "decided_at": _utc(node.decided_at),
         "status": node.status.value if node.status else None,
-        "created_at": node.created_at,
-        "updated_at": node.updated_at,
+        "created_at": _utc(node.created_at),
+        "updated_at": _utc(node.updated_at),
         "archived_at": None,
         "revision": "",
     }
@@ -421,7 +433,7 @@ async def _scan_archives(root: Path, diff: MigrationDiff) -> list[dict[str, Any]
             )
             continue
         try:
-            deleted_at = datetime.fromisoformat(str(header["deleted_at"]))
+            deleted_at = _utc(datetime.fromisoformat(str(header["deleted_at"])))
         except ValueError:
             deleted_at = None
         rows.append(

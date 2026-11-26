@@ -23,7 +23,7 @@ async def _write(
     kind: Kind = Kind.FACT,
     body: str = "",
     tags: list[str] | None = None,
-    tier: Tier = Tier.CANDIDATE,
+    tier: Tier = Tier.CANONICAL,
     confidence: float | None = None,
     updated_at: datetime | None = None,
 ) -> None:
@@ -35,6 +35,7 @@ async def _write(
         confidence=confidence,
         project=node_id.split("/")[0],
         tags=tags or [],
+        deprecated_reason="旧结论已废弃" if tier is Tier.DEPRECATED else None,
         created_at=NOW,
         updated_at=updated_at or NOW,
     )
@@ -81,18 +82,34 @@ async def store(tmp_path: Path) -> KnowledgeStore:
     return kb
 
 
-async def test_default_tier_is_canonical_and_hints_at_candidates(store: KnowledgeStore) -> None:
+async def test_default_tier_excludes_deprecated(store: KnowledgeStore) -> None:
+    await _write(
+        store,
+        "memhub/fact/old",
+        title="已废弃的代理结论",
+        body="代理的旧结论，已废弃。",
+        tier=Tier.DEPRECATED,
+    )
     response = await search(store, "代理")
-    assert response["results"] == []
-    assert "候选" in response["hint"]
+    ids = [item["id"] for item in response["results"]]
+    assert "memhub/fact/proxy-502" in ids
+    assert "memhub/fact/old" not in ids
+    assert all(item["tier"] != "deprecated" for item in response["results"])
 
 
-async def test_tier_all_sees_candidates(store: KnowledgeStore) -> None:
+async def test_tier_all_includes_deprecated(store: KnowledgeStore) -> None:
+    await _write(
+        store,
+        "memhub/fact/old",
+        title="已废弃的代理结论",
+        body="代理的旧结论，已废弃。",
+        tier=Tier.DEPRECATED,
+    )
     response = await search(store, "代理", tier="all")
     ids = [item["id"] for item in response["results"]]
     assert "memhub/fact/proxy-502" in ids
+    assert "memhub/fact/old" in ids
     assert response["results"][0]["matched"] == "bm25"
-    assert response["results"][0]["tier"] == "candidate"
     assert all(0.0 <= item["score"] <= 1.0 for item in response["results"])
 
 
@@ -121,6 +138,8 @@ async def test_project_and_kind_filters(store: KnowledgeStore) -> None:
 async def test_invalid_filters_are_rejected(store: KnowledgeStore) -> None:
     with pytest.raises(QueryError):
         await search(store, "proxy", tier="everything")
+    with pytest.raises(QueryError):
+        await search(store, "proxy", tier="candidate")
     with pytest.raises(QueryError):
         await search(store, "proxy", kinds=["unknown"])
     with pytest.raises(QueryError):

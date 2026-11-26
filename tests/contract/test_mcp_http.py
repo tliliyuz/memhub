@@ -34,8 +34,6 @@ def web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, test_dsn: str, kb_pg_sc
     (tmp_path / "index.html").write_text("fixture SPA", encoding="utf-8")
     monkeypatch.setenv("MEMHUB_KB_WEB_DIST", str(tmp_path))
     monkeypatch.setenv(KB_DSN_KEY, test_dsn)
-    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kg.json"))
-    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
     monkeypatch.delenv("MEMHUB_MCP_GRANTS", raising=False)
 
 
@@ -273,7 +271,7 @@ async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
                 assert not result.is_error
                 payload = json.loads(result.content[0].text)
                 assert payload["id"] == "sample/fact/http-write"
-                assert payload["tier"] == "candidate"
+                assert payload["tier"] == "canonical"
 
                 read = await client.call_tool("kb_read", {"id": payload["id"]})
                 assert not read.is_error

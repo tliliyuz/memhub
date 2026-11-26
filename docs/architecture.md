@@ -20,12 +20,12 @@
  │   /api/v1/ingest/*  → ingest-api (FastAPI)                              │
  │   /api/v1/kb/*      → kb-api                                            │
  │   /mcp              → kb-api (MCP, streamable HTTP)                     │
- │   /                → explorer (只读可视化)                               │
+ │   /                → kb-api（管理台 SPA，GitHub 登录后）                  │
  ├─────────────────────────────────────────────────────────────────────────┤
  │  ingest-api / kb-api(上传) → queue.rawstore (原始增量, 按 device/source)  │
  │           → runtime state (PostgreSQL: 设备/游标/批次幂等, memhub_prod)   │
  │  worker:  value_filter(cheap) → extract(expensive) → merge              │
- │  merge → PostgreSQL 知识真源 kb_* (schema kb) → 重建 kg.json 投影        │
+ │  merge → PostgreSQL 知识真源 kb_* (schema kb)                             │
  │  检索：应用层 BM25（向量混合按 ADR-0007 另案）                             │
  └─────────────────────────────────────────────────────────────────────────┘
            ▲
@@ -44,7 +44,7 @@
 | Team Brain MCP 本地进程 + 共享 key | 远端 `/mcp`，每条凭据限定库范围与读写作用域；吊销靠改配置重启 |
 | 会话靠 Proxy 旁路抓取 | collector 直接读本地 session 文件，游标增量 |
 | 状态散在 Proxy/本地 relay | 状态只在云端（raw_store + 游标 + 知识库表） |
-| 数据格式即实现 | PostgreSQL `kb_*` 真源 + 可重建 `kg.json` 投影（markdown 仅一次性迁移源） |
+| 数据格式即实现 | PostgreSQL `kb_*` 真源（markdown 仅一次性迁移源）；图谱与检索直接查询，不落文件投影 |
 
 ## 3. 组件职责
 
@@ -68,19 +68,16 @@
 - 会话只从有出处的对话提炼候选，允许零结果；文档和 wiki 继续走文档提炼管线。合并直接写 PG `kb_*` 表（一次写入 = 一个事务），不再落 markdown。
 
 ### kb-api
-- 检索：SQL 侧按授权范围与 `kind`/`tier` 过滤候选集，应用层 BM25 排序；向量混合检索按 ADR-0007 另案推进。默认 `tier=canonical`。
+- 管理台：`memhub kb` 在同一进程托管打包前端，`/` 由 nginx 反代；页面直接调 `/api/v1/kb/*`，没有 explorer 子进程，也没有文件投影。
+- 检索：按授权范围与 `kind` 过滤后，应用层 BM25 排序；默认排除 `deprecated`（`tier=canonical`），`tier=all` 才包含废弃节点。向量混合检索按 ADR-0007 另案推进。
 - 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
 - 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
 - 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 
 ### mcp-server（首版随 kb-api 进程）
 - 由 kb-api 在精确 `/mcp` 提供无状态 Streamable HTTP，协议解析交给官方 MCP Python SDK；配置了 MCP 凭据才启用，未配置时直接返回 404，不落到管理台。
-- 授权库范围与读写作用域按请求注入。写工具只创建候选，复用 PG 写作用域（事务级 advisory lock）和 `kb_projects` 活动库校验；不修改权威节点。
+- 授权库范围与读写作用域按请求注入。写工具直接创建 `canonical` 节点（ADR-0014），复用 PG 写作用域（事务级 advisory lock）和 `kb_projects` 活动库校验；更新与废弃仅限节点创建者本人。
 - 独立进程与多副本形态尚未实现；拆分需先改本节与 §5 的部署形态。
-
-### explorer
-- semantica 自带 FastAPI + React SPA，只读挂在 `/`。
-- 不做编辑入口（编辑走治理 agent / CLI）。
 
 ## 4. 故障隔离（设计约束，不是建议）
 
@@ -95,7 +92,7 @@
 
 - Docker Compose：`ingest-api` / `worker` / `kb-api` / `nginx`（nginx 也可用宿主机的）；`/mcp` 由
   kb-api 进程提供，不单列服务。
-- systemd timer：`rebuild.timer`（投影重建）、`disk-guard.timer`；知识库备份由部署侧定时 `pg_dump` 承担。
+- systemd timer：`disk-guard.timer`；知识库备份由部署侧定时 `pg_dump` 承担。
 - 知识真源在 PostgreSQL（`memhub_prod` 的 `kb` schema），随实例备份；`knowledge/` 只作为一次性迁移源，迁移校验通过后从服务器删除。
 - 配置与密钥：`.env`（600）+ systemd `EnvironmentFile`；不写进镜像。
 
@@ -108,7 +105,7 @@ memhub/
     queue/         # raw_store 落盘与配额（ingest / kb 上传共用）
     ingest/        # 鉴权、游标、幂等、入队
     worker/        # value_filter / extract / merge
-    kb/            # 真源读写（PG kb_*）、检索、投影重建
+    kb/            # 真源读写（PG kb_*）、检索、管理台 API
     mcp/           # MCP 工具
     cli/           # 运维命令
   docs/            # 架构、契约、运维

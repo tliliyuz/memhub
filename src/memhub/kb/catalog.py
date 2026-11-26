@@ -5,8 +5,8 @@
 
 - 维护知识库元数据（`<root>/.kbs.json`：显示名、描述）；目录存在但没登记的
   知识库按目录名兜底展示，保证手工放进来的库也能看到。
-- 按知识库导出子图（节点 + 解析后的边 + 度数），给管理台画图用；投影
-  `kg.json` 仍是全局的，这里不读写它。
+- 按知识库导出子图（节点 + 解析后的边 + 度数），给管理台画图用；图谱直接
+  读真源，不生成文件投影。
 
 读写都走 `manage.write_lock`，与节点写操作互斥。
 """
@@ -535,7 +535,7 @@ def _archive_metadata(
 
 
 async def graph(store: KnowledgeStore | PgKnowledgeStore, project: str) -> dict[str, Any]:
-    """知识库子图：节点 + 已解析边 + 度数。用于管理台自绘，不碰 kg.json。"""
+    """知识库子图：节点 + 已解析边 + 度数。用于管理台自绘，直接读真源。"""
     if isinstance(store, PgKnowledgeStore):
         if not await store.project_exists(project):
             raise NotFoundError(f"知识库不存在: {project}")

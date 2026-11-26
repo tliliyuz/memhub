@@ -740,7 +740,7 @@ async def test_prune_processed_raw_drops_files_past_retention(tmp_path: Path) ->
 # -- 运行入口接线（规格 §9.2.4）：worker 写 PG 真源，不写 markdown ----------
 
 
-async def test_round_writes_candidates_into_pg(tmp_path: Path, pg_store: PgKnowledgeStore) -> None:
+async def test_round_writes_canonical_into_pg(tmp_path: Path, pg_store: PgKnowledgeStore) -> None:
     await pg_store.register_project("cc-sessions", name="会话提炼")
     await _push(tmp_path, _session_line(EVIDENCE), path="sessions/a.jsonl")
     config = _pg_config(tmp_path, pg_store)
@@ -749,7 +749,7 @@ async def test_round_writes_candidates_into_pg(tmp_path: Path, pg_store: PgKnowl
 
     assert (report.processed, report.failed, report.created) == (1, 0, 1)
     node, body = await pg_store.read("cc-sessions/fact/retry-backoff")
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
     assert "指数退避" in body
     assert not (tmp_path / "knowledge").exists(), "不得再落 markdown 真源"
 

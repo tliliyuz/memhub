@@ -22,7 +22,7 @@ class SearchInput(ToolInput):
     query: str = Field(max_length=512)
     project: str | None = Field(default=None, pattern=KB_ID_PATTERN)
     kinds: list[Kind] | None = Field(default=None, max_length=len(Kind))
-    tier: Literal["canonical", "candidate", "all"] = "canonical"
+    tier: Literal["canonical", "all"] = "canonical"
     limit: ResultLimit = 8
 
 

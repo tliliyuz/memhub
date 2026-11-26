@@ -22,10 +22,7 @@ def client(
     (web / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
 
     monkeypatch.setenv(KB_DSN_KEY, test_dsn)
-    monkeypatch.setenv("MEMHUB_KB_GRAPH", str(tmp_path / "kb" / "kg.json"))
     monkeypatch.setenv("MEMHUB_KB_WEB_DIST", str(web))
-    monkeypatch.setenv("MEMHUB_KB_AUTO_REBUILD", "0")
-    monkeypatch.delenv("MEMHUB_KB_GRAPH_PORT", raising=False)
 
     with TestClient(create_app(schema=kb_pg_schema)) as test_client:
         yield test_client
@@ -96,10 +93,7 @@ def test_archive_project_and_page_trash(client: TestClient) -> None:
     archive_id = deleted.json()["archive_id"]
     assert [item["archive_id"] for item in archives.json()["items"]] == [archive_id]
     assert client.get("/api/v1/kb/trash").json()["total"] == 0
-    rebuilt = client.post("/api/v1/kb/rebuild")
-    assert rebuilt.status_code == 200, rebuilt.text
-    assert rebuilt.json()["nodes"] == 1
-    assert rebuilt.json()["stale"] is False
+    assert client.get("/api/v1/kb/healthz").json()["nodes"] == 1
     restored = client.post("/api/v1/kb/trash/projects/restore", json={"archive_id": archive_id})
     assert restored.status_code == 200, restored.text
     assert restored.json()["restored_count"] == 2
@@ -220,21 +214,27 @@ def test_spa_fallback_and_api_404(client: TestClient) -> None:
     assert unknown.json()["code"] == 1011
 
 
-def test_projection_status_reports_stale(client: TestClient) -> None:
-    _create(client)
-    status = client.get("/api/v1/kb/projection").json()
-    assert status["stale"] is True
-    assert status["graph"].endswith("kg.json")
+def test_healthz_has_no_projection_state(client: TestClient) -> None:
+    """投影子系统已下线：健康检查只报真源与规模。"""
+    payload = client.get("/api/v1/kb/healthz").json()
+    assert set(payload) == {"ok", "store", "nodes"}
+    assert payload["store"] == "pg"
 
 
-def test_projection_status_counts_existing_graph(client: TestClient, tmp_path: Path) -> None:
-    graph = tmp_path / "kb" / "kg.json"
-    graph.parent.mkdir(parents=True, exist_ok=True)
-    graph.write_text('{"nodes": [{}, {}], "edges": [{}]}', encoding="utf-8")
+def test_projection_routes_are_removed(client: TestClient) -> None:
+    """投影与重建接口不再存在。
 
-    status = client.get("/api/v1/kb/projection").json()
-    assert status["nodes"] == 2
-    assert status["edges"] == 1
+    GET 未知 `/api` 路径由 SPA 回退返回 404/1011；POST 没有 SPA 路由，FastAPI
+    按方法不匹配返回 405。两者都说明重建接口已不存在。
+    """
+    for method, path, status in (
+        ("get", "/api/v1/kb/projection", 404),
+        ("get", "/api/v1/kb/rebuild", 404),
+        ("post", "/api/v1/kb/rebuild", 405),
+    ):
+        response = getattr(client, method)(path)
+        assert response.status_code == status, (method, path, response.text)
+    assert client.get("/api/v1/kb/projection").json()["code"] == 1011
 
 
 def test_projects_and_scoped_graph(client: TestClient) -> None:

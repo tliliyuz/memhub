@@ -56,7 +56,7 @@ function NodeDetailPage() {
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   const [tags, setTags] = useState('')
-  const [tier, setTier] = useState<Tier>('candidate')
+  const [tier, setTier] = useState<Tier>('canonical')
   const [confidence, setConfidence] = useState('')
   const [revision, setRevision] = useState('')
 

@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.8
+> 版本: 0.9
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -39,14 +39,14 @@ Authorization: Bearer <device_token>
 
 作用域：
 
-- `device_token` 仅允许 `/ingest/*`。访问 `/api/v1/meta/*`、`/api/v1/knowledge/*` 必须返回 `403 {code:1009}`（scope 不足）。
+- `device_token` 仅用于采集器端点，不包括用户态的 `DELETE /ingest/source/{source_id}`。访问 `/api/v1/meta/*`、`/api/v1/knowledge/*` 必须返回 `403 {code:1009}`（scope 不足）。
 - 一个用户可注册多设备；每个 device_id 一枚 token。
 - 吊销：`POST /devices/revoke {device_id}`（桌面端/用户态）。吊销后采集器下次请求得 `401 {code:1001}`，必须**停推 + 心跳上报 + 本地告警**，不得静默重试。
 - 轮换：`POST /devices/refresh`，旧 token 宽限 10 分钟。
 - 重复注册（幂等）：同一 `device_id` 在**未吊销**状态下重复调用 `/devices/register`，返回同一枚仍有效的 token，不旋转——provision 失败后整段重试安全，客户端不依赖“重注册换新 token”。被吊销后重新注册视为重新启用：签发新 token，旧 token 失效，采集器在桌面重新 provision 后自动恢复，无需重启。自动轮换只由 `/devices/refresh` 触发，客户端不自动调用。
 - 采集器拿到 `401 {code:1001}`（吊销/无效 token）必须停推该链路并本地告警，不得静默重试；重新 provision 产生新 token 后再继续。
 
-**所有端点（含 GET）都要求 Bearer**；`device_id` 可以出现在 query，但服务端必须校验 `token.device_id == 请求中的 device_id`，不一致返回 `403`。
+**采集器端点（含 GET）要求设备 Bearer**；服务端校验设备 token 绑定的 `device_id` 与请求一致。用户态清理单独校验 provision token，query 中的 `device_id` 是清理目标，不是凭据身份。
 
 ### 限流与退避
 
@@ -192,7 +192,23 @@ Authorization: Bearer <device_token>
 
 ### `DELETE /ingest/source/{source_id}?device_id=<id>&purge=true`
 
-用户态调用。`purge=true` 时将该源原始增量标记删除（知识真源 `kb_*` 不受影响，溯源里该来源标记失效）。
+用户态清理调用，不是采集器路径。
+
+- 鉴权：`Authorization: Bearer <MEMHUB_PROVISION_TOKEN>`，与 `POST /devices/register` 同一把 provision token，由 `.env` 注入服务端。缺失或不匹配返回 `401 {code:1001}`；采集器持有的 `device_token` 一律得到 `401`，不能调用本接口。服务端未配置 `MEMHUB_PROVISION_TOKEN` 时（含 dev stub）本接口一律返回 `401`，不因开发模式放开删除。
+- `device_id` 为必填 query，表示清理谁的源；`purge` 必须为 `true`，缺失、`false` 或其它值返回 `400 {code:1003}`。`device_id` 须为 UUID v4；`source_id` 须匹配 `^[A-Za-z0-9_.-]{1,100}$` 且不是 `.` 或 `..`（队列目录名按此映射，其它字符会映射到同一目录，删除时不允许歧义）。不合规，以及清理管理台保留设备，均返回 `400 {code:1003}`。
+- 效果：在队列写锁内清理该 `(device_id, source_id)` 在 `raw_store/`、`processed_raw/`、`pending_review/` 下的批次目录，并使原始队列配额缓存失效。删除前核对所有批次的设备与源；目录或批次身份不明确（例如旧队列目录名重合、出现链接或记录不合法）则整次拒绝，返回 `400/1003`。
+- 不受影响：已有知识节点及其溯源引用保持原样；运行态的 `sources`、`file_cursors`、`seen_shas`、`batches` 行保留，游标不回退，原有去重与批次重放规则不变。清理不会停用采集器，也不撤回 worker 已读入的内容；需先停止该源以避免新数据入队。
+- 幂等：目录不存在时同样返回 `200`，各计数为 0。发生文件系统错误时返回 `500/2001`，可能已删除部分文件，允许重试。
+- 审计：成功调用（包括空清理）在 `kb_write_audit` 落一行，`actor=provision`、`project` 为空、`action=ingest_purge`、`result=ok`；不含批次正文与 token。
+
+成功响应：
+
+```json
+{"code": 0, "message": "ok", "data": {"device_id": "<id>", "source_id": "<id>",
+ "purged": {"raw_store": 3, "processed_raw": 12, "pending_review": 0}}}
+```
+
+`purged` 各项是删除的批次文件数。
 
 ## 3. 错误码
 
@@ -225,6 +241,7 @@ Authorization: Bearer <device_token>
 - 路径仍为 `/api/v1`；0.6 移除 `POST /ingest/projects` 与设备—知识库授权文件，`project` 只要求显式、已登记且活动，拒绝原因细化到 `data.reason`。旧客户端调用已删除的建库代理会得到 `404/405`，需要升级到管理台建库；旧版保存的 `auto` 或缺失目标仍在下一次计划运行时被 `400/1003` 拒绝，需升级并修正保存的目标。
 - 0.7：「已登记且活动」的判据从 `MEMHUB_KNOWLEDGE_DIR`（目录 + `.kbs.json`）改为 `kb_projects`（存在行且 `archived_at` 为空）；服务端未配置 `MEMHUB_KB_DB_URL` 时拒绝启动。响应信封、错误码与拒绝原因不变。
 - 0.8：每次采集决策（接受或拒绝，含重放）在服务端 `kb_write_audit` 表落一行：`actor=device:<device_id>`、`project`、`action=ingest`、`result=ok` 或拒绝原因码；不含会话正文与 token。对客户端透明，信封与错误码不变。
+- 0.9：补齐 `DELETE /ingest/source/{source_id}` 的鉴权（provision token）、参数、效果与审计；新增审计动作 `ingest_purge`。其它端点不变。
 - 客户端在 `heartbeat` 上报 `collector_version`；服务端可下发 `upgrade` 命令但不强制。
 
 ## 7. 与面板既有接口的边界

@@ -36,7 +36,7 @@ _DEFINITIONS: dict[str, tuple[type[ToolInput], str]] = {
     "kb_write_candidate": (
         WriteCandidateInput,
         (
-            "写入一条 tier=candidate 候选知识，只创建不更新。必须显式给出 project、"
+            "写入一条 canonical 知识，写入即生效，只创建不更新。必须显式给出 project、"
             "kind、slug、title、body 与至少一条 evidence（SourceRef 形状）。"
             "只写能在其他会话复用、并有原文支撑的结论；寒暄、进度汇报、临时状态、"
             "原始日志和未验证猜测不要写。成功返回 id、tier、revision 与 commit；"
@@ -46,18 +46,18 @@ _DEFINITIONS: dict[str, tuple[type[ToolInput], str]] = {
     "kb_update_candidate": (
         UpdateCandidateInput,
         (
-            "按 id 与 expected_revision 更新自己写的候选，只改 title、body、tags、"
+            "按 id 与 expected_revision 更新自己创建的节点，只改 title、body、tags、"
             "confidence，至少给一项；revision 取自 kb_read 的返回值，过期会被拒绝。"
-            "只能改 tier=candidate，命中 canonical 或 deprecated 一律拒绝且不改文件。"
+            "只能改创建者为本凭据的节点，别人的或已废弃的节点一律拒绝且不改文件。"
             "成功返回新的 revision；正文重复、内容门槛未过时返回 isError 与 data.reason。"
         ),
     ),
     "kb_deprecate": (
         DeprecateInput,
         (
-            "按 id 与 expected_revision 把候选标记为废弃并保留文件，不物理删除。"
+            "按 id 与 expected_revision 把自己创建的节点标记为废弃并保留文件，不物理删除。"
             "reason 记入 deprecated_reason 并追加到正文；superseded_by 可选，用于指向"
-            "替代节点。只能废弃 tier=candidate，canonical 不受影响。成功返回新的 revision。"
+            "替代节点。只能废弃创建者为本凭据的节点，别人的或已废弃的节点一律拒绝。"
         ),
     ),
 }

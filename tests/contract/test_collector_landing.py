@@ -122,6 +122,6 @@ async def test_selected_target_is_the_only_landing(
     assert (report.processed, report.created, report.failed, fake.calls) == (1, 1, 0, 1)
     assert await store.list_ids() == ["fixture-right/procedure/separate-boards-during-drying"]
     node, _ = await store.read("fixture-right/procedure/separate-boards-during-drying")
-    assert node.tier == "candidate"
+    assert node.tier == "canonical"
     assert [(source.device, source.ref) for source in node.source] == [(device, "fixture.jsonl")]
     assert len(list((data / "processed_raw").rglob("*.json"))) == 1

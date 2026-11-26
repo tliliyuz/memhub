@@ -1,4 +1,4 @@
-"""`kb_write_candidate` 的输入校验、冲突、去重、内容与每日上限。"""
+"""`kb_write_candidate` 的输入校验、冲突、去重、内容与每日上限（ADR-0014 写入即 canonical）。"""
 
 import json
 from datetime import UTC, datetime, timedelta
@@ -81,13 +81,13 @@ async def test_write_rejects_archived_project(store: KnowledgeStore) -> None:
     assert payload["data"]["reason"] == "project_unavailable"
 
 
-async def test_write_creates_candidate_node(store: KnowledgeStore) -> None:
+async def test_write_creates_canonical_node(store: KnowledgeStore) -> None:
     payload = await invoke(store, GOOD_ARGS)
     assert "code" not in payload
-    assert payload["tier"] == "candidate"
+    assert payload["tier"] == "canonical"
     assert payload["id"] == "sample/fact/mcp-write-fixture"
     node, body = await store.read(payload["id"])
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
     assert node.title == "MCP 写候选夹具"
     assert body.startswith("这是一段")
     assert any(src.ref == f"mcp:{GRANT_ID}" for src in node.source)
@@ -115,8 +115,22 @@ async def test_slug_conflict_canonical(store: KnowledgeStore) -> None:
 
 
 async def test_slug_conflict_candidate(store: KnowledgeStore) -> None:
-    await invoke(store, GOOD_ARGS)
-    payload = await invoke(store, {**GOOD_ARGS, "title": "另一个标题"})
+    # `slug_conflict_candidate` 只保留给历史存量 candidate 行。
+    now = datetime.now(UTC)
+    await store.write(
+        "sample/fact/mcp-write-fixture",
+        NodeFrontmatter(
+            id="sample/fact/mcp-write-fixture",
+            kind=Kind.FACT,
+            title="历史候选",
+            project="sample",
+            tier=Tier.CANDIDATE,
+            created_at=now,
+            updated_at=now,
+        ),
+        "历史候选正文，长度足够。",
+    )
+    payload = await invoke(store, GOOD_ARGS)
     assert payload["code"] == 1010
     assert payload["data"]["reason"] == "slug_conflict_candidate"
 
@@ -166,7 +180,7 @@ async def test_daily_limit_shared_across_granted_projects(
     monkeypatch.setattr("memhub.kb.candidates.DAILY_LIMIT", 1)
     await catalog.create_kb(store, kb_id="other", name="other")
     projects = frozenset({"sample", "other"})
-    assert (await invoke(store, GOOD_ARGS, projects=projects))["tier"] == "candidate"
+    assert (await invoke(store, GOOD_ARGS, projects=projects))["tier"] == "canonical"
     payload = await invoke(store, {**GOOD_ARGS, "project": "other"}, projects=projects)
     assert payload["code"] == 1010
     assert payload["data"]["reason"] == "daily_limit_exceeded"
@@ -294,7 +308,7 @@ async def test_daily_limit_is_per_utc_day(
             return fake_today
 
     monkeypatch.setattr("memhub.kb.candidates.datetime", FakeDateTime)
-    assert (await invoke(store, GOOD_ARGS))["tier"] == "candidate"
+    assert (await invoke(store, GOOD_ARGS))["tier"] == "canonical"
     next_args = {
         **GOOD_ARGS,
         "slug": "d-new",
@@ -302,7 +316,7 @@ async def test_daily_limit_is_per_utc_day(
     }
     assert (await invoke(store, next_args))["data"]["reason"] == "daily_limit_exceeded"
     fake_today += timedelta(days=1)
-    assert (await invoke(store, next_args))["tier"] == "candidate"
+    assert (await invoke(store, next_args))["tier"] == "canonical"
 
 
 async def test_write_under_write_lock_is_deferred(store: KnowledgeStore) -> None:

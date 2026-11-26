@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -91,6 +92,68 @@ async def tree_size(root: Path) -> int:
         except OSError:
             continue
     return total
+
+
+async def _purge_path_mode(path: AsyncPath) -> int:
+    info = await path.lstat()
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if getattr(info, "st_file_attributes", 0) & reparse_point:
+        raise BatchTargetConflict()
+    return info.st_mode
+
+
+async def _plan_source_purge(
+    root: Path, relative: Path, device_id: str, source_id: str
+) -> tuple[list[AsyncPath], list[AsyncPath]]:
+    base = AsyncPath(root)
+    try:
+        for index in range(len(relative.parts) + 1):
+            if index:
+                base /= relative.parts[index - 1]
+            if not stat.S_ISDIR(await _purge_path_mode(base)):
+                raise BatchTargetConflict()
+    except FileNotFoundError:
+        return [], []
+
+    files: list[AsyncPath] = []
+    directories = [base]
+    async for shard in base.iterdir():
+        if not stat.S_ISDIR(await _purge_path_mode(shard)):
+            raise BatchTargetConflict()
+        directories.append(shard)
+        async for batch in shard.iterdir():
+            if batch.suffix != ".json" or not stat.S_ISREG(await _purge_path_mode(batch)):
+                raise BatchTargetConflict()
+            try:
+                payload = json.loads(await batch.read_text(encoding="utf-8"))
+            except (ValueError, RecursionError) as exc:
+                raise BatchTargetConflict() from exc
+            if not isinstance(payload, dict) or (
+                payload.get("device_id"),
+                payload.get("source_id"),
+            ) != (device_id, source_id):
+                raise BatchTargetConflict()
+            files.append(batch)
+    return files, directories
+
+
+async def purge_source_files(data_dir: Path, device_id: str, source_id: str) -> dict[str, int]:
+    """核对三个队列根下的批次归属后再删除；调用方须持有队列写锁。"""
+    if _safe_id(device_id) != device_id or _safe_id(source_id) != source_id:
+        raise BatchTargetConflict()
+    relative = batch_dir(data_dir, device_id, source_id).relative_to(data_dir / "raw_store")
+    plans = {
+        root: await _plan_source_purge(data_dir / root, relative, device_id, source_id)
+        for root in _QUEUE_ROOTS
+    }
+    counts: dict[str, int] = {}
+    for root, (files, directories) in plans.items():
+        for batch in files:
+            await batch.unlink()
+        for directory in reversed(directories):
+            await directory.rmdir()
+        counts[root] = len(files)
+    return counts
 
 
 def collector_device_reserved(device_id: str) -> bool:
@@ -266,6 +329,7 @@ __all__ = [
     "batch_dir",
     "collector_device_reserved",
     "estimate_new_bytes",
+    "purge_source_files",
     "queue_write_lock",
     "save_batch",
     "tree_size",

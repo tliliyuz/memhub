@@ -30,6 +30,7 @@ KB_TABLES = {
     "kb_node_revisions",
     "kb_archives",
     "kb_write_audit",
+    "kb_mcp_trace",
 }
 
 
@@ -80,6 +81,29 @@ def test_downgrade_removes_kb_tables(migrated: Connection) -> None:
     command.downgrade(cfg, "base")
     remaining = set(inspect(migrated).get_table_names()) - {"alembic_version"}
     assert remaining == set()
+
+
+def test_online_path_normalizes_plain_dsn_to_psycopg3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """生产入口（一次性容器跑 `alembic upgrade head`）拿到的是不带方言的 DSN。
+
+    镜像里只有 psycopg 3。若 `env.py` 不把 `postgresql://` 归一化成
+    `postgresql+psycopg://`，SQLAlchemy 会先去找 psycopg2，在连库之前就以
+    `ModuleNotFoundError` 失败。这里在 `engine_from_config` 处截住，断言交给
+    SQLAlchemy 的 URL 已带方言——不连库，避免慢测。
+    """
+    monkeypatch.setenv("MEMHUB_KB_MIGRATE_DB_URL", "postgresql://kb@127.0.0.1:5432/memhub_prod")
+    seen: dict[str, str] = {}
+
+    def capture(section: dict[str, str], prefix: str = "sqlalchemy.", **kwargs: object) -> None:
+        seen["url"] = section[f"{prefix}url"]
+        raise RuntimeError("stop before connect")
+
+    monkeypatch.setattr("sqlalchemy.engine_from_config", capture)
+    cfg = Config(str(ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    with pytest.raises(RuntimeError, match="stop before connect"):
+        command.upgrade(cfg, "head")
+    assert seen["url"] == "postgresql+psycopg://kb@127.0.0.1:5432/memhub_prod"
 
 
 def test_version_table_is_qualified_with_kb_schema() -> None:
