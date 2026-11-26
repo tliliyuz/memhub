@@ -354,8 +354,10 @@ def classify(command: str) -> tuple[str, str] | None:
         if is_remote_operation(subcommand, args):
             return (
                 "ask",
-                f"该命令会访问或改写远端（`git {shown}`）。DEVELOPMENT §6 要求：远端操作"
-                "需负责人针对当前操作单独授权，本地操作与工作区闭环的授权不覆盖远端。",
+                (
+                    f"该命令会访问或改写远端（`git {shown}`）。DEVELOPMENT §6 要求：远端操作"
+                    "需负责人针对当前操作单独授权，本地操作与工作区闭环的授权不覆盖远端。"
+                ),
             )
     return None
 

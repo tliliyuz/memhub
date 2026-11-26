@@ -1,4 +1,4 @@
-"""MCP 调用轨迹的只读查询（ADR-0014，规格 docs/plans/mcp-trace-spec.md §6）。
+"""MCP 调用轨迹的只读查询（ADR-0015，规格 docs/plans/mcp-trace-spec.md §6）。
 
 管理台列表与汇总；真源是 `kb_mcp_trace`，只读不写。只对 `PgKnowledgeStore`
 开放，非 PG 存储由调用方返回 503/`2001`。

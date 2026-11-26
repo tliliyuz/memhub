@@ -1,6 +1,6 @@
 """精确 HTTP 路径与请求级授权；协议解析交给官方 MCP SDK。
 
-调用轨迹（ADR-0014）：`tools/call` 与鉴权/路由拒绝记入 `kb_mcp_trace`，
+调用轨迹（ADR-0015）：`tools/call` 与鉴权/路由拒绝记入 `kb_mcp_trace`，
 只记元数据；记录失败不改变响应。initialize / tools_list / ping / 通知不记录。
 """
 
