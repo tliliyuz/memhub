@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-26（MCP 只读长期记忆工具 ADR 草案）
+
+- `docs(adr)`：新增 [ADR-0019](decisions/ADR-0019-mcp-memory-tools.md)「MCP 只读长期记忆工具，凭据显式开启」，状态 `proposed`，修订 ADR-0016 决策 7（MCP 第一期不暴露记忆）。裁决要点：新增 `kb_memory_search` / `kb_memory_read` 两个只读工具，只读当前已发布快照（与 worker 注入同一冻结口径），只返回 `active` 条目的结论、边界、失效条件、置信度与证据元数据；可见性由 `Grant` 新增的正交布尔 `memory`（默认 `false`）显式开启，令牌生成器加 `--memory`，未开启按越权直读处理；不提供任何记忆写入口，读取只进 `kb_mcp_trace`。备选（所有读凭据可见、按证据项目交集过滤、新增作用域、混入 `kb_nodes`、开放写工具、读未发布内容）均记录否决理由。
+- 范围：本次只写 ADR，不含规格、测试与实现；ADR 转 `accepted` 前不进入后续阶段。
+- ADR 检查：命中清单第 3 项（新增 MCP 工具，改变对外契约）与第 7 项（记忆是部署级全局层，改变访问控制边界），故按「创建 ADR」处理；编号 0019 未被占用。
+- 验证：纯文档变更，无业务 RED（例外理由：只有 ADR 与索引新增）；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
 ## 2026-11-26（长期记忆第一期：聚合、快照与会话抽取注入，ADR-0016）
 
 - `feat(db)`：新增 Alembic `0005_long_term_memory`（合入 dev 时因已有 `0004_mcp_trace_funnel` 而后移，`down_revision` 指向它）：四张表 `kb_memory_entries`（条目，slug 全局唯一）、`kb_memory_revisions`（不可变修订）、`kb_memory_snapshots`（版本化快照，部分唯一索引保证至多一个 `published`）、`kb_memory_candidates`（未达门槛或冲突候选，每 slug 一行）；`kb_write_audit` 增加可空 `memory_snapshot`。`downgrade` 逆序删列删表。
