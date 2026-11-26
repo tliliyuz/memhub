@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
 from memhub.kb.api import create_app
+from memhub.kb.models import KbMemoryCandidate, KbMemoryEntry
 from memhub.kb.session import KB_DSN_KEY
+from memhub.kb.store import KnowledgeStore
 
 
 @pytest.fixture
@@ -276,3 +283,222 @@ def test_projects_and_scoped_graph(client: TestClient) -> None:
 def test_create_rejects_unknown_fields(client: TestClient) -> None:
     response = client.post("/api/v1/kb/nodes", json={"kind": "fact", "title": "x", "bogus": 1})
     assert response.status_code == 422
+
+
+# -- 长期记忆（规格 §8） -----------------------------------------------------
+
+NOW = datetime(2026, 11, 26, 3, 0, tzinfo=UTC)
+
+
+class _MemorySeeder:
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def entry(self, slug: str, **overrides: Any) -> dict[str, Any]:
+        values: dict[str, Any] = {
+            "slug": slug,
+            "title": "重试退避",
+            "conclusion": "失败后的重试要带指数退避。",
+            "boundary": "幂等操作",
+            "invalidation": "",
+            "evidence": [],
+            "confidence": 0.8,
+            "status": "active",
+            "contradicts": [],
+            "revision": f"{slug[:1] or '0'}" * 16,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+        values.update(overrides)
+        with Session(self.engine) as session:
+            session.add(KbMemoryEntry(**values))
+            session.commit()
+        return values
+
+    def candidate(self, slug: str, **overrides: Any) -> None:
+        values: dict[str, Any] = {
+            "slug": slug,
+            "title": "迁移先备份",
+            "conclusion": "改表前先备份。",
+            "boundary": "",
+            "invalidation": "",
+            "evidence": [],
+            "confidence": 0.5,
+            "session_count": 1,
+            "project_count": 1,
+            "status": "pending",
+            "reason": "below_threshold",
+            "contradicts": [],
+            "first_seen_at": NOW,
+            "last_seen_at": NOW,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+        values.update(overrides)
+        with Session(self.engine) as session:
+            session.add(KbMemoryCandidate(**values))
+            session.commit()
+
+
+@pytest.fixture
+def memory_seed(test_dsn: str, kb_pg_schema: str) -> Iterator[_MemorySeeder]:
+    url = test_dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+    engine = create_engine(url, connect_args={"options": f"-csearch_path={kb_pg_schema}"})
+    try:
+        yield _MemorySeeder(engine)
+    finally:
+        engine.dispose()
+
+
+def test_memory_list_filters_and_detail(client: TestClient, memory_seed: _MemorySeeder) -> None:
+    memory_seed.entry("retry-backoff", title="重试退避")
+    memory_seed.entry(
+        "old-rule",
+        title="旧规则",
+        conclusion="旧结论。",
+        status="deprecated",
+        deprecated_reason="过期",
+    )
+
+    listing = client.get("/api/v1/kb/memories", params={"status": "active"})
+    assert listing.status_code == 200, listing.text
+    body = listing.json()
+    assert set(body) == {"items", "total", "offset", "limit"}
+    assert body["total"] == 1
+    assert [item["slug"] for item in body["items"]] == ["retry-backoff"]
+
+    everything = client.get("/api/v1/kb/memories", params={"status": "all"}).json()
+    assert everything["total"] == 2
+
+    found = client.get("/api/v1/kb/memories", params={"q": "旧规则"}).json()
+    assert [item["slug"] for item in found["items"]] == ["old-rule"]
+
+    paginated = client.get(
+        "/api/v1/kb/memories", params={"status": "all", "limit": 1, "offset": 1}
+    ).json()
+    assert paginated["limit"] == 1 and paginated["offset"] == 1
+    assert len(paginated["items"]) == 1
+
+    detail = client.get("/api/v1/kb/memories/retry-backoff")
+    assert detail.status_code == 200
+    assert detail.json()["slug"] == "retry-backoff"
+    assert detail.json()["revisions"] == []
+
+    missing = client.get("/api/v1/kb/memories/ghost")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == 1011
+
+
+def test_memory_patch_optimistic_lock_and_deprecate(
+    client: TestClient, memory_seed: _MemorySeeder
+) -> None:
+    seeded = memory_seed.entry("retry-backoff")
+
+    stale = client.patch(
+        "/api/v1/kb/memories/retry-backoff",
+        json={"expected_revision": "0" * 16, "conclusion": "过期修改。"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == 1010
+
+    updated = client.patch(
+        "/api/v1/kb/memories/retry-backoff",
+        json={"expected_revision": seeded["revision"], "conclusion": "新的结论。"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["conclusion"] == "新的结论。"
+    assert updated.json()["revision"] != seeded["revision"]
+
+    deprecated = client.post(
+        "/api/v1/kb/memories/retry-backoff/deprecate",
+        json={"expected_revision": updated.json()["revision"], "reason": "被替代"},
+    )
+    assert deprecated.status_code == 200, deprecated.text
+    assert deprecated.json()["status"] == "deprecated"
+    assert deprecated.json()["deprecated_reason"] == "被替代"
+
+    again = client.post(
+        "/api/v1/kb/memories/retry-backoff/deprecate",
+        json={"expected_revision": deprecated.json()["revision"], "reason": "重复废弃"},
+    )
+    assert again.status_code == 409
+    assert again.json()["code"] == 1010
+
+    missing = client.patch(
+        "/api/v1/kb/memories/ghost",
+        json={"expected_revision": "0" * 16, "conclusion": "x"},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["code"] == 1011
+
+
+def test_memory_candidates_filter(client: TestClient, memory_seed: _MemorySeeder) -> None:
+    memory_seed.candidate("below")
+    memory_seed.candidate(
+        "conflicted",
+        status="conflict",
+        reason="conclusion_differs",
+        contradicts=["below"],
+    )
+
+    pending = client.get("/api/v1/kb/memories/candidates", params={"status": "pending"})
+    assert pending.status_code == 200, pending.text
+    assert [item["slug"] for item in pending.json()["items"]] == ["below"]
+
+    everything = client.get("/api/v1/kb/memories/candidates", params={"status": "all"})
+    assert everything.json()["total"] == 2
+    conflict = next(item for item in everything.json()["items"] if item["slug"] == "conflicted")
+    assert conflict["status"] == "conflict"
+    assert conflict["contradicts"] == ["below"]
+
+
+def test_memory_snapshot_publish_activate_disable(
+    client: TestClient, memory_seed: _MemorySeeder
+) -> None:
+    memory_seed.entry("retry-backoff")
+
+    first = client.post("/api/v1/kb/memories/snapshots", json={"note": "第一版"})
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "published"
+    assert first.json()["item_count"] == 1
+
+    second = client.post("/api/v1/kb/memories/snapshots", json={})
+    assert second.status_code == 200
+    assert second.json()["version"] != first.json()["version"]
+
+    listing = client.get("/api/v1/kb/memories/snapshots").json()
+    assert listing["total"] == 2
+    assert [item["version"] for item in listing["items"]] == [
+        second.json()["version"],
+        first.json()["version"],
+    ]
+
+    rollback = client.post(f"/api/v1/kb/memories/snapshots/{first.json()['version']}/activate")
+    assert rollback.status_code == 200
+    assert rollback.json()["status"] == "published"
+
+    disabled = client.post(
+        f"/api/v1/kb/memories/snapshots/{first.json()['version']}/disable",
+        json={"reason": "回滚验收"},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["status"] == "disabled"
+
+    missing = client.post("/api/v1/kb/memories/snapshots/99999/activate")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == 1011
+
+    bad_version = client.post("/api/v1/kb/memories/snapshots/not-a-number/activate")
+    assert bad_version.status_code == 422
+
+
+def test_memory_routes_require_pg(tmp_path: Path) -> None:
+    with TestClient(create_app(store=KnowledgeStore(tmp_path / "kb"))) as test_client:  # type: ignore[arg-type]
+        for path in (
+            "/api/v1/kb/memories",
+            "/api/v1/kb/memories/candidates",
+            "/api/v1/kb/memories/snapshots",
+        ):
+            response = test_client.get(path)
+            assert response.status_code == 503, path
+            assert response.json()["code"] == 2001
