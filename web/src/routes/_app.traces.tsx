@@ -3,7 +3,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { api, type McpTrace, type TraceStatus } from '@/lib/api'
-import { credentialLabel, sinceFromDays } from '@/lib/traces'
+import { credentialLabel, formatAverageTools, formatRatio, sinceFromDays } from '@/lib/traces'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -114,6 +114,62 @@ function TracesPage() {
           <SummaryCard label='失败' value={stats?.error} tone='destructive' />
           <SummaryCard label='拒绝' value={stats?.rejected} />
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className='text-base'>连接漏斗</CardTitle>
+            <CardDescription>连接 → 列工具 → 实际调用；拒绝不计入实际调用。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {summary.isError ? (
+              <p role='alert' className='text-sm text-destructive'>漏斗加载失败，可刷新页面重试。</p>
+            ) : (
+              <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+                <FunnelStat
+                  label='连接'
+                  value={stats?.funnel.connections}
+                  hint='initialize 成功'
+                />
+                <FunnelStat
+                  label='列工具'
+                  value={stats?.funnel.listings}
+                  hint={
+                    stats
+                      ? `每条连接 ${formatRatio(
+                          stats.funnel.listings_per_connection,
+                          stats.funnel.connections,
+                        )}`
+                      : '—'
+                  }
+                />
+                <FunnelStat
+                  label='实际调用'
+                  value={stats?.funnel.calls}
+                  hint={
+                    stats
+                      ? `每次列工具 ${formatRatio(
+                          stats.funnel.calls_per_listing,
+                          stats.funnel.listings,
+                        )}`
+                      : '—'
+                  }
+                />
+                <FunnelStat
+                  label='平均工具数'
+                  value={stats?.funnel.avg_tools}
+                  hint={
+                    stats
+                      ? `${formatAverageTools(
+                          stats.funnel.avg_tools,
+                          stats.funnel.listings,
+                        )} 个/次`
+                      : '—'
+                  }
+                />
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
@@ -315,6 +371,24 @@ function SummaryCard({
         </CardTitle>
       </CardHeader>
     </Card>
+  )
+}
+
+function FunnelStat({
+  label,
+  value,
+  hint,
+}: {
+  label: string
+  value: number | undefined
+  hint: string
+}) {
+  return (
+    <div>
+      <p className='text-sm text-muted-foreground'>{label}</p>
+      <p className='text-2xl font-semibold'>{value ?? '—'}</p>
+      <p className='text-xs text-muted-foreground'>{hint}</p>
+    </div>
   )
 }
 
