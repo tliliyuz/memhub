@@ -513,6 +513,7 @@ def create_app(
     async def list_mcp_traces(
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
+        event: str = Query(default="call", pattern="^(call|list_tools|initialize)$"),
         tool: str | None = None,
         status: str | None = None,
         credential: str | None = None,
@@ -525,6 +526,7 @@ def create_app(
             api.store,
             limit=limit,
             offset=offset,
+            event=event,
             tool=tool,
             status=status,
             credential=credential,

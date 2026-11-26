@@ -22,6 +22,7 @@ def _item(row: KbMcpTrace) -> dict[str, Any]:
         "rpc_id": row.rpc_id,
         "called_at": row.called_at,
         "credential": {"id": row.credential_id, "name": row.credential_name},
+        "event": row.event,
         "tool": row.tool,
         "status": row.status,
         "http_status": row.http_status,
@@ -29,6 +30,7 @@ def _item(row: KbMcpTrace) -> dict[str, Any]:
         "error_kind": row.error_kind,
         "duration_ms": row.duration_ms,
         "result_bytes": row.result_bytes,
+        "tool_count": row.tool_count,
         "projects": list(row.projects) if row.projects is not None else None,
         "client": row.client,
     }
@@ -39,6 +41,7 @@ async def mcp_traces(
     *,
     limit: int = 50,
     offset: int = 0,
+    event: str = "call",
     tool: str | None = None,
     status: str | None = None,
     credential: str | None = None,
@@ -47,6 +50,8 @@ async def mcp_traces(
 ) -> dict[str, Any]:
     """分页列表，`called_at` 倒序（同刻按 `id` 倒序），过滤条件全部生效。"""
     conditions = []
+    if event:
+        conditions.append(KbMcpTrace.event == event)
     if tool:
         conditions.append(KbMcpTrace.tool == tool)
     if status:
@@ -81,25 +86,47 @@ async def mcp_traces(
 
 
 async def mcp_traces_summary(store: PgKnowledgeStore, *, days: int = 7) -> dict[str, Any]:
-    """近 `days` 天的调用汇总：状态分布、按工具、按凭据。"""
+    """近 `days` 天的调用汇总：状态分布、按工具、按凭据，以及连接漏斗。
+
+    既有统计（`total`/`ok`/`error`/`rejected`/`tools`/`credentials`）只看
+    `event=call`，保持原有语义；漏斗另取发现层事件（ADR-0017）。
+    """
     since = datetime.now(UTC) - timedelta(days=days)
+    call_events = (KbMcpTrace.called_at >= since, KbMcpTrace.event == "call")
     async with store.sessions() as session:
-        scoped = select(KbMcpTrace).where(KbMcpTrace.called_at >= since)
-        total = await session.scalar(select(func.count()).select_from(scoped.subquery()))
-        ok = await session.scalar(
-            select(func.count()).select_from(scoped.where(KbMcpTrace.status == "ok").subquery())
-        )
-        error = await session.scalar(
-            select(func.count()).select_from(scoped.where(KbMcpTrace.status == "error").subquery())
-        )
-        rejected = await session.scalar(
-            select(func.count()).select_from(
-                scoped.where(KbMcpTrace.status == "rejected").subquery()
+        counts = (
+            await session.execute(
+                select(KbMcpTrace.event, KbMcpTrace.status, func.count())
+                .where(KbMcpTrace.called_at >= since)
+                .group_by(KbMcpTrace.event, KbMcpTrace.status)
+            )
+        ).all()
+        avg_tools = await session.scalar(
+            select(func.avg(KbMcpTrace.tool_count)).where(
+                KbMcpTrace.called_at >= since,
+                KbMcpTrace.event == "list_tools",
+                KbMcpTrace.status == "ok",
+                KbMcpTrace.tool_count.is_not(None),
             )
         )
-        rows = (
-            await session.scalars(select(KbMcpTrace).where(KbMcpTrace.called_at >= since))
-        ).all()
+        rows = (await session.scalars(select(KbMcpTrace).where(*call_events))).all()
+
+    totals: dict[tuple[str, str], int] = {
+        (str(event), str(status)): int(count) for event, status, count in counts
+    }
+
+    def count_of(event: str, status: str | None = None) -> int:
+        if status is not None:
+            return totals.get((event, status), 0)
+        return sum(value for (item_event, _), value in totals.items() if item_event == event)
+
+    total = count_of("call")
+    ok = count_of("call", "ok")
+    error = count_of("call", "error")
+    rejected = count_of("call", "rejected")
+    connections = count_of("initialize", "ok")
+    listings = count_of("list_tools", "ok")
+    calls = ok + error
 
     tools: dict[str, dict[str, Any]] = {}
     credentials: dict[str, dict[str, Any]] = {}
@@ -130,10 +157,18 @@ async def mcp_traces_summary(store: PgKnowledgeStore, *, days: int = 7) -> dict[
     return {
         "since": since.isoformat(),
         "days": days,
-        "total": int(total or 0),
-        "ok": int(ok or 0),
-        "error": int(error or 0),
-        "rejected": int(rejected or 0),
+        "total": total,
+        "ok": ok,
+        "error": error,
+        "rejected": rejected,
         "tools": tool_items,
         "credentials": credential_items,
+        "funnel": {
+            "connections": connections,
+            "listings": listings,
+            "calls": calls,
+            "listings_per_connection": (round(listings / connections, 2) if connections else 0.0),
+            "calls_per_listing": round(calls / listings, 2) if listings else 0.0,
+            "avg_tools": round(float(avg_tools), 2) if avg_tools is not None else 0,
+        },
     }
