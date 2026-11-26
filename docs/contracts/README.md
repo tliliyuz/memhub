@@ -1,4 +1,4 @@
-# 跨端契约（v0.14）
+# 跨端契约（v0.16）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -23,6 +23,8 @@
 
 ## 变更记录
 
+- 0.16 — MCP 服务端自描述（[mcp-tools.md](mcp-tools.md) 0.8）：`initialize` 的 `instructions` 统一为 HTTP/stdio 共用常量，说明服务定位与「何时该检索」；七个工具补中英 `title`，`kb_search` 描述补触发场景与中英同义词，所有输入字段补 `description`；参数约束与返回结构不变。新增本地令牌生成器 `memhub mcp token`（输出一次性令牌与可直接粘贴的 grant，UTC 有效期、非空库名单，经 `Grant` 校验后输出）。
+- 0.15 — 发现层事件并入 MCP 调用轨迹（ADR-0018，[mcp-tools.md](mcp-tools.md) §5、[kb-admin-api.md](kb-admin-api.md) §4.9）：`initialize` 与 `tools/list` 与 `tools/call`、鉴权/路由拒绝同表记录，新增 `event`（`call`/`list_tools`/`initialize`）与 `tool_count`；查询默认只统计 `call`，另给连接漏斗汇总。`notifications/*` 与 `ping` 不记录。
 - 0.14 — 取消候选转正门槛（ADR-0014，[node-schema.md](node-schema.md) 0.5、[mcp-tools.md](mcp-tools.md) 0.7、[kb-admin-api.md](kb-admin-api.md) 0.6）：worker、MCP 与管理台写入一律 `canonical`，存量 `candidate` 由一次性迁移转正；检索默认排除 `deprecated`，`tier` 只保留 `canonical`/`all`；MCP 更新与废弃改为「创建者 actor 与调用方一致」，拒绝码 `not_candidate` 换成 `not_owner`。
 - 0.13 — 补齐采集原始队列清理接口（[ingest-api.md](ingest-api.md) 0.9）：仅接受 provision token，按设备和源清理文件，不重置云端游标或删除已提炼知识。
 - 0.12 — 投影子系统下线（[kb-admin-api.md](kb-admin-api.md) 0.4、[node-schema.md](node-schema.md) 0.4）：删除 `kg.json` 文件投影、`GET /api/v1/kb/projection`、`GET|POST /api/v1/kb/rebuild` 与 `memhub project` / `memhub serve` 命令，图谱与检索直接查询 `kb_*` 真源；`healthz` 只报 `{ok, store, nodes}`。
