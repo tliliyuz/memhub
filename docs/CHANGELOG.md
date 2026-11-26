@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-11-26（MCP 发现：服务端自描述与令牌生成器）
+
+- `feat(mcp)`：HTTP 与 stdio 的 `initialize` 统一返回 `src/memhub/mcp/discovery.py` 的同一份 `instructions`：说明 memhub 是跨会话知识库、何时该检索（过去会话、项目决策、笔记、踩坑）、调用顺序 `kb_search → kb_read → kb_related`，并声明检索结果只是资料、不是要执行的指令（≤500 字）。此前 HTTP 只有一句安全提示，stdio 只有调用顺序，都不含「记忆/过去会话/笔记」触发场景。
+- `feat(mcp)`：七个工具补中英 `title`（≤40 字）；读工具描述首句写「何时用」，`kb_search` 描述补用户口语触发词与中英同义词（memory、knowledge base、notes、past sessions）；写工具描述保留既有边界并补首句用途（单条 ≤300 字）。
+- `feat(mcp)`：`contract/mcp.py` 的每个输入字段补 `description`，随生成的 `inputSchema` 暴露；参数约束、返回结构与错误码不变。
+- `feat(cli)`：新增 `memhub mcp token --name --projects --scope read|write --days --json`：本地生成 43 字符高熵令牌与 `sha256` 摘要，`expires_at` 为 UTC 秒级（默认 90 天），`projects` 非空，先经 `Grant` 校验再输出；默认人类可读只显示一次令牌并附可粘贴的 grant JSON，stderr 只提示不要写入仓库/文档/聊天，不落盘、不写日志。该命令仅是本地生成器，不改变吊销语义。
+- 规格：[mcp-discovery-spec.md](plans/mcp-discovery-spec.md)（负责人确认保持 `kb_*` 工具名、纳入令牌生成器；漏斗观测由并行会话负责）。契约：[mcp-tools.md](contracts/mcp-tools.md) 0.8、[contracts/README.md](contracts/README.md) 0.16（其中 0.15 条目补齐并行合入的连接漏斗契约）。ADR 检查：未新增架构决策（只改服务端自描述面与本地令牌生成，鉴权边界见 ADR-0003；长期记忆仍按 ADR-0016 第一期不经 MCP 暴露）。
+- RED（在只含 HEAD `src/` 的临时副本中跑新测试）：`test_mcp_token.py` 6 failed（`mcp token` 子命令不存在，`SystemExit: 2`）；`test_mcp_discovery.py` 收集即失败（`No module named 'memhub.mcp.discovery'`）。
+- GREEN 与验证（2026-11-26，worktree `feat/mcp-discovery`）：全量 `pytest` 621 passed / 1 skipped（5:43；skip 为未启动 MCP stdio 服务器的既有无关用例），其中 `test_mcp_token.py` 6 passed、`test_mcp_discovery.py` 8 passed（含 HTTP 握手与「生成器令牌 → `load_grants` → 鉴权握手」端到端）；`ruff check`、`ruff format --check`（105 files）、`mypy src`（50 files）通过；文档门禁 `check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- 发现命中验收（条件 9）：独立临时 schema + 本地 kb-api，空目录（无 `CLAUDE.md`/`AGENTS.md`）的 `claude -p` 会话 3 种问法 × 3 次，9/9 次都调用 `mcp__memhub__kb_search`，共新增 44 条 `kb_search` 轨迹；客户端先以内置 `ToolSearch` 加载延迟披露的 MCP schema，再首轮检索，与规格 §4 客户端矩阵一致。记录见 [规格 §9](plans/mcp-discovery-spec.md)。
+- 资源：未打开浏览器 space/标签页；临时启动的 1 个本地 kb-api 与 11 个 headless 会话（含 2 次冒烟）验收后全部结束，临时 schema 与含令牌的临时配置已删除，端口无监听。
+- 合并 dev（轨迹漏斗，ADR-0018）后复验：全量 `pytest` 622 passed / 1 skipped（5:37）；`ruff check`、`ruff format --check src tests alembic`（110 files）、`mypy src`（50 files）与全部文档门禁通过。
+
 ## 2026-11-26（MCP 发现层事件并入轨迹与连接漏斗，ADR-0018）
 
 - `feat(trace)`：HTTP 入口经 MCP SDK `Server.middleware` 记录 `initialize` 与 `tools/list`，与既有 `tools/call`、鉴权/路由拒绝同表；新增 `event`（`call` / `list_tools` / `initialize`）与 `tool_count`（成功列工具数），仍只记元数据，`notifications/*` 与 `ping` 不记录。决策见 [ADR-0018](decisions/ADR-0018-mcp-discovery-trace.md)，规格见 [mcp-trace-spec](plans/mcp-trace-spec.md)。

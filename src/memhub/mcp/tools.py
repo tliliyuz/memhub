@@ -28,13 +28,38 @@ from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetUnavailable
 
-_DEFINITIONS: dict[str, tuple[type[ToolInput], str]] = {
-    "kb_search": (SearchInput, "关键词检索知识库；默认只返回 canonical 节点。"),
-    "kb_read": (ReadInput, "按完整 ID 读取一条知识的正文、元数据和可见关系。"),
-    "kb_related": (RelatedInput, "查邻接子图，最多两跳。"),
-    "kb_audit_list": (AuditInput, "只读分页列出治理问题。"),
+_DEFINITIONS: dict[str, tuple[type[ToolInput], str, str]] = {
+    "kb_search": (
+        SearchInput,
+        "知识库检索 / Search knowledge",
+        (
+            "跨会话知识库检索：当用户问起以前/上次讨论过的结论、项目决策、笔记或踩坑，"
+            "提到记忆/知识库，或需要跨会话复用的项目事实时，先调用本工具。"
+            "中英文关键词均可（memory, knowledge base, notes, past sessions）。"
+            "默认只返回 canonical 节点；无结果返回空列表与 hint。"
+        ),
+    ),
+    "kb_read": (
+        ReadInput,
+        "读取知识 / Read knowledge",
+        (
+            "按完整 ID（project/kind/slug）读取一条知识的正文、元数据与可见关系；"
+            "检索命中后用它读全文，正文超长时标记 truncated。"
+        ),
+    ),
+    "kb_related": (
+        RelatedInput,
+        "关联知识 / Related knowledge",
+        "查一条知识的邻接子图（最多两跳），用于补充上下文或追踪相关决策；边最多 100 条并标记截断。",
+    ),
+    "kb_audit_list": (
+        AuditInput,
+        "治理审计 / Governance audit",
+        "只读分页列出治理问题（矛盾、断链、孤立、低置信、陈旧）；用于健康检查，不是知识检索入口。",
+    ),
     "kb_write_candidate": (
         WriteCandidateInput,
+        "写入知识 / Write knowledge",
         (
             "写入一条 canonical 知识，写入即生效，只创建不更新。必须显式给出 project、"
             "kind、slug、title、body 与至少一条 evidence（SourceRef 形状）。"
@@ -45,6 +70,7 @@ _DEFINITIONS: dict[str, tuple[type[ToolInput], str]] = {
     ),
     "kb_update_candidate": (
         UpdateCandidateInput,
+        "更新知识 / Update knowledge",
         (
             "按 id 与 expected_revision 更新自己创建的节点，只改 title、body、tags、"
             "confidence，至少给一项；revision 取自 kb_read 的返回值，过期会被拒绝。"
@@ -54,6 +80,7 @@ _DEFINITIONS: dict[str, tuple[type[ToolInput], str]] = {
     ),
     "kb_deprecate": (
         DeprecateInput,
+        "废弃知识 / Deprecate knowledge",
         (
             "按 id 与 expected_revision 把自己创建的节点标记为废弃并保留文件，不物理删除。"
             "reason 记入 deprecated_reason 并追加到正文；superseded_by 可选，用于指向"
@@ -66,11 +93,12 @@ _WRITE_TOOLS = frozenset({"kb_write_candidate", "kb_update_candidate", "kb_depre
 TOOLS = [
     {
         "name": name,
+        "title": title,
         "description": description,
         "inputSchema": model.model_json_schema(),
         "annotations": {"readOnlyHint": name not in _WRITE_TOOLS},
     }
-    for name, (model, description) in _DEFINITIONS.items()
+    for name, (model, title, description) in _DEFINITIONS.items()
 ]
 TOOL_NAMES = frozenset(_DEFINITIONS)
 
