@@ -66,7 +66,7 @@ ADR 检查与裁决
 | 对外契约：节点 schema、源注册表、采集 API、MCP 工具 | `docs/contracts/`（`README.md` 为索引） |
 | 环境变量：键名、读取方与失败语义 | `docs/tech/ENVIRONMENT.md` |
 | 开发环境、命令、验证矩阵、提交粒度、分支与 worktree 闭环 | `docs/guides/DEVELOPMENT.md` |
-| 重要架构决策 | `docs/decisions/README.md`（具体决策：`docs/decisions/ADR-NNNN-*.md`） |
+| 重要架构决策 | `docs/decisions/README.md`（治理规则与索引；具体决策：`docs/decisions/ADR-NNNN-*.md`） |
 | 行为变更记录（按日期追加） | `docs/CHANGELOG.md` |
 | 知识真源 | PostgreSQL 的 `kb_*` 表（ADR-0013；markdown 仅作一次性迁移源） |
 

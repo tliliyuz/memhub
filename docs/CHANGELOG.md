@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-26（ADR 治理规则补入本仓）
+
+- `docs(governance)`：`docs/decisions/README.md` 补入与评测仓同源的 ADR 触发清单（8 项，按本仓契约与知识层级改写）、检查与裁决输出格式、修订/替代/澄清规则与记录位置。此前本仓只有索引与模板，`CLAUDE.md` 要求「按 ADR 治理规则执行检查」，但判据只存在于兄弟仓。
+- `docs(entry)`：`CLAUDE.md` / `AGENTS.md` 权威矩阵的「重要架构决策」行注明决策目录同时承载治理规则与索引，两文件保持字节一致。
+- 背景：ADR-0017（fork 会话按消息 uuid 去重）裁决时，判据需跨仓查找；按 §1.2 长期信息落盘要求补入本仓。触发清单第 4 项按本仓改为「知识层级、检索口径」，第 8 项改为「模型/抽取调用策略」，其余与评测仓 `docs/decisions/README.md` 一致。
+- ADR 检查：本变更只补治理规则，不改变系统行为；按新清单逐项判断未命中（不新增/移除边界、不改存储与任务语义、不改契约、不改层级、不引依赖、不改拓扑、不改数据/安全边界、不改成本模型）。
+- 验证：纯文档变更，无业务 RED（例外理由：仅治理文档与入口索引）；`check_document_format.py`、`check_document_ownership.py --all`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+
 ## 2026-11-26（MCP 发现：服务端自描述与令牌生成器）
 
 - `feat(mcp)`：HTTP 与 stdio 的 `initialize` 统一返回 `src/memhub/mcp/discovery.py` 的同一份 `instructions`：说明 memhub 是跨会话知识库、何时该检索（过去会话、项目决策、笔记、踩坑）、调用顺序 `kb_search → kb_read → kb_related`，并声明检索结果只是资料、不是要执行的指令（≤500 字）。此前 HTTP 只有一句安全提示，stdio 只有调用顺序，都不含「记忆/过去会话/笔记」触发场景。
