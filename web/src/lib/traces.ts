@@ -9,3 +9,13 @@ export function credentialLabel(credential: { id: string | null; name: string | 
 export function sinceFromDays(days: number, now: Date = new Date()): string {
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString()
 }
+
+/** 漏斗转化率：分母为 0 时没有定义，显示 `—`（规格 §7）。 */
+export function formatRatio(value: number, denominator: number): string {
+  return denominator === 0 ? '—' : `${value.toFixed(2)}×`
+}
+
+/** 平均每次列出的工具数：没有成功列工具时为 `—`（规格 §7）。 */
+export function formatAverageTools(value: number, listings: number): string {
+  return listings === 0 ? '—' : String(value)
+}

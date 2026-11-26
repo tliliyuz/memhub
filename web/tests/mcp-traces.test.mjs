@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ApiError, api } from '../src/lib/api.ts'
-import { credentialLabel, sinceFromDays } from '../src/lib/traces.ts'
+import { credentialLabel, formatAverageTools, formatRatio, sinceFromDays } from '../src/lib/traces.ts'
 
 test('轨迹列表只透传有值的筛选参数，空串与未定义不进查询串', async (t) => {
   let seen = ''
@@ -9,11 +9,19 @@ test('轨迹列表只透传有值的筛选参数，空串与未定义不进查�
     seen = path
     return Response.json({ items: [], total: 0, offset: 0, limit: 50 })
   })
-  await api.mcpTraces({ limit: 50, offset: 100, tool: 'kb_search', status: 'error', credential: '' })
+  await api.mcpTraces({
+    limit: 50,
+    offset: 100,
+    event: 'list_tools',
+    tool: 'kb_search',
+    status: 'error',
+    credential: '',
+  })
   const url = new URL(seen, 'http://localhost')
   assert.equal(url.pathname, '/api/v1/kb/mcp-traces')
   assert.equal(url.searchParams.get('limit'), '50')
   assert.equal(url.searchParams.get('offset'), '100')
+  assert.equal(url.searchParams.get('event'), 'list_tools')
   assert.equal(url.searchParams.get('tool'), 'kb_search')
   assert.equal(url.searchParams.get('status'), 'error')
   assert.equal(url.searchParams.has('credential'), false)
@@ -31,6 +39,14 @@ test('轨迹汇总按 days 取近 N 天', async (t) => {
     rejected: 0,
     tools: [{ tool: 'kb_search', count: 3, ok: 2, error: 1, rejected: 0, avg_ms: 12 }],
     credentials: [{ id: 'a1b2c3d4e5f6', name: null, count: 3 }],
+    funnel: {
+      connections: 2,
+      listings: 2,
+      calls: 3,
+      listings_per_connection: 1,
+      calls_per_listing: 1.5,
+      avg_tools: 5,
+    },
   }
   t.mock.method(globalThis, 'fetch', async (path) => {
     seen = path
@@ -64,4 +80,15 @@ test('时间范围换算为 ISO 起点，不改动传入的当前时间', () => 
   assert.equal(sinceFromDays(1, now), '2026-11-24T08:00:00.000Z')
   assert.equal(sinceFromDays(30, now), '2026-10-26T08:00:00.000Z')
   assert.equal(now.toISOString(), '2026-11-25T08:00:00.000Z')
+})
+
+test('漏斗转化率在分母为 0 时显示破折号，否则保留两位小数', () => {
+  assert.equal(formatRatio(1.33, 9), '1.33×')
+  assert.equal(formatRatio(0, 0), '—')
+  assert.equal(formatRatio(0, 3), '0.00×')
+})
+
+test('平均工具数只在有成功列工具时显示', () => {
+  assert.equal(formatAverageTools(5, 2), '5')
+  assert.equal(formatAverageTools(0, 0), '—')
 })
