@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-11-26（取消候选门槛：写入即 canonical，ADR-0014）
+
+- `feat(kb)`：worker 合并、MCP `kb_write_candidate` 与管理台新建/更新一律写 `tier=canonical`；已有节点（任意层级）不再跳过，继续追加式合并，`MergeReport.skipped_canonical` 与 CLI 的跳过计数一并删除。规格见 [tier-canonical-spec](plans/tier-canonical-spec.md)，决策见 [ADR-0014](decisions/ADR-0014-drop-candidate-tier-gate.md)。
+- `feat(mcp)`：`kb_update_candidate` / `kb_deprecate` 的边界从「只碰 candidate」改为「创建者 `mcp:<grant_id>` 一致」（PG 取 `kb_node_revisions` 最早一条 `actor`，文件存储取 `source` 中的调用者标记）；无创建者记录返回 `409/1010` `not_owner`，目标已 `deprecated` 返回 `409/1010` `deprecated_immutable`。正文哈希去重与 slug 比对集合改为同项目非 `deprecated` 节点，`slug_conflict_candidate` 只保留给历史存量 candidate 行；创建时修订记为 `actor=mcp:<grant_id>`、`reason=create`。
+- `feat(kb)`：`kb_search` 与 `/api/v1/kb/search` 的 `tier` 收敛为 `canonical`（默认，排除 `deprecated`）与 `all`；`candidate` 作为参数返回 `QueryError`（MCP `3004`、管理台 `422/1012`），无命中提示不再引导候选。管理台显式 `tier=candidate` 新建或更新返回 `422/1012`。
+- `feat(db)`：新增 Alembic `0003_canonical_tier`：存量 `candidate` 行改为 `canonical`、重算 `revision`，并追加 `actor=system`、`reason=ADR-0014` 的完整快照修订；`kb_nodes.tier` 列默认值改为 `canonical`。`downgrade` 恢复迁移前 tier/revision（迁移后又被写过的节点保持现状）并删除这批修订；`--sql` 离线模式只输出 DDL。
+- `feat(web)`：节点层级筛选与徽标只保留「有效 / 已废弃」，默认「有效」。
+- 契约与文档：`node-schema.md` §5、`mcp-tools.md` §1 与错误表（新增 `deprecated_immutable`）、`architecture.md`、`kb-admin-api.md`、`contracts/README.md` 同步；ADR-0006/0011/0012/0013 标注被 ADR-0014 修订。
+- RED：先写 `tests/contract/test_tier_canonical.py`、`test_tier_canonical_admin.py`、`test_tier_migration.py`，观察到目标失败：merge 写 `Tier.CANDIDATE`、MCP 返回 `not_candidate`、管理台接受 `candidate`（200）、迁移断言 `'candidate' != 'canonical'`、`0003` 缺失。
+- GREEN 与回归：同步更新断言旧行为的用例（MCP 写/更新/废弃、检索默认层、管理台、pipeline、daemon、collector 落库、模型列默认值）。
+- 验证（2026-11-26）：`pytest`（worktree，`.env` 提供 `MEMHUB_TEST_DB_URL`）607 passed / 1 skipped（skip 为未启动 MCP 服务器的无关用例，非本次范围）；`pnpm build` 通过；`ruff check`、`ruff format --check`、`mypy src` 通过。
+- ADR 检查：本变更实现 [ADR-0014](decisions/ADR-0014-drop-candidate-tier-gate.md)，未新增架构决策。
+
 ## 2026-11-26（worktree 目录统一为单数并禁止 EnterWorktree）
 
 - `docs(governance)`：[DEVELOPMENT](guides/DEVELOPMENT.md) §6 明确 worktree 目录只允许单数 `.claude/worktree/<主题>`，**禁止**用 `EnterWorktree` 工具创建 worktree（含其默认路径）：该工具的托管根硬编码为复数 `.claude/worktrees/`，传入任何自选路径都会被判为 permission-root relocation 而弹出手动确认，`permissions.allow` 与 CLAUDE.md 都无法消除。复数目录故意不加入 `.gitignore`，一旦出现即说明有工具路径绕过闭环，应删除并改用 `git worktree add`。
@@ -18,7 +31,6 @@
 ## 2026-11-26（意图判断与响应边界）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` 新增 §1.3「意图判断与响应边界」：接到消息先判断意图再动作，禁止在判断意图前建 worktree、改代码或开分支；现象描述、原因追问与现状核对默认只给诊断结论与根因，结论放前面；只有明确要求变更（「改一下」「修一下」「做吧」）或意图清楚指向实现才动手，不得把诊断自动升级成修复；意图含糊时先澄清需求与边界并给出可决策选项。ADR 检查：未命中（只约束响应方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。
-
 ## 2026-11-26（本地 Git 不问、验收后强制回 dev，资源占用约束）
 
 - `docs(governance)`：`CLAUDE.md` / `AGENTS.md` §2 把分支闭环与 Git 授权改为强制约束：任务验收后必须立即把特性分支经 `--no-ff` 合回 `dev`、切回 `dev`，然后删除该分支与自己的 worktree，不得以等待排期或「已提交」为由滞留；本地 Git 操作一律直接执行，禁止征求或等待负责人确认，只有远端操作需要当次授权。新增资源占用约束：验收前查看本项目标签页与进程，只按需启动，禁止多开标签页与常驻 Node/Python 服务进程，验收后全部关闭；多开并发需先确认。ADR 检查：未命中（只约束执行方式，不涉及部署拓扑、契约或密钥边界）。验证：纯文档修订，无业务 RED；`check_document_format.py`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_document_ownership.py --changed` 与 `git diff --check` 均通过。

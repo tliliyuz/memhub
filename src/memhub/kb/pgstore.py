@@ -325,6 +325,20 @@ class PgKnowledgeStore:
             stmt = select(KbNode.revision).where(KbNode.id == node_id, KbNode.archived_at.is_(None))
             return cast("str | None", await session.scalar(stmt))
 
+    async def creating_actor(self, node_id: str) -> str | None:
+        """创建者标记：`kb_node_revisions` 最早一条修订的 actor（ADR-0014）。
+
+        没有修订历史（历史直写行）返回 None，视为不可归属。
+        """
+        async with self._session() as session:
+            stmt = (
+                select(KbNodeRevision.actor)
+                .where(KbNodeRevision.node_id == node_id)
+                .order_by(KbNodeRevision.created_at.asc(), KbNodeRevision.id.asc())
+                .limit(1)
+            )
+            return cast("str | None", await session.scalar(stmt))
+
     async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]:
         async with self._session() as session:
             row = await session.get(KbNode, node_id)

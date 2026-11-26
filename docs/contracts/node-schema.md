@@ -1,6 +1,6 @@
 # 知识节点 Schema
 
-> 版本: 0.4（时间字段统一归一为 UTC；真源为 PostgreSQL `kb_*`，ADR-0013；文件投影已移除）
+> 版本: 0.5（ADR-0014：写入即 canonical，`candidate` 无写入路径，检索默认排除 `deprecated`；真源为 PostgreSQL `kb_*`，ADR-0013）
 > 适用范围：知识库真源（PG `kb_nodes`）、API 返回、MCP 输出、图谱查询共用同一套枚举。
 > 不负责：检索与工具接口（见 [mcp-tools.md](mcp-tools.md)）、采集协议（见 [ingest-api.md](ingest-api.md)）。
 
@@ -26,7 +26,7 @@ id: memory-hub                     # 全局唯一，<project>/<kind>/<slug>，�
 kind: entity                       # 必填，见枚举
 entity_kind: service               # kind=entity 时必填
 title: Memory Hub
-tier: candidate                    # candidate | canonical | deprecated
+tier: canonical                    # canonical | deprecated（candidate 仅保留枚举，无写入路径）
 confidence: 0.86                   # 0-1，抽取或人工确认时写入
 project: memory-hub                # 归属项目/库
 tags: [mcp, panel]
@@ -96,14 +96,16 @@ UTC 后存储；API 与 MCP 输出统一为 `Z` 后缀。这样同一输入不�
 
 | tier | 含义 | 谁可写 |
 |---|---|---|
-| `candidate` | 自动抽取，未经确认 | 提炼管线 / 治理 agent 直写 |
-| `canonical` | 已确认 | 治理 agent 提案 + 用户确认；或历史导入后人工确认 |
-| `deprecated` | 已过时（保留，不删除） | 治理 agent |
+| `canonical` | 有效知识；所有新节点默认写入此层 | 提炼管线 / MCP 写工具 / 管理台 |
+| `candidate` | 历史存量取值，枚举保留，**已无写入路径** | —— |
+| `deprecated` | 已过时（保留，不删除） | 管理台 / MCP 废弃工具 |
 
-规则：
-- 检索默认只返回 `canonical`；无命中时回退 `candidate` 并标注。
+规则（ADR-0014）：
+- 写入即生效：worker 抽取、MCP 写入与管理台新建一律落 `canonical`，不再经过「候选转正」。存量 `candidate` 由一次性数据迁移转 `canonical`，修订历史记 `actor=system`、`reason=ADR-0014`。
+- 检索默认排除 `deprecated`，即默认返回全部有效节点；显式要求时才包含 `deprecated`（见 [mcp-tools.md](mcp-tools.md) §1）。
 - 永不硬删；废弃用 `tier: deprecated`，并至少给出 `superseded_by`（有替代节点）或 `deprecated_reason`（结论被证伪、无替代物）。
-- 每次修改必须更新 `updated_at`，并在同一事务向 `kb_node_revisions` 追加一条修订（含 `before`/`after` 完整快照，`actor` 与 `reason`），取代原 markdown 的 `## Change Log` 与 git 提交。候选转正、tier 审批流仍由治理流程另行推进。
+- 每次修改必须更新 `updated_at`，并在同一事务向 `kb_node_revisions` 追加一条修订（含 `before`/`after` 完整快照，`actor` 与 `reason`），取代原 markdown 的 `## Change Log` 与 git 提交。
+- 节点级写权限：MCP 的更新与废弃工具只允许修改「创建者 `actor` 与调用方一致」的节点，创建者取 `kb_node_revisions` 中该节点最早一条修订的 `actor`（见 [mcp-tools.md](mcp-tools.md) §1.2）。管理台不受此限。
 
 ## 6. 投影
 

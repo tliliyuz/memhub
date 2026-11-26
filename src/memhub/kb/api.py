@@ -67,7 +67,7 @@ class NodeCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = ""
     project: str = "memhub"
-    tier: Tier = Tier.CANDIDATE
+    tier: Tier = Tier.CANONICAL
     tags: list[str] = Field(default_factory=list)
     entity_kind: EntityKind | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
@@ -255,6 +255,15 @@ def create_app(
         return JSONResponse(
             status_code=404,
             content={"code": 1011, "message": str(exc), "data": {}},
+        )
+
+    @app.exception_handler(query.QueryError)
+    async def on_query_error(_: Request, exc: Exception) -> JSONResponse:
+        if not isinstance(exc, query.QueryError):
+            raise exc
+        return JSONResponse(
+            status_code=422,
+            content={"code": int(ErrorCode.KB_INVALID), "message": str(exc), "data": {}},
         )
 
     @app.exception_handler(UploadInvalid)
@@ -473,7 +482,7 @@ def create_app(
         q: str,
         project: str | None = None,
         kinds: str | None = None,
-        tier: str = "all",
+        tier: str = "canonical",
         limit: int = Query(default=20, ge=1, le=50),
     ) -> dict[str, Any]:
         kind_list = [item for item in (kinds or "").split(",") if item] or None

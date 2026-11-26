@@ -70,7 +70,7 @@ class KbNode(Base):
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     entity_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    tier: Mapped[str] = mapped_column(Text, nullable=False, server_default="candidate")
+    tier: Mapped[str] = mapped_column(Text, nullable=False, server_default="canonical")
     confidence: Mapped[float | None] = mapped_column(Double, nullable=True)
     tags: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, server_default="{}")
     body: Mapped[str] = mapped_column(Text, nullable=False)

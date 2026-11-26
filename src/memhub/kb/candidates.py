@@ -1,11 +1,14 @@
-"""MCP 写候选：只创建 `tier=candidate` 节点，不动 canonical。
+"""MCP 写工具：写入即 `canonical`（ADR-0014），更新与废弃只限创建者本人。
 
 写路径复用存储对象的统一操作面（写作用域、归档门禁、原子写与提交），不新增
 第二个真源写者；文件版与 PG 版走同一份校验与拒绝码。拒绝都带稳定的
 `data.reason`（见 `docs/contracts/mcp-tools.md` §3）：
 
 - `slug_conflict_canonical` / `slug_conflict_candidate`：slug 已被占用，绝不覆盖。
-- `content_duplicate`：归一化正文哈希命中同项目已有候选。
+  `slug_conflict_candidate` 只适用于历史存量 `candidate` 行。
+- `content_duplicate`：归一化正文哈希命中同项目已有非 `deprecated` 节点。
+- `not_owner`：更新/废弃的目标不是本凭据创建的节点。
+- `deprecated_immutable`：目标已 `deprecated`，MCP 不可再改或重复废弃。
 - `evidence_missing` / `evidence_invalid` / `evidence_out_of_scope`：证据结构与归属。
 - `secret_detected`：证据、标题或正文命中敏感串形态。
 - `content_rejected`：过短、寒暄/确认、日志倾倒等可机械识别的垃圾。
@@ -201,13 +204,14 @@ def _daily_count(records: list[query.NodeRecord], grant_id: str, now: datetime) 
     return count
 
 
-async def _open_candidate(
+async def _open_owned(
     store: Storage,
     node_id: str,
     *,
+    grant_id: str,
     projects: frozenset[str] | None,
 ) -> tuple[NodeFrontmatter, str, str]:
-    """持锁后确认目标可用且仍是候选；返回 (frontmatter, 正文, 当前修订号)。
+    """持锁后确认目标可用、由调用方创建且仍可改；返回 (frontmatter, 正文, 当前修订号)。
 
     调用方必须已在写作用域内。越权与不存在一律按不存在处理，不泄露存在性。
     """
@@ -223,10 +227,10 @@ async def _open_candidate(
     if not await store.exists(node_id):
         raise NotFoundError(f"节点不存在: {node_id}")
     node, body = await store.read(node_id)
-    if node.tier is not Tier.CANDIDATE:
-        raise CandidateConflict(
-            "not_candidate", "只有 tier=candidate 的节点可以这样修改", {"id": node_id}
-        )
+    if await store.creating_actor(node_id) != f"mcp:{grant_id}":
+        raise CandidateConflict("not_owner", "只能修改自己创建的节点", {"id": node_id})
+    if node.tier is Tier.DEPRECATED:
+        raise CandidateConflict("deprecated_immutable", "已废弃的节点不可再修改", {"id": node_id})
     revision = await node_revision(store, node_id)
     assert revision is not None
     return node, body, revision
@@ -249,12 +253,12 @@ async def _body_taken_by_other(
     body: str,
     projects: frozenset[str] | None,
 ) -> bool:
-    """同项目内是否已有其它候选使用归一化后相同的正文。"""
+    """同项目内是否已有其它非 `deprecated` 节点使用归一化后相同的正文。"""
     records = await query.records(store.scoped_reader(projects))
     digest = _content_digest(body)
     return any(
         record.id != node_id
-        and record.node.tier is Tier.CANDIDATE
+        and record.node.tier is not Tier.DEPRECATED
         and record.id.split("/", 1)[0] == project
         and _content_digest(record.body) == digest
         for record in records
@@ -268,10 +272,12 @@ async def update_candidate(
     grant_id: str,
     projects: frozenset[str] | None,
 ) -> dict[str, Any]:
-    """按修订号更新自己的候选；只改标题、正文、标签与置信度。"""
+    """按修订号更新自己创建的节点；只改标题、正文、标签与置信度。"""
     node_id = draft.id
     async with store.write_scope(timeout=0):
-        node, body, revision = await _open_candidate(store, node_id, projects=projects)
+        node, body, revision = await _open_owned(
+            store, node_id, grant_id=grant_id, projects=projects
+        )
         _require_revision(node_id, draft.expected_revision, revision)
 
         title = node.title if draft.title is None else draft.title
@@ -284,7 +290,7 @@ async def update_candidate(
             body=new_body,
             projects=projects,
         ):
-            raise CandidateConflict("content_duplicate", "同项目已存在正文相同的候选")
+            raise CandidateConflict("content_duplicate", "同项目已存在正文相同的节点")
 
         data = node.model_dump(mode="json")
         data["id"] = node_id
@@ -298,15 +304,15 @@ async def update_candidate(
             updated = NodeFrontmatter.model_validate(data)
         except ValueError as exc:
             raise _reject("content_rejected", "更新后的元数据不满足节点契约") from exc
-        await store.write(node_id, updated, new_body)
+        await store.write(node_id, updated, new_body, actor=f"mcp:{grant_id}", reason="update")
         new_revision = await node_revision(store, node_id)
         commit = await store.commit(
-            f"kb: 更新候选 kb_update_candidate {node_id} mcp:{grant_id}",
+            f"kb: 更新 kb_update_candidate {node_id} mcp:{grant_id}",
             node_path=f"{node_id}.md",
         )
     return {
         "id": node_id,
-        "tier": Tier.CANDIDATE.value,
+        "tier": updated.tier.value,
         "revision": new_revision,
         "commit": commit,
     }
@@ -319,11 +325,13 @@ async def deprecate_candidate(
     grant_id: str,
     projects: frozenset[str] | None,
 ) -> dict[str, Any]:
-    """把候选标为 deprecated 并保留文件；替代节点可省，原因必留。"""
+    """把节点标为 deprecated 并保留文件；替代节点可省，原因必留。"""
     node_id = draft.id
     reason = draft.reason.strip()
     async with store.write_scope(timeout=0):
-        node, body, revision = await _open_candidate(store, node_id, projects=projects)
+        node, body, revision = await _open_owned(
+            store, node_id, grant_id=grant_id, projects=projects
+        )
         _require_revision(node_id, draft.expected_revision, revision)
 
         successor = draft.superseded_by
@@ -351,15 +359,15 @@ async def deprecate_candidate(
             new_body = body.rstrip() + f"\n\n## 废弃说明\n\n{reason}（mcp:{grant_id}）\n"
             if len(new_body.strip()) > MAX_BODY:
                 raise _reject("content_rejected", f"追加废弃说明后正文超过 {MAX_BODY} 字符")
-        await store.write(node_id, updated, new_body)
+        await store.write(node_id, updated, new_body, actor=f"mcp:{grant_id}", reason="deprecate")
         new_revision = await node_revision(store, node_id)
         commit = await store.commit(
-            f"kb: 废弃候选 kb_deprecate {node_id} mcp:{grant_id}",
+            f"kb: 废弃 kb_deprecate {node_id} mcp:{grant_id}",
             node_path=f"{node_id}.md",
         )
     return {
         "id": node_id,
-        "tier": Tier.DEPRECATED.value,
+        "tier": updated.tier.value,
         "revision": new_revision,
         "commit": commit,
     }
@@ -372,7 +380,7 @@ async def create_candidate(
     grant_id: str,
     projects: frozenset[str] | None,
 ) -> dict[str, Any]:
-    """校验并创建一个候选节点；成功即提交一次真源 git commit。"""
+    """校验并创建一个 `canonical` 节点；成功即提交一次真源 git commit。"""
     _check_project(draft.project, projects)
     _check_content(draft)
 
@@ -400,12 +408,12 @@ async def create_candidate(
         records = await query.records(reader)
         digest = _content_digest(draft.body)
         if any(
-            record.node.tier is Tier.CANDIDATE
+            record.node.tier is not Tier.DEPRECATED
             and record.id.split("/", 1)[0] == draft.project
             and _content_digest(record.body) == digest
             for record in records
         ):
-            raise CandidateConflict("content_duplicate", "同项目已存在正文相同的候选")
+            raise CandidateConflict("content_duplicate", "同项目已存在正文相同的节点")
         now = datetime.now(UTC)
         if _daily_count(records, grant_id, now) >= DAILY_LIMIT:
             raise CandidateConflict(
@@ -419,7 +427,7 @@ async def create_candidate(
             id=node_id,
             kind=draft.kind,
             title=draft.title.strip(),
-            tier=Tier.CANDIDATE,
+            tier=Tier.CANONICAL,
             confidence=draft.confidence,
             project=draft.project,
             tags=draft.tags,
@@ -427,11 +435,11 @@ async def create_candidate(
             created_at=now,
             updated_at=now,
         )
-        await store.write(node_id, node, draft.body)
+        await store.write(node_id, node, draft.body, actor=f"mcp:{grant_id}", reason="create")
         revision = await node_revision(store, node_id)
         commit = await store.commit(
-            f"kb: 写入候选 kb_write_candidate {node_id} mcp:{grant_id}",
+            f"kb: 写入 kb_write_candidate {node_id} mcp:{grant_id}",
             node_path=f"{node_id}.md",
         )
 
-    return {"id": node_id, "tier": Tier.CANDIDATE.value, "revision": revision, "commit": commit}
+    return {"id": node_id, "tier": Tier.CANONICAL.value, "revision": revision, "commit": commit}

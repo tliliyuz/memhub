@@ -29,7 +29,7 @@ import anyio
 import frontmatter
 from anyio import Path as AsyncPath
 
-from memhub.contract import Edge, NodeFrontmatter, valid_project
+from memhub.contract import Edge, NodeFrontmatter, SourceKind, valid_project
 from memhub.kb import proc
 from memhub.kb.errors import (
     InvalidError,
@@ -262,6 +262,22 @@ class KnowledgeStore:
         if not await AsyncPath(path).is_file():
             return None
         return await revision_of(path)
+
+    async def creating_actor(self, node_id: str) -> str | None:
+        """创建者标记：`source` 里的 `mcp:<grant_id>`，没有则不可归属。
+
+        文件版没有修订历史落点（`write` 的 `actor` 不存盘），MCP 创建节点时
+        写入的 manual 来源就是创建者证据；worker、管理台与迁移写入没有该标记，
+        返回 None。PG 版以 `kb_node_revisions` 最早一条 `actor` 为准。
+        """
+        try:
+            node, _ = await self.read(node_id)
+        except (OSError, ValueError):
+            return None
+        for source in node.source:
+            if source.type is SourceKind.MANUAL and source.ref.startswith("mcp:"):
+                return source.ref
+        return None
 
     async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]:
         text = await AsyncPath(self.path_for(node_id)).read_text(encoding="utf-8")

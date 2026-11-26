@@ -102,7 +102,7 @@ class NodeFrontmatter(BaseModel):
     kind: Kind
     entity_kind: EntityKind | None = None
     title: str
-    tier: Tier = Tier.CANDIDATE
+    tier: Tier = Tier.CANONICAL
     confidence: float | None = Field(default=None, ge=0, le=1)
     project: str
     tags: list[str] = Field(default_factory=list)

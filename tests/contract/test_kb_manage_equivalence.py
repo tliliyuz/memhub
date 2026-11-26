@@ -69,7 +69,7 @@ async def test_create_read_update_round_trip(
 
     node, body = await store.read(node_id)
     assert node.title == "HTTPX trust_env 导致代理 502"
-    assert node.tier is Tier.CANDIDATE
+    assert node.tier is Tier.CANONICAL
     assert node.tags == ["httpx"]
     assert body.rstrip() == BODY.rstrip()
 

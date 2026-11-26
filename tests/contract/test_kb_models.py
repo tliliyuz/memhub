@@ -111,7 +111,7 @@ async def test_column_defaults(engine: AsyncEngine) -> None:
         node = await session.get(KbNode, "demo/fact/alpha")
         project = await session.get(KbProject, "demo")
     assert node is not None and project is not None
-    assert node.tier == "candidate"
+    assert node.tier == "canonical"
     assert node.tags == []
     assert node.source == []
     assert node.supersedes == []

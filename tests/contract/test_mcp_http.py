@@ -271,7 +271,7 @@ async def test_sdk_write_scope_exposes_and_executes_candidate_tool(
                 assert not result.is_error
                 payload = json.loads(result.content[0].text)
                 assert payload["id"] == "sample/fact/http-write"
-                assert payload["tier"] == "candidate"
+                assert payload["tier"] == "canonical"
 
                 read = await client.call_tool("kb_read", {"id": payload["id"]})
                 assert not read.is_error

@@ -82,7 +82,7 @@ async def test_extract_normalizes_and_drops_unsourced_edges() -> None:
     assert len(extraction.edges) == 1
 
 
-async def test_merge_creates_updates_and_protects_canonical(tmp_path: Path) -> None:
+async def test_merge_creates_updates_and_merges_existing_canonical(tmp_path: Path) -> None:
     store = await _demo_store(tmp_path)
     source = SourceRef(type=SourceKind.SESSION, ref="s1")
     now = datetime(2026, 11, 18, tzinfo=UTC)
@@ -102,10 +102,16 @@ async def test_merge_creates_updates_and_protects_canonical(tmp_path: Path) -> N
     assert body.count("## 症状") == 1, "重复抽取不得重复追加正文"
     assert len(node.source) == 1, "同一来源不重复记录"
 
+    # ADR-0014：已有 canonical 节点不再跳过，继续走追加式合并。
     node.tier = Tier.CANONICAL
     await store.write(node.id, node, body)
     third = await merge(store, extraction, project="demo", source=source, now=now)
-    assert "demo/pitfall/proxy-502-two-causes" in third.skipped_canonical
+    assert third.created == []
+    assert "demo/pitfall/proxy-502-two-causes" in third.updated
+    assert not hasattr(third, "skipped_canonical")
+    third_node, third_body = await store.read("demo/pitfall/proxy-502-two-causes")
+    assert third_node.tier is Tier.CANONICAL
+    assert third_body.count("## 症状") == 1
 
 
 async def test_merge_persists_resolved_edges(tmp_path: Path) -> None:
@@ -270,7 +276,7 @@ async def test_session_candidates_require_exact_support_and_live_endpoints(tmp_p
     assert report.created == ["demo/decision/read-only", "demo/procedure/snapshot"]
     assert report.edges_added == 1
     node, body = await store.read("demo/decision/read-only")
-    assert node.tier == Tier.CANDIDATE and node.source == [source]
+    assert node.tier == Tier.CANONICAL and node.source == [source]
     assert quote not in body
 
 
