@@ -114,6 +114,7 @@ worktree 闭环（硬约束）：
 - `main` 是稳定分支，只有负责人明确允许后才能合入；发版只从 `main` 出，不从特性分支或 worktree 出。`dev` 是日常开发的集成分支，`dev` 合入 `main` 由负责人决定。
 - **所有**代码修改（含功能、Bug 修复、文档与治理变更）都在从 `dev` 创建的独立分支 + 独立 worktree 中完成，禁止直接在 `main` 或 `dev` 上实现。例外：负责人对当次操作显式授权的直提（如小型仓库的急救修复）。
 - worktree 必须由 `git worktree add .claude/worktree/<主题> -b <分支> dev` 创建；复制目录、只切分支不建 worktree 均不满足闭环。
+- worktree 目录只允许单数 `.claude/worktree/<主题>`；**禁止**用 `EnterWorktree` 工具创建 worktree（含其默认路径）：该工具的托管根硬编码为复数 `.claude/worktrees/`，传入任何自选路径都会被判为 permission-root relocation 而弹出手动确认，`permissions.allow` 与 CLAUDE.md 都无法消除。复数目录故意不加入 `.gitignore`：一旦出现 `.claude/worktrees/`，说明有工具路径绕过本闭环，应删除并改用 `git worktree add`。
 - 完成后：验证 → 提交 → 合并回 `dev` → `git worktree remove` + `git branch -d` 清理，不长期停留在特性分支 → 在 [CHANGELOG](../CHANGELOG.md) 记录实际变化；涉及迁移的，同时记录迁移态六要素。
 
 ## 7. 依赖引入

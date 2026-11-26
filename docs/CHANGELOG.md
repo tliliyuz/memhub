@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-26（worktree 目录统一为单数并禁止 EnterWorktree）
+
+- `docs(governance)`：[DEVELOPMENT](guides/DEVELOPMENT.md) §6 明确 worktree 目录只允许单数 `.claude/worktree/<主题>`，**禁止**用 `EnterWorktree` 工具创建 worktree（含其默认路径）：该工具的托管根硬编码为复数 `.claude/worktrees/`，传入任何自选路径都会被判为 permission-root relocation 而弹出手动确认，`permissions.allow` 与 CLAUDE.md 都无法消除。复数目录故意不加入 `.gitignore`，一旦出现即说明有工具路径绕过闭环，应删除并改用 `git worktree add`。
+- `chore(ignore)`：`.gitignore` 新增 `.claude/worktree/`。此前该规则只在本机 `.git/info/exclude`，属于个人环境而非仓库事实，克隆到其他机器后 worktree 目录会直接显示为未跟踪；入库后移除本地重复条目，避免两处规则漂移。
+- 清理：DynamicFocusGroup 仓内 3 个 `worktree-*` 分支的 worktree 与 `board-flow-visual` 残留副本已删除，`git worktree prune` 后注册表无复数条目。
+- 验证（2026-11-26，worktree `docs/worktree-singular`）：`check_document_format.py`、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py`、`check_adr_governance.py`、`check_env_example_keys.py` 与 `git diff --check` 通过；`git check-ignore .claude/worktree/worktree-singular` 命中新规则、`.claude/worktrees/x` 不被忽略（符合「复数可见」设计）。ADR 检查：未命中（只约束 worktree 工具路径与忽略规则，不涉及部署拓扑、契约或密钥边界）。
+
 ## 2026-11-26（ADR 重编号为 0015 并转 accepted；门禁自检修复）
 
 - `docs(adr)`：MCP 调用轨迹 ADR 由 `ADR-0014-mcp-call-trace.md` 重编号为 [ADR-0015](decisions/ADR-0015-mcp-call-trace.md)，状态由 `proposed` 转 `accepted`（负责人裁决）。另一份 `ADR-0014-drop-candidate-tier-gate.md` 保持原编号；两份 ADR 此前同时占用 0014，索引与仓库内引用均按本次裁决更新。
