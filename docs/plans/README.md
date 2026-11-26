@@ -8,5 +8,6 @@
 | [kb-pg-migration-spec.md](kb-pg-migration-spec.md) | specified | 知识真源迁到 PostgreSQL 的数据模型、边界、迁移与验收规格（承接 [ADR-0013](../decisions/ADR-0013-postgres-source-of-truth.md)） |
 | [mcp-trace-spec.md](mcp-trace-spec.md) | draft | MCP 调用轨迹的数据模型、记录语义、可靠落库、保留期与管理台验收规格（承接 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)） |
 | [tier-canonical-spec.md](tier-canonical-spec.md) | specified | 取消候选门槛：写入即 canonical、检索默认排除 deprecated、MCP 创建者边界与存量迁移（承接 [ADR-0014](../decisions/ADR-0014-drop-candidate-tier-gate.md)） |
+| [long-term-memory-spec.md](long-term-memory-spec.md) | specified | 长期记忆的表结构、聚合门槛、快照发布、会话抽取注入、审计与管理台（承接 [ADR-0016](../decisions/ADR-0016-long-term-memory.md)） |
 
 约定：规格在负责人评审通过前保持 `draft`；获批后改为 `specified`，实现以规格导出的验收测试为准（见 [DEVELOPMENT](../guides/DEVELOPMENT.md) §4）。

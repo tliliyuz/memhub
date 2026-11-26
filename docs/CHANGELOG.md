@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-26（长期记忆：ADR 转 accepted 并进入实施规格）
+
+- `docs(adr)`：ADR-0016 由 `proposed` 转为 `accepted`，索引同步。负责人当次指示继续实现；本轮按 ADR 默认值落规格，不另行调整方向。
+- `docs(plans)`：新增 [long-term-memory-spec.md](plans/long-term-memory-spec.md)，状态 `specified`。规格确定四张表（条目/修订/快照/候选）、聚合门槛、快照发布/回滚/停用入口、会话抽取注入参数与审计字段、管理 API 与管理台页面；MCP 第一期不暴露记忆。
+- 范围：本轮进入测试与实现，仍只做 ADR 第一期（会话抽取注入），不含 MCP 只读工具、影子抽取与向量检索。
+- 验证：纯文档变更，无业务 RED；执行 `git diff --check`、`check_adr_governance.py`、`check_document_format.py`、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`（若动键集）并在提交信息中记录实际结果。
+
 ## 2026-11-26（长期记忆子系统 ADR 草案）
 
 - `docs(adr)`：新增 [ADR-0016](decisions/ADR-0016-long-term-memory.md)「长期记忆独立成域，并反向注入会话抽取」，状态 `proposed`。裁决要点：长期记忆与 `kb_*` 知识库分层，不新增 `Kind`、不作为采集目标、不进项目库检索；由周期聚合任务以跨项目 canonical 节点为主证据提炼，门槛为 ≥3 个独立会话且 ≥2 个项目；记忆按版本化快照周发布，第一期只注入会话抽取提示词，每次抽取记录所用记忆版本；聚合任务自身不读记忆，避免自证循环。备选方案（新 `Kind`+`global` 库、每项目各存、`scope` 字段、抽取时产出、立即生效、原始会话为主证据）均已记录否决理由。

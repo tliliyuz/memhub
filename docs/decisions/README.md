@@ -20,7 +20,7 @@
 | [ADR-0011](ADR-0011-mcp-write-candidate.md) | MCP 第一阶段只开放写候选 | accepted |
 | [ADR-0012](ADR-0012-candidate-update-and-deprecate.md) | 候选区闭环：允许更新与废弃自己的候选 | accepted |
 | [ADR-0015](ADR-0015-mcp-call-trace.md) | MCP 调用轨迹落库，治理台可见 | accepted |
-| [ADR-0016](ADR-0016-long-term-memory.md) | 长期记忆独立成域，并反向注入会话抽取 | proposed |
+| [ADR-0016](ADR-0016-long-term-memory.md) | 长期记忆独立成域，并反向注入会话抽取 | accepted |
 
 模板：
 
