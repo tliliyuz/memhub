@@ -83,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     token.add_argument("--name", default=None, help="凭据展示名，可选")
     token.add_argument("--projects", required=True, help="逗号分隔的知识库 id，至少一个")
     token.add_argument("--scope", choices=["read", "write"], default="read")
+    token.add_argument(
+        "--memory", action="store_true", help="允许读取已发布的跨项目长期记忆（默认关闭）"
+    )
     token.add_argument("--days", type=int, default=90, help="有效期天数（默认 90）")
     token.add_argument("--json", action="store_true", help="输出单行 JSON，供脚本读取")
 
@@ -487,6 +490,7 @@ def _mcp_token(args: argparse.Namespace) -> int:
             expires_at=expires_at,
             projects=frozenset(projects),
             name=args.name,
+            memory=args.memory,
         )
     except ValidationError as exc:
         print(f"参数无效，未生成令牌：{exc}", file=sys.stderr)
@@ -497,6 +501,7 @@ def _mcp_token(args: argparse.Namespace) -> int:
         "expires_at": grant.expires_at.isoformat(),
         "projects": projects,
         "name": grant.name,
+        "memory": grant.memory,
     }
     if args.json:
         print(json.dumps({"token": token_value, "grant": payload}, ensure_ascii=False))
