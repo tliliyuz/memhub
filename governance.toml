@@ -85,10 +85,9 @@ patterns = ["docs/", "policy/", "*.md", "AGENTS.md", "CLAUDE.md", "README.md", "
 name = "kb"
 patterns = ["kb/", "data/"]
 
+# 门禁接线与治理配置同属一层：平台 sync 会同时改写 .claude/ 受管副本、
+# AGENTS/CLAUDE 受管块与 pre-commit 豁免，拆层会让同步无法按依赖链形成
+# 一个能通过 contract_pack 的提交。
 [[atomic.layer]]
 name = "ci"
-patterns = ["scripts/", ".github/", ".claude/", ".gitignore", ".gitattributes", ".editorconfig"]
-
-[[atomic.layer]]
-name = "governance"
-patterns = ["governance.toml", ".pre-commit-config.yaml"]
+patterns = ["scripts/", ".github/", ".claude/", ".gitignore", ".gitattributes", ".editorconfig", "governance.toml", ".pre-commit-config.yaml"]

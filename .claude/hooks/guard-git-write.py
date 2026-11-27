@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
-"""Claude Code PreToolUse 钩子：Git 远端操作防呆。
+"""Claude Code PreToolUse 钩子：git 远端操作与提交署名防呆。
 
 由 `.claude/settings.json` 注册，经 stdin 读取 hook JSON（官方 schema：
-`tool_input.command`）。把 DEVELOPMENT §6 的 Git 纪律机器化：
+`tool_input.command`）。把治理基线（policy/CORE_RULES.md）的 Git 纪律机器化：
 
-DEVELOPMENT §6 规定「Git 本地写操作默认授权，仅远端操作需要负责人针对当前
-操作明确授权」，因此本钩子只拦截远端操作。`git status && git push` 这类复合
-命令会按 `&&` `||` `;` `|` 切段分别判定，不会因为前半段放行就整条放行。
-
-裁决分两档：
-- 只读子命令与全部本地写操作（`add` / `commit` / `merge` / `rebase` /
-  `switch` / `reset --hard` / `clean -f` / `worktree` / `branch` / `tag` 等）
-  → 直接放行。本地不可逆操作的数据安全由 DEVELOPMENT §6 的文本约束负责，
-  不再逐条弹窗。
-- **远端操作**（`push` / `fetch` / `pull` / `clone` / `ls-remote` / `remote`
-  改写 / `send-email` / `request-pull` / `lfs` 远端动作 / `archive --remote`
-  等）→ 返回 `ask`，由权限层请负责人当场确认。
-
-本仓 DEVELOPMENT §5 有意不禁止 `Co-Authored-By` 署名，因此钩子不做署名拦截。
+1. 禁止任何 `Co-Authored-By` 署名（不区分署名工具，基线 §7）；
+2. 基线 §5 规定「Git 本地写操作默认授权，仅远端操作需要负责人针对当前
+   操作明确授权」，因此本钩子只拦截远端操作。`git status && git push` 这类复合
+   命令会按 `&&` `||` `;` `|` 切段分别判定，不会因为前半段放行就整条放行。
+3. `--no-verify`（含 `git commit -n`）绕过全部治理门禁，转 `ask` 交负责人
+   针对当前命令裁决：它属于可裁决动作，而不是像署名那样不可协商。
+4. 输出分档：
+   - 只读子命令与全部本地写操作（`add` / `commit` / `merge` / `rebase` /
+     `switch` / `reset --hard` / `clean -f` / `worktree` / `branch` / `tag` 等）
+     → 直接放行。本地不可逆操作的数据安全由基线 §5 的文本约束负责，
+     不再逐条弹窗。
+   - **远端操作**（`push` / `fetch` / `pull` / `clone` / `ls-remote` / `remote`
+     改写 / `send-email` / `request-pull` / `lfs` 远端动作 / `archive --remote`
+     等）→ 返回 `ask`，由权限层请负责人当场确认。
 
 实现注意：只把「段首（允许 `VAR=值` 前缀）就是 `git`」的段当作 git 命令，
 否则 `grep "git push" docs/` 这类包含文本的命令会被误拦。
 
-输出约定（官方 PreToolUse 语义）：打印 `permissionDecision: ask` 交由权限层
-请负责人确认，并以 `permissionDecisionReason` 回传理由。无输出则放行。
+输出约定（官方 PreToolUse 语义）：打印 `permissionDecision: deny` 阻止调用，
+`permissionDecision: ask` 交由权限层请负责人确认；两者都以
+`permissionDecisionReason` 回传理由。无输出则放行。
 
 用 Python 而不是 bash + jq：本仓开发环境是 Windows，不保证 jq 存在；
 钩子失效会让门禁静默失效，比钩子本身慢一点更糟。
@@ -35,6 +36,14 @@ import json
 import re
 import shlex
 import sys
+from pathlib import Path
+
+# 与 commit-msg 门禁同口径：署名是「行首的 trailer 键」，
+# 提交消息正文里提到这条规则不算署名。
+SIGNATURE_RE = re.compile(r"^co-authored-by:", re.IGNORECASE | re.MULTILINE)
+
+# 会记录提交 / 合并 / 标签信息的子命令：署名只可能通过它们的消息正文进入仓库。
+MESSAGE_SUBCOMMANDS = frozenset({"commit", "merge", "tag", "notes"})
 
 # 复合命令按 shell 分隔符切段后逐段判定。切分必须感知引号：否则
 # `grep -rn "git push" docs/` 会在引号内的 `|`（或 `&&`）处被切断，
@@ -75,38 +84,12 @@ READ_ONLY_SUBCOMMANDS = frozenset(
 # 才算只读；这与「参数白名单」不同：`git config --get user.name` 里的 `user.name`
 # 是值不是选项，必须允许。
 LIST_FLAGS = {
-    "tag": (
-        "-l",
-        "--list",
-        "-v",
-        "--verify",
-        "-n",
-        "--sort",
-        "--format",
-        "--contains",
-        "--points-at",
-        "--merged",
-        "--no-merged",
-        "--column",
-        "--no-column",
-    ),
-    "branch": (
-        "-a",
-        "--all",
-        "-r",
-        "--remotes",
-        "-v",
-        "--verbose",
-        "--list",
-        "--show-current",
-        "--contains",
-        "--merged",
-        "--no-merged",
-        "--format",
-        "--sort",
-        "--column",
-        "--no-column",
-    ),
+    "tag": ("-l", "--list", "-v", "--verify", "-n", "--sort", "--format",
+            "--contains", "--points-at", "--merged", "--no-merged",
+            "--column", "--no-column"),
+    "branch": ("-a", "--all", "-r", "--remotes", "-v", "--verbose", "--list",
+               "--show-current", "--contains", "--merged", "--no-merged",
+               "--format", "--sort", "--column", "--no-column"),
     "remote": ("-v", "--verbose", "get-url"),
     "config": ("--get", "--get-all", "--get-regexp", "--list", "-l"),
     "stash": ("list", "show"),
@@ -116,62 +99,27 @@ LIST_FLAGS = {
 
 # 写类参数：出现即判定为非只读，优先于列举参数。
 WRITE_FLAGS = {
-    "tag": (
-        "-d",
-        "--delete",
-        "-a",
-        "--annotate",
-        "-f",
-        "--force",
-        "-m",
-        "--message",
-        "-F",
-        "--file",
-        "-s",
-        "--sign",
-        "-u",
-        "--local-user",
-        "-e",
-        "--edit",
-    ),
-    "branch": (
-        "-d",
-        "-D",
-        "--delete",
-        "-m",
-        "-M",
-        "--move",
-        "-c",
-        "-C",
-        "--copy",
-        "-f",
-        "--force",
-        "-u",
-        "--set-upstream-to",
-        "--unset-upstream",
-        "--edit-description",
-        "--create-reflog",
-        "--track",
-        "--no-track",
-    ),
-    "remote": ("add", "remove", "rm", "rename", "set-url", "set-head", "prune", "update"),
-    "config": (
-        "--unset",
-        "--unset-all",
-        "--add",
-        "--replace-all",
-        "--rename-section",
-        "--remove-section",
-        "--edit",
-        "-e",
-    ),
-    "stash": ("save", "push", "pop", "apply", "drop", "clear", "create", "store", "branch"),
+    "tag": ("-d", "--delete", "-a", "--annotate", "-f", "--force", "-m",
+            "--message", "-F", "--file", "-s", "--sign", "-u", "--local-user",
+            "-e", "--edit"),
+    "branch": ("-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C",
+               "--copy", "-f", "--force", "-u", "--set-upstream-to",
+               "--unset-upstream", "--edit-description", "--create-reflog",
+               "--track", "--no-track"),
+    "remote": ("add", "remove", "rm", "rename", "set-url", "set-head",
+               "prune", "update"),
+    "config": ("--unset", "--unset-all", "--add", "--replace-all", "--rename-section",
+               "--remove-section", "--edit", "-e"),
+    "stash": ("save", "push", "pop", "apply", "drop", "clear", "create", "store",
+              "branch"),
     "reflog": ("expire", "delete", "drop"),
     "submodule": ("add", "init", "update", "deinit", "foreach", "sync", "absorbgitdirs"),
 }
 
 # 无参数即为只读（列目录、看历史）；`stash` 不在此列 —— 裸 `git stash` 是保存改动。
-EMPTY_IS_READ_ONLY = frozenset({"tag", "branch", "remote", "config", "reflog", "submodule"})
+EMPTY_IS_READ_ONLY = frozenset(
+    {"tag", "branch", "remote", "config", "reflog", "submodule"}
+)
 
 # 影响远端：一律交回权限层，与本地操作分开授权。
 REMOTE_SUBCOMMANDS = frozenset(
@@ -209,9 +157,10 @@ CALL_OPERATORS = frozenset({"&", "."})
 def emit_decision(decision: str, reason: str) -> None:
     """输出 PreToolUse 决策。
 
+    `deny` 用于不可协商项（署名），直接阻断且无放行通道。
     `ask` 用于远端 git 操作：钩子读不到对话内容，也无法区分「负责人当次批准」与
     「Agent 自称已批准」，因此把判断交回 Claude Code 的权限层，由负责人对**这一条
-    命令**当场确认。批准即构成 DEVELOPMENT §6 要求的「针对当前操作的明确授权」，
+    命令**当场确认。批准即构成基线 §5 要求的「针对当前操作的明确授权」，
     不会扩散到后续远端命令。本地操作不再经过本钩子询问。
     """
     payload = json.dumps(
@@ -226,7 +175,7 @@ def emit_decision(decision: str, reason: str) -> None:
         ensure_ascii=False,
     )
     # Windows 下 sys.stdout 默认是 cp936，中文理由会变成乱码送到 Claude Code。
-    # 显式写 UTF-8 字节，保证钩子输出在所有平台可读。
+    # 显式写 UTF-8 字节，保证勾子输出在所有平台可读。
     sys.stdout.buffer.write(payload.encode("utf-8"))
     sys.stdout.buffer.flush()
 
@@ -250,7 +199,9 @@ def split_segments(command: str) -> list[str]:
             buffer.append(char)
             index += 1
             continue
-        matched = next((op for op in SEGMENT_OPERATORS if command.startswith(op, index)), None)
+        matched = next(
+            (op for op in SEGMENT_OPERATORS if command.startswith(op, index)), None
+        )
         if matched:
             segments.append("".join(buffer))
             buffer = []
@@ -322,7 +273,11 @@ def is_read_only(subcommand: str, args: list[str]) -> bool:
         if any(arg == flag or arg.startswith(flag) for flag in write_flags):
             return False
     # 有列举参数即可判定只读；剩余 token 是值或引用（`user.name`、`origin`）而非动作。
-    return any(arg == flag or arg.startswith(flag) for arg in args for flag in list_flags)
+    return any(
+        arg == flag or arg.startswith(flag)
+        for arg in args
+        for flag in list_flags
+    )
 
 
 def is_remote_operation(subcommand: str, args: list[str]) -> bool:
@@ -336,12 +291,99 @@ def is_remote_operation(subcommand: str, args: list[str]) -> bool:
     return False
 
 
+def flag_value(arg: str, short: str, long: str) -> tuple[bool, str | None]:
+    """匹配 `-m msg` / `-mmsg` / `-am msg` / `-ammsg` / `--message=msg` 形式。"""
+    if arg == short or arg == long:
+        return True, None
+    if arg.startswith(long + "="):
+        return True, arg[len(long) + 1 :]
+    if len(arg) > 1 and arg[0] == "-" and arg[1] != "-" and short[1] in arg[1:]:
+        position = arg.index(short[1], 1)
+        return True, arg[position + 1 :] or None
+    return False, None
+
+
+def read_message_file(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def message_payloads(subcommand: str, args: list[str]) -> list[str]:
+    """提取会写入仓库的提交消息正文（`-m` / `-F`）。
+
+    署名只可能通过消息正文进入仓库，因此不能按整条命令做子串匹配：
+    `git log --grep=...` 与 `git commit -m "…提到某个署名…"` 都含同样的字样，
+    却不会产生署名行。`-F -` 从 stdin 读取，钩子看不到内容，由 commit-msg
+    阶段的门禁兜底。
+    """
+    if subcommand not in MESSAGE_SUBCOMMANDS:
+        return []
+    payloads: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        matched, inline = flag_value(arg, "-m", "--message")
+        if matched:
+            if inline is not None:
+                payloads.append(inline)
+                index += 1
+            elif index + 1 < len(args):
+                payloads.append(args[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        matched, inline = flag_value(arg, "-F", "--file")
+        if matched:
+            if inline is not None:
+                payloads.append(read_message_file(inline))
+                index += 1
+            elif index + 1 < len(args):
+                payloads.append(read_message_file(args[index + 1]))
+                index += 2
+            else:
+                index += 1
+            continue
+        index += 1
+    return payloads
+
+
+def has_co_author_signature(command: str) -> bool:
+    """只在提交类子命令的消息正文里找行首署名。"""
+    for segment in split_segments(command):
+        parsed = parse_git_segment(segment)
+        if parsed is None:
+            continue
+        subcommand, args = parsed
+        for payload in message_payloads(subcommand, args):
+            if SIGNATURE_RE.search(payload):
+                return True
+    return False
+
+
+def bypasses_hooks(subcommand: str, args: list[str]) -> bool:
+    """是否要求跳过 Git 钩子。
+
+    只认长选项 `--no-verify` 与 `commit` 的独立短选项 `-n`；不做子串匹配，
+    避免提交消息里出现同样字样被误判。
+    """
+    for arg in args:
+        if arg == "--no-verify":
+            return True
+        if subcommand == "commit" and arg == "-n":
+            return True
+    return False
+
+
 def classify(command: str) -> tuple[str, str] | None:
     """返回 (决策, 理由)；整条命令都在放行范围时返回 None。
 
     放行：只读子命令与全部本地写操作（`add` / `commit` / `merge` / `rebase` /
     `reset --hard` / `clean -f` / `worktree` / `branch` 等）。
-    `ask`：访问或改写远端的子命令（`push` / `fetch` / `pull` / `remote` 等）。
+    `ask`：访问或改写远端的子命令（`push` / `fetch` / `pull` / `remote` 等），
+    以及跳过门禁的 `--no-verify`。
     """
     for segment in split_segments(command):
         parsed = parse_git_segment(segment)
@@ -351,11 +393,19 @@ def classify(command: str) -> tuple[str, str] | None:
         if is_read_only(subcommand, args):
             continue
         shown = subcommand or "（缺少子命令）"
+        if bypasses_hooks(subcommand, args):
+            return (
+                "ask",
+                (
+                    f"该命令跳过全部治理门禁（`git {shown} --no-verify`）。是否绕过"
+                    "需负责人针对当前命令裁决；钩子本身异常时先修钩子，不要长期绕过。"
+                ),
+            )
         if is_remote_operation(subcommand, args):
             return (
                 "ask",
                 (
-                    f"该命令会访问或改写远端（`git {shown}`）。DEVELOPMENT §6 要求：远端操作"
+                    f"该命令会访问或改写远端（`git {shown}`）。治理基线 §5 要求：远端操作"
                     "需负责人针对当前操作单独授权，本地操作与工作区闭环的授权不覆盖远端。"
                 ),
             )
@@ -381,6 +431,14 @@ def main() -> int:
         return 0
     command = (payload.get("tool_input") or {}).get("command") or ""
     if "git" not in command.lower():
+        return 0
+
+    if has_co_author_signature(command):
+        emit_decision(
+            "deny",
+            "该提交消息含 Co-Authored-By 署名（不区分署名工具），被治理基线 §7 禁止。"
+            "请移除署名后重试。",
+        )
         return 0
 
     result = classify(command)

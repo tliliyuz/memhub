@@ -12,7 +12,9 @@
 |---|---|---|
 | `governance.toml` | 消费仓 | owner 手工维护，只写本仓差异 |
 | `docs/contracts/governance-toml.md` | 平台 | `init` / `sync` 写入，勿手改 |
-| `AGENTS.md`、`CLAUDE.md` 的受管块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
+| `AGENTS.md`、`CLAUDE.md` 的主题受管块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
+| `.claude/commands/review.md` 的 `review` 块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
+| `.claude/hooks/guard-git-write.py` | 平台 | `init` / `sync` 写入，勿手改 |
 | 其余文档与代码 | 消费仓 | owner 手工维护 |
 
 ## 2. 配置分层与合并
@@ -62,20 +64,24 @@ python <平台路径>/governance.py init --repo <目标仓>
 python <平台路径>/governance.py sync --repo <目标仓>
 ```
 
-- `init`：生成 `governance.toml`（缺失时）、写入本契约文档、向两个入口文件注入
-  受管块。重复执行不产生改动。
-- `sync`：把契约文档与受管块更新到平台当前版本，不改 `governance.toml`，也不改
-  受管块之外的内容。未初始化时报错，先运行 `init`。
-- 钩子不自动改写：`governance hooks` 输出三层配置，合并进
-  `.pre-commit-config.yaml` 后执行 `pre-commit install`。
+- `init`：生成 `governance.toml` 初稿（`[repo] name` 取目标目录名）、写入本契约
+  文档、搭建最小文档集与 `.pre-commit-config.yaml`、注入入口与审查命令的受管块。
+  重复执行不产生改动。
+- `sync`：把契约文档与受管块更新到平台当前版本，不改 `governance.toml`、骨架
+  文档与受管块之外的内容。未初始化时报错，先运行 `init`。
+- `.pre-commit-config.yaml` 缺失时由 `init` 写入；已存在时不改写。安装 git 钩子
+  需执行 `pre-commit install` 与
+  `pre-commit install --hook-type commit-msg --hook-type pre-push`。
 
 ## 5. 漂移门禁
 
-- `contract_pack`：本文件与平台版本逐字一致；两个入口文件的受管块存在且与平台模板
-  一致。不一致时提示运行 `governance sync`。
+- `contract_pack`：本文件、guard 钩子副本与平台版本逐字一致；两个入口文件的主题
+  块存在且与平台模板一致；`.claude/commands/review.md` 存在时，其 `review` 块同样
+  校验（文件缺失不报错）。不一致时提示运行 `governance sync`。
 - `entrypoints`：`AGENTS.md` 与 `CLAUDE.md` 必须逐字节一致。
-- 受管块由 `<!-- governance:contract begin -->` 与
-  `<!-- governance:contract end -->` 界定，块内只放平台生成的引用。
+- 主题块由 `<!-- governance:<主题> begin -->` 与 `<!-- governance:<主题> end -->`
+  界定，正文由平台从 L0 对应章节渲染；L0 每个章节各对应一个主题块，入口文件承载
+  全部主题，审查命令另承载 `review` 块。
 
 ## 6. 升级流程
 
