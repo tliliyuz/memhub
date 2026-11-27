@@ -497,6 +497,26 @@ async def run_round(
     return current
 
 
+def adaptive_interval(
+    backlog: int,
+    *,
+    base: float,
+    fast: float = 60.0,
+    threshold: int = 50,
+) -> float:
+    """按积压量选轮询间隔：积压多时快轮询消化，排空后退回 `base` 慢轮询。
+
+    生产口径（2026-11-27 负责人拍板）：`queued + processing` 超过
+    `threshold` 用 `fast`；阈值以内随积压减少逐步拉长间隔，空闲回到
+    `base`，避免空转。不新增配置项。
+    """
+    if backlog <= 0:
+        return base
+    if backlog > threshold:
+        return min(base, fast)
+    return min(base, fast * threshold / backlog)
+
+
 async def run_forever(
     client: LLMClient,
     config: WorkerConfig,
@@ -529,8 +549,13 @@ async def run_forever(
             await sleep(min(1800.0, config.interval * 2 ** min(failure_streak, 4)))
         else:
             failure_streak = 0
+            try:
+                waiting = await config.queue.backlog()
+            except Exception:  # noqa: BLE001 - 积压统计失败只能退回 base，不能拖垮主循环
+                # 队列暂查不到积压就不猜：沿用 base，别让统计故障拖垮主循环。
+                waiting = 0
             if not report.processed:
-                await sleep(config.interval)
+                await sleep(adaptive_interval(waiting, base=config.interval))
     return 1 if failure_streak else 0
 
 
@@ -540,6 +565,7 @@ __all__ = [
     "ProcessedFile",
     "RoundReport",
     "WorkerConfig",
+    "adaptive_interval",
     "in_window",
     "parse_window",
     "parse_window_tz",

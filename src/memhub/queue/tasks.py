@@ -168,6 +168,10 @@ class QueueStore(Protocol):
         """`queued + processing` 的正文字节数，用于 `MEMHUB_QUEUE_MAX_BYTES`。"""
         ...
 
+    async def backlog(self) -> int:
+        """`queued + processing` 的行数，用于 worker 自适应轮询间隔。"""
+        ...
+
     async def batch_progress(self, project: str, batch_id: str) -> BatchProgress | None: ...
 
     async def batch_project(self, batch_id: str) -> str | None:
@@ -460,6 +464,9 @@ class MemoryQueue:
 
     async def pending_bytes(self) -> int:
         return sum(row.size for row in self.rows.values() if row.status in {"queued", "processing"})
+
+    async def backlog(self) -> int:
+        return sum(1 for row in self.rows.values() if row.status in {"queued", "processing"})
 
     async def batch_progress(self, project: str, batch_id: str) -> BatchProgress | None:
         rows = [
@@ -754,6 +761,15 @@ class PostgresQueue:
     async def pending_bytes(self) -> int:
         async with self.sessions() as session:
             return await self._pending_bytes(session)
+
+    async def backlog(self) -> int:
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(func.count())
+                .select_from(IngestQueue)
+                .where(IngestQueue.status.in_(["queued", "processing"]))
+            )
+            return int(rows.scalar_one())
 
     async def batch_progress(self, project: str, batch_id: str) -> BatchProgress | None:
         async with self.sessions() as session:
