@@ -19,5 +19,5 @@ COPY prompts /usr/local/lib/python3.12/prompts
 
 USER 999:987
 
-# 常驻进程，内部按 21:00-02:00 窗口门控；--once 供 systemd timer 单轮调用。
-CMD ["memhub", "worker", "--window", "21:00-02:00"]
+# 常驻进程，内部按 21:00-05:00 窗口门控；--once 供 systemd timer 单轮调用。
+CMD ["memhub", "worker", "--window", "21:00-05:00"]
