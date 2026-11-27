@@ -15,7 +15,8 @@ env_keys = true
 atomic_layers = true
 
 numbered_docs = [
-    "docs/architecture.md",
+    "docs/tech/architecture.md",
+    "docs/tech/OPERATION_TIME.md",
     "docs/tech/ENVIRONMENT.md",
     "docs/guides/DEVELOPMENT.md",
     "docs/contracts/kb-admin-api.md",
@@ -25,7 +26,8 @@ numbered_docs = [
 ]
 
 authority_docs = [
-    "docs/architecture.md",
+    "docs/tech/architecture.md",
+    "docs/tech/OPERATION_TIME.md",
     "docs/contracts/README.md",
     "docs/contracts/ingest-api.md",
     "docs/contracts/kb-admin-api.md",
@@ -91,3 +93,6 @@ patterns = ["kb/", "data/"]
 [[atomic.layer]]
 name = "ci"
 patterns = ["scripts/", ".github/", ".claude/", ".gitignore", ".gitattributes", ".editorconfig", "governance.toml", ".pre-commit-config.yaml"]
+
+[time]
+business_timezone = "+08:00"

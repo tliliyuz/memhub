@@ -5,7 +5,7 @@
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
 > 适用范围：采集端与云端之间的推送、游标、心跳、鉴权、错误码与限流契约。
-> 不负责：节点字段枚举（见 [node-schema.md](node-schema.md)）、源注册表（见 [source-registry.md](source-registry.md)）、服务端实现（见 [architecture.md](../architecture.md)）。
+> 不负责：节点字段枚举（见 [node-schema.md](node-schema.md)）、源注册表（见 [source-registry.md](source-registry.md)）、服务端实现（见 [architecture.md](../tech/architecture.md)）。
 
 ## 0. 通用约定
 

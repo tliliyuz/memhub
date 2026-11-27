@@ -5,7 +5,7 @@
 | 状态 | accepted |
 | 日期 | 2026-11-27 |
 | 裁决人 | 负责人（经基础设施会话 cloud-server-0c 转述，本会话再次确认） |
-| 关联 | [ingest-api.md](../contracts/ingest-api.md)、[ENVIRONMENT.md](../tech/ENVIRONMENT.md)、[architecture.md](../architecture.md)、ADR-0004、ADR-0013 |
+| 关联 | [ingest-api.md](../contracts/ingest-api.md)、[ENVIRONMENT.md](../tech/ENVIRONMENT.md)、[architecture.md](../tech/architecture.md)、ADR-0004、ADR-0013 |
 
 ## 背景
 
