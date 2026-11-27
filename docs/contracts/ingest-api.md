@@ -1,6 +1,6 @@
 # 采集端 ↔ 云端 API 契约
 
-> 版本: 0.9
+> 版本: 0.10
 > 基址：`https://memhub.work/api/v1`
 > 传输：HTTPS + JSON；大批量用 `application/gzip`（见 §5）。
 > 客户端：agent-console 内置 headless collector。服务端：本仓库。
@@ -133,7 +133,7 @@ Authorization: Bearer <device_token>
 | `cursor_before` / `cursor_after` | **仅诊断**，服务端不校验，也不据此产生 1004。游标以每条文件的 `from_offset` 为准。 |
 | `project` | 必须是用户选定的显式知识库 ID（`^[a-z0-9][a-z0-9._-]{0,63}$`，不允许 `auto`，不修剪空白）。目标必须已在管理台登记且当前活动——判据是 `kb_projects` 存在该行且 `archived_at` 为空，不再看 `MEMHUB_KNOWLEDGE_DIR` 下的目录或 `.kbs.json`。不推断目标，不用 `source_id` 兜底，不自动建库。 |
 
-缺失、空值、非字符串、格式错误、未登记、不活动的目标统一返回 HTTP `400`、`code:1003`，用 `data.reason` 区分 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`，不回显目标或披露是否存在；拒绝发生在配额、落盘和游标更新之前，重放也要先通过目标校验。采集端只读 `kb_projects`，不写知识真源；未配置 `MEMHUB_KB_DB_URL` 时服务拒绝启动。服务暂不能确认登记状态（例如存在未完成的归档事务）时返回通用 `500/2001`，可重试。目标被拒仅影响该源：保留待发增量，不推进被拒游标，修正目标前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
+缺失、空值、非字符串、格式错误、未登记、不活动的目标统一返回 HTTP `400`、`code:1003`，用 `data.reason` 区分 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`，不回显目标或披露是否存在；拒绝发生在配额、正文写入和游标更新之前，重放也要先通过目标校验。采集端只读 `kb_projects`，不写知识真源；未配置 `MEMHUB_KB_DB_URL` 时服务拒绝启动。服务暂不能确认登记状态（例如存在未完成的归档事务）时返回通用 `500/2001`，可重试。目标被拒仅影响该源：保留待发增量，不推进被拒游标，修正目标前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
 
 服务端游标校验只看两处：`source_rev`（是否允许重扫）与每条文件的 `from_offset`（相对已知 offset 是否回退）。
 
@@ -186,7 +186,7 @@ Authorization: Bearer <device_token>
 - 鉴权同 `/ingest/raw`（设备 token）。
 - 服务暂无法验证列表时返回 `500 {code:2001}`；缺少 `writable_only:true` 的旧服务响应不能用于授权选库。
 - 用户选中的 `id` 写回 `sources.json` 的 `sources[].project`；采集器原样放进 `/ingest/raw` 的 `project`。
-- 改一个源的 `project` **只影响之后推送的内容**：已提炼的批次按内容寻址落在 `processed_raw/`，不会因为改库名而重跑，也不会搬去新库。
+- 改一个源的 `project` **只影响之后推送的内容**：已入队的内容按 `(project, sha256)` 寻址，同一正文不能换目标重放；已提炼的节点也不会因为改库名而迁库。
 
 建库不在采集端：客户端只上传，知识库只在管理台 `POST /api/v1/kb/projects` 创建（见 [kb-admin-api.md](kb-admin-api.md)）。`POST /ingest/projects` 已移除，旧客户端调用得到 `404/405`。
 
@@ -196,19 +196,31 @@ Authorization: Bearer <device_token>
 
 - 鉴权：`Authorization: Bearer <MEMHUB_PROVISION_TOKEN>`，与 `POST /devices/register` 同一把 provision token，由 `.env` 注入服务端。缺失或不匹配返回 `401 {code:1001}`；采集器持有的 `device_token` 一律得到 `401`，不能调用本接口。服务端未配置 `MEMHUB_PROVISION_TOKEN` 时（含 dev stub）本接口一律返回 `401`，不因开发模式放开删除。
 - `device_id` 为必填 query，表示清理谁的源；`purge` 必须为 `true`，缺失、`false` 或其它值返回 `400 {code:1003}`。`device_id` 须为 UUID v4；`source_id` 须匹配 `^[A-Za-z0-9_.-]{1,100}$` 且不是 `.` 或 `..`（队列目录名按此映射，其它字符会映射到同一目录，删除时不允许歧义）。不合规，以及清理管理台保留设备，均返回 `400 {code:1003}`。
-- 效果：在队列写锁内清理该 `(device_id, source_id)` 在 `raw_store/`、`processed_raw/`、`pending_review/` 下的批次目录，并使原始队列配额缓存失效。删除前核对所有批次的设备与源；目录或批次身份不明确（例如旧队列目录名重合、出现链接或记录不合法）则整次拒绝，返回 `400/1003`。
-- 不受影响：已有知识节点及其溯源引用保持原样；运行态的 `sources`、`file_cursors`、`seen_shas`、`batches` 行保留，游标不回退，原有去重与批次重放规则不变。清理不会停用采集器，也不撤回 worker 已读入的内容；需先停止该源以避免新数据入队。
-- 幂等：目录不存在时同样返回 `200`，各计数为 0。发生文件系统错误时返回 `500/2001`，可能已删除部分文件，允许重试。
+- 效果：删除 `ingest_queue` 中该 `(device_id, source_id)` 的全部队列行，按状态返回计数。正文在 ClickHouse，运行账号没有 `DELETE` 权限，**保留到 180 天 TTL**；响应显式标记 `content_retained: true`。
+- 不受影响：已有知识节点及其溯源引用保持原样；运行态的 `file_cursors`、`sources`、`batches` 行保留，游标不回退，批次重放规则不变。清理不会停用采集器，也不撤回 worker 已读入的内容；需先停止该源以避免新数据入队。
+- 幂等：没有匹配行时同样返回 `200`，各计数为 0。
 - 审计：成功调用（包括空清理）在 `kb_write_audit` 落一行，`actor=provision`、`project` 为空、`action=ingest_purge`、`result=ok`；不含批次正文与 token。
 
 成功响应：
 
 ```json
 {"code": 0, "message": "ok", "data": {"device_id": "<id>", "source_id": "<id>",
- "purged": {"raw_store": 3, "processed_raw": 12, "pending_review": 0}}}
+ "purged": {"queued": 3, "processing": 0, "processed": 12, "pending_review": 0},
+ "content_retained": true, "content_retention": "clickhouse_ttl_180d"}}
 ```
 
-`purged` 各项是删除的批次文件数。
+`purged` 各项是删除的队列行数；正文仍按 TTL 保留。
+
+### 内部接口（`MEMHUB_INTERNAL_TOKEN`）
+
+仅供 kb-api 调用，不面向桌面端或公网。两个接口都要求 `Authorization: Bearer <MEMHUB_INTERNAL_TOKEN>`；服务端未配置该键时返回 `500/2001`，凭据不符返回 `401/1001`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/internal/enqueue` | 请求体同 `/ingest/raw`，由 kb-api 以保留的管理台身份（`device_id=kb-console`、`source_type=docs`、`source_id=project`）提交；与采集共用正文存储、队列、去重与配额，返回 `{batch_id, accepted, duplicates, replayed, cursor}`。目标未登记/不活动返回 `400/1003`；配额超限返回 `503/1013`，`data` 带 `used_bytes/limit_bytes/incoming_bytes`。 |
+| GET | `/internal/queue/{batch_id}` | 批次进度：`{batch_id, project, total, status, counts:{queued,processing,processed,pending_review}, errors, created_at, files:[{name, sha256, status, attempts}]}`。`project` 可省略（uuid 批次可唯一反查）；多库同名批次省略 `project` 时按歧义返回 `404/1011`。 |
+
+内部入队同样走 `project_for` 的生产者校验：非保留管理台身份一律 `400/1003`。
 
 ## 3. 错误码
 
@@ -228,7 +240,7 @@ Authorization: Bearer <device_token>
 
 ## 4. 提炼（服务端内部，客户端无需感知）
 
-原始队列记录包含服务端确定的生产者和显式目标。worker 在调用模型前复查来源和当前目标，实际写入时在真源写锁内再次复查。不为旧记录推断或替换目标。明确不合规的原始记录按原因隔离到 `pending_review`，保留原始字节；配置、登记、事务或锁暂不可用时留在队列，不消耗模型重试次数。管理台上传走独立鉴权，但也要求已登记且活动的显式目标。
+队列行存于 PG 的 `ingest_queue`（主键 `(project, sha256)`），正文存于 ClickHouse `memhub_raw.raw_sessions`。worker 用 `FOR UPDATE SKIP LOCKED` 领取任务并带租约，先按队列行身份与显式目标完成授权，再按 `(project, sha256)` 取正文；实际写入时在真源写锁内再次复查。互为副本、`skipped_extraction` 的去重来自 `seen_messages`。不为旧记录推断或替换目标。明确不合规或正文缺失的队列行按原因转 `pending_review`；配置、登记、事务或正文存储暂不可用时退回 `queued` 且不消耗模型重试次数。连续失败到上限同样转 `pending_review`。管理台上传走独立鉴权，但也要求已登记且活动的显式目标。
 
 会话 JSONL 只从可引用的非 `isMeta` 对话文字渲染证据块；摘要、工具输出、无法解析的片段不作为证据，不退回原始 JSONL。提炼只保留具有本窗逐字引用的可复用事实、决策、流程或踩坑；可辨识的跨窗重复只留一份。边须有证据，且两端为无歧义的存活候选。引用匹配证明文本出现过，不证明结论正确。无合格候选时成功处理为零，不写真源；畸形响应按失败重试，超限隔离。候选保留来源引用，不改变节点格式；文档和 wiki 提炼规则不变。
 
@@ -242,6 +254,7 @@ Authorization: Bearer <device_token>
 - 0.7：「已登记且活动」的判据从 `MEMHUB_KNOWLEDGE_DIR`（目录 + `.kbs.json`）改为 `kb_projects`（存在行且 `archived_at` 为空）；服务端未配置 `MEMHUB_KB_DB_URL` 时拒绝启动。响应信封、错误码与拒绝原因不变。
 - 0.8：每次采集决策（接受或拒绝，含重放）在服务端 `kb_write_audit` 表落一行：`actor=device:<device_id>`、`project`、`action=ingest`、`result=ok` 或拒绝原因码；不含会话正文与 token。对客户端透明，信封与错误码不变。
 - 0.9：补齐 `DELETE /ingest/source/{source_id}` 的鉴权（provision token）、参数、效果与审计；新增审计动作 `ingest_purge`。其它端点不变。
+- 0.10：原文与队列改为云端共享存储（ADR-0020）——正文入 ClickHouse `memhub_raw.raw_sessions`（180 天 TTL），队列行入 PG `ingest_queue`（`(project, sha256)` 主键）；清理接口只删队列行、正文按 TTL 保留（响应带 `content_retained`/`content_retention`）。新增内部接口 `POST /internal/enqueue` 与 `GET /internal/queue/{batch_id}`（`MEMHUB_INTERNAL_TOKEN`），供 kb-api 上传使用；客户端端点、信封与错误码不变。
 - 客户端在 `heartbeat` 上报 `collector_version`；服务端可下发 `upgrade` 命令但不强制。
 
 ## 7. 与面板既有接口的边界
