@@ -103,6 +103,19 @@ async def test_pending_bytes_excludes_finished_rows() -> None:
     assert await queue.pending_bytes() == 0
 
 
+async def test_backlog_counts_queued_and_processing_only() -> None:
+    queue = MemoryQueue()
+    assert await queue.backlog() == 0
+    await queue.enqueue(_request("hello"), producer="collector", limit=10_000)
+    await queue.enqueue(_request("world"), producer="collector", limit=10_000)
+    assert await queue.backlog() == 2
+
+    [task] = await queue.claim(limit=1)
+    assert await queue.backlog() == 2, "processing 仍算积压"
+    await queue.complete(task)
+    assert await queue.backlog() == 1
+
+
 async def test_claim_marks_processing_and_counts_attempts() -> None:
     queue = MemoryQueue()
     await queue.enqueue(_request("hello"), producer="collector", limit=10_000)

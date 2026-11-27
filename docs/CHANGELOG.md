@@ -8,6 +8,21 @@
 - `docs`：`docs/architecture.md` 迁至 `docs/tech/architecture.md`（ADR-0008），同步更新 README、契约、ADR-0020、`governance.toml` 与检查脚本里的路径；新增 `docs/tech/OPERATION_TIME.md` 记录业务时区 `+08:00` 与运行周期，`governance.toml` 增加 `[time] business_timezone` 并把两份 tech 文档纳入权威文档清单。
 - 验证：`governance verify` 全量终验通过（其余检查项与迁移前一致）；`git diff --check` 无空白问题；未执行浏览器验收（改动不含页面）。
 
+## 2026-11-27（worker 自适应轮询间隔）
+
+- **ADR 检查**：未命中触发清单——只调整 worker 内部轮询节奏，不改变对外契约、访问控制、
+  部署环境假设与数据真源，也不新增配置键。
+- `feat(worker)`：`run_forever` 在本轮无产出时按 `queued + processing` 积压量选休眠间隔
+  （负责人 2026-11-27 口径）：积压 > 50 用 60s 快轮询；≤ 50 随积压减少逐步拉长，空闲回到
+  `config.interval`（生产 300s）；统计失败只退回 base，不拖垮主循环。`QueueStore` 协议新增
+  `backlog()`，内存与 PG 实现同口径（`queued` + `processing` 计数）。
+- 验证（worktree `.claude/worktree/worker-adaptive-interval`）：RED 先观察到
+  `test_adaptive_interval_scales_with_backlog` 与 `test_run_forever_sleeps_shorter_when_backlog_remains`
+  失败（旧公式在有积压时反而拉长间隔：51 条返回 120s）；GREEN 后
+  `pytest tests/unit/test_queue.py tests/unit/test_daemon.py -q` 65 passed / 6 errors（错误全部为
+  既有 `no pg_hba.conf entry`，改动前同样存在）；`pytest tests/unit tests/contract -q`
+  552 passed / 1 skipped / 201 errors（同上）；`ruff check`/`format --check` 与 `mypy src` 通过。
+
 ## 2026-11-27（修复 ADR-0020 上线阻断：CH 数组参数与导入建表）
 
 - `fix(queue)`：`ClickHouseContentStore.existing()` 的 `param_shas` 由 JSON 数组改为
