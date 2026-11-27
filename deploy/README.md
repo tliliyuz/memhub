@@ -151,21 +151,36 @@ wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）�
   `SELECT rolname, rolconnlimit FROM pg_roles WHERE rolcanlogin` 的合计必须
   ≤ `max_connections − 3`（超级用户预留）；超限时先下调其他角色或由负责人决定提高
   `max_connections`，不得无视。
+  **2026-11-27 发布前在生产实查（当前阻断）**：`max_connections=60`、超级用户预留 3，可用 57；
+  现有 login 角色声明额度合计 56（`evalkit_app` 20、`evalkit_dev_app` 5、`evalkit_test_app` 5、
+  `memhub_app` 12、`memhub_dev_app` 8、`memhub_kb_app` 4、`memhub_kb_owner` 2）。再加
+  `memhub_rt_app` 8 并把 `memhub_kb_app` 提到 6 后合计 **66 > 57**，**不能按本节原样上线**。
+  待负责人裁决二选一：`max_connections` 提到 80（需重启 PG），或压缩 evalkit 系列额度；
+  裁决落地并复算通过前，不执行下面的 `CREATE ROLE` / `ALTER ROLE`。
 - **建角色与授权**（超级用户执行；口令只写进 `/etc/memhub/env`，不进仓库）：
 
   ```sql
   CREATE ROLE memhub_rt_app LOGIN PASSWORD '<口令>' CONNECTION LIMIT 8;
   GRANT USAGE ON SCHEMA kb TO memhub_rt_app;
   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA kb TO memhub_rt_app;
-  ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_migrate IN SCHEMA kb
+  -- 序列权限必须给：kb_node_revisions / kb_edges / kb_write_audit 等表是自增主键，
+  -- 只有表权限时 INSERT 会在 nextval 处报权限不足。
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA kb TO memhub_rt_app;
+  -- 默认权限的属主是 memhub_kb_owner（pg_default_acl 实查为它名下的表与序列条目）；
+  -- 实例里没有 memhub_kb_migrate 角色，照抄原创会报 role does not exist。
+  ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_owner IN SCHEMA kb
       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO memhub_rt_app;
+  ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_owner IN SCHEMA kb
+      GRANT USAGE, SELECT ON SEQUENCES TO memhub_rt_app;
   ALTER ROLE memhub_kb_app CONNECTION LIMIT 6;
   ```
 
-  权限与 `memhub_kb_app` 对齐，**不授权** `public`（运行态 5 表所在）与任何 `ingest_queue`
+  权限与 `memhub_kb_app` 对齐（含序列），**不授权** `public`（运行态 5 表所在）与任何 `ingest_queue`
   访问：队列读写走 ingest/worker 自己的 `MEMHUB_DB_URL`（`memhub_app`），与知识角色无关。
-  不给超集授权；后续迁移新增 `kb_*` 表时，`ALTER DEFAULT PRIVILEGES` 已覆盖，仍建议迁移后
-  复查 `\dp kb.*`。
+  不给超集授权；后续迁移新增 `kb_*` 表或序列时，`ALTER DEFAULT PRIVILEGES` 已覆盖，仍建议迁移后
+  复查 `\dp kb.*` 并以属主执行
+  `SELECT has_table_privilege('memhub_rt_app','kb.kb_write_audit','INSERT'),
+          has_sequence_privilege('memhub_rt_app','kb.kb_write_audit_id_seq','USAGE')`，两者都应为 `t`。
 - **env 拆分（防混用）**：`/etc/memhub/env`（ingest、worker）新增
   `MEMHUB_KB_RT_DB_URL=postgresql://memhub_rt_app:<口令>@127.0.0.1:5432/memhub_prod`；
   `/etc/memhub/env.kb`（kb-api）保持 `MEMHUB_KB_DB_URL=postgresql://memhub_kb_app:...`。
@@ -285,7 +300,9 @@ systemctl list-timers memhub-memory-aggregate.timer
    - 连接配额（ADR-0021 拆分后）：`memhub_kb_app` 限 6（kb-api 池 2+2 + 余量 2），
      `memhub_rt_app` 限 8（ingest 2+2 + worker 1+1 + 余量 2），`memhub_kb_owner` 限 2
      （带外 `alembic` 与 `migrate-kb` 各占一条）。运行态 `MEMHUB_DB_URL`（`memhub_app`）仍按
-     ingest 2+3、worker 1+1 核算；全实例 `Σ rolconnlimit ≤ max_connections − 3`。
+     ingest 2+3、worker 1+1 核算；全实例 `Σ rolconnlimit ≤ max_connections − 3`。**2026-11-27 实查
+     已超限（66 > 57），当前阻断**，全实例额度明细与待裁决项见上文「kb 运行态角色拆分」小节；
+     额度裁决落地前不要执行任何 `CONNECTION LIMIT` 变更。
    - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_RT_DB_URL`（指向 `memhub_rt_app`），供 ingest / worker /
      `memory-aggregate` 使用；kb-api 的角色在 `/etc/memhub/env.kb` 的 `MEMHUB_KB_DB_URL` 里，两边不要混放。
      值只经该文件注入；文档与提交信息只写键名。**迁移 DSN 不进常驻 env**：`MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）

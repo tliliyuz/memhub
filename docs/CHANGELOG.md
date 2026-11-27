@@ -29,6 +29,14 @@
   `pytest tests/unit -q` 379 passed / 1 skipped / 27 errors，错误全部为既有 `no pg_hba.conf entry`；
   `docker compose -f deploy/compose.yml config --quiet` 通过；`scripts/kb_concurrency_smoke.py --help`
   可执行。并发冒烟未对生产执行，待角色与 env 上线后按部署文档运行。
+- `fix(deploy)`（同日、发布前核对）：`deploy/README.md` 的建角色 SQL 修正两处——`ALTER DEFAULT
+  PRIVILEGES` 的属主改为实查到的 `memhub_kb_owner`（实例无 `memhub_kb_migrate` 角色），并补
+  `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA kb` 与序列默认权限（`kb_node_revisions` /
+  `kb_edges` / `kb_write_audit` 是自增主键，缺序列权限会 INSERT 失败）。实查结论来自生产
+  `pg_default_acl` 与角色清单，本轮只改文档、未连生产执行。
+- **上线阻断（待负责人裁决）**：2026-11-27 实查 `max_connections=60`、超用户预留 3，可用 57；
+  现有 login 角色额度合计 56，加 `memhub_rt_app` 8 与 `memhub_kb_app` 4→6 后为 66 > 57。
+  裁决二选一（`max_connections` 提到 80 需重启 PG，或压缩 evalkit 额度）落地前不得执行建角色/ALTER。
 
 ## 2026-11-27（旧本机队列一次性导入、CH CA 挂载与容器内自检）
 
