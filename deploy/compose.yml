@@ -67,7 +67,8 @@ services:
     <<: *defaults
     image: memhub/app-worker:0.1.0
     container_name: memhub-worker
-    # 窗口在容器内门控；错峰表：21:00-02:00 提炼，02:00-05:00 让给 eval L2。
+    # 窗口在容器内门控：21:00-05:00 提炼（负责人 2026-11-27 裁决延长消化积压；
+    # 02:00-05:00 与 eval L2 重叠为接受项）。
     # 窗口外是**常驻 sleep**（每 interval 醒一次看表），进程不退出，所以 unless-stopped
     # 不会造成重启循环。唯一会退出的是启动自检：配置缺失或 LLM 端点不可达 → exit 2。
     # 那种情况重试也不会变好，因此用 on-failure:5 而不是 unless-stopped——
@@ -75,9 +76,9 @@ services:
     # timer 场景不用本服务，直接一次性执行：
     #   docker run --rm ... memhub/app-worker:0.1.0 memhub worker --once
     # （--once 只跑一轮、不受窗口限制；退出码 0 全成功 / 1 有失败 / 2 配置错）
-    command: ["memhub", "worker", "--window", "21:00-02:00", "--limit", "20"]
+    command: ["memhub", "worker", "--window", "21:00-05:00", "--limit", "20"]
     environment:
-      # 窗口按北京时间解释。容器默认 UTC：不设这个变量时 `--window 21:00-02:00`
+      # 窗口按北京时间解释。容器默认 UTC：不设这个变量时 `--window 21:00-05:00`
       # 实际跑在 05:00-10:00 CST（线上踩过）。用显式偏移而不是 TZ=Asia/Shanghai——
       # slim 镜像不一定带 tzdata，缺 zoneinfo 时 astimezone() 会静默退回 UTC。
       MEMHUB_WINDOW_TZ: "+08:00"
