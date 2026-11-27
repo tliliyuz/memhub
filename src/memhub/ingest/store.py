@@ -82,6 +82,10 @@ class StateStore(Protocol):
         """删除该库（可选限定源）的已见记录并返回行数；`source_id=None` 清整库。"""
         ...
 
+    async def migrate(self) -> list[str]:
+        """建表/补迁移，幂等；返回本次应用的版本。内存实现为空操作。"""
+        ...
+
     async def close(self) -> None:
         """释放连接池；内存实现为空操作。"""
         ...
@@ -120,6 +124,9 @@ class MemoryStore:
 
     async def close(self) -> None:
         return None
+
+    async def migrate(self) -> list[str]:
+        return []
 
     # -- cursors ---------------------------------------------------------
     async def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
