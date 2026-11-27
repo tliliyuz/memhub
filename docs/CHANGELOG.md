@@ -5,7 +5,20 @@
 - `docs`：明确 [`memhub import-raw-store`](guides/DEVELOPMENT.md) 的一次性导入口径（只读 `raw_store/`、
   记录校验、内容地址幂等、断点重跑、不推进游标、不删除源文件、退出码）与 `check-content-store`
   容器内自检；部署文档补充 CA 只读挂载的前置条件、`env_file` 尚未按服务拆分的已知缺口与导入顺序。
-- 待实现：`feat(queue/cli)` 导入命令与自检命令，`fix(deploy)` compose 对 ingest/worker 的 CA 只读挂载。
+- `feat(queue/cli)`：新增 `memhub.queue.backfill` 与 `memhub import-raw-store`——只扫描
+  `<data-dir>/raw_store/**.json`，按旧版记录字段与「文件名 = sha256 = content 哈希」校验，身份规则复用
+  `project_for`；按 `(device, source, source_type, batch)` 分组走与在线一致的「先写正文、再入队」，
+  幂等可断点重跑；`processed_raw/`、`pending_review/` 只统计不导入；`--dry-run` 只盘点、`--verify-only`
+  逐条核验；失败汇总到 stderr 且不中断其余批次，退出码 0/1/2。新增 `memhub check-content-store`
+  容器内正文存储自检（0/1/2）。
+- `fix(deploy)`：`compose.yml` 为 ingest 与 worker 增加只读挂载 `/etc/memhub/ch-ca.pem`；kb 与
+  oauth2-proxy 不挂载。`docker compose config` 校验通过。
+- 验证（本机，worktree `.claude/worktree/ch-ca-backfill`，PG/CH 用例以 `MemoryQueue`/`LocalContentStore`
+  替身覆盖）：`ruff check src tests` 与 `ruff format --check src tests` 通过，`mypy src` 无问题
+  （56 个文件）；`pytest tests/unit/test_backfill.py tests/unit/test_cli_backfill.py -q` 9 passed；
+  `pytest tests/unit -q` 375 passed / 1 skipped / 27 errors，错误全部来自远端 PG 拒绝本机 IP
+  （`no pg_hba.conf entry`，与本次变更无关）；`docker compose -f deploy/compose.yml config --quiet`
+  通过。导入与自检未对真实 CH/PG 执行，首次上线按部署文档顺序在服务器上 dry-run 后再导入。
 
 ## 2026-11-27（原文入 ClickHouse、队列入 PG，上传走 ingest 内部接口，ADR-0020）
 
