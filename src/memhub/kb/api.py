@@ -4,9 +4,10 @@
 外加知识库上传。写操作落 PG 真源 `kb_*` 表（见 `memhub.kb.pgstore`）。
 启动时强制要求 `MEMHUB_KB_DB_URL`，没有文件存储退路（规格 §9.2.4）。
 
-上传（`/api/v1/kb/uploads`）把文件直接送进提炼队列：落盘走 `memhub.queue.rawstore`，
-与 `/ingest/raw` 共用同一套 raw_store 布局与配额，不经过采集协议（见 `memhub.kb.uploads`）。
-未配置 `MEMHUB_DATA_DIR` 时上传接口返回 503，其余接口不受影响。
+上传（`/api/v1/kb/uploads`）把文件送进提炼队列：kb-api 只做文件校验，然后调用
+ingest 的内部接口（`MEMHUB_INGEST_URL` + `MEMHUB_INTERNAL_TOKEN`），不直写本机
+目录、不持有运行态 DSN 与 ClickHouse 凭据（ADR-0020）。
+缺这两个键时上传接口返回 503，其余接口不受影响。
 
 只绑回环地址、无鉴权：管理台与 worker、collector 跑在同一台机器上，
 公网入口（如果将来有）由 nginx + oauth2-proxy 负责，不在本层做会话。
@@ -39,26 +40,14 @@ from memhub.kb.errors import RevisionConflict
 from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.session import KB_SCHEMA, create_runtime_store
 from memhub.kb.target_access import TargetUnavailable, registered_active
-from memhub.kb.uploads import KbUploads, UploadInvalid, UploadQueueFull
+from memhub.kb.uploads import (
+    IngestUnavailable,
+    KbUploads,
+    UploadInvalid,
+    UploadQueueFull,
+)
 from memhub.mcp.auth import load_grants
 from memhub.mcp.http import McpEndpoint
-from memhub.queue.rawstore import RawStoreQuota
-
-DEFAULT_QUEUE_MAX_BYTES = 1024**3
-
-
-def _env_bytes(name: str, default: int) -> int:
-    """读字节数配置；非法值直接启动失败，而不是悄悄退回默认值。"""
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise SystemExit(f"{name} 必须是整数字节数: {raw!r}") from exc
-    if value <= 0:
-        raise SystemExit(f"{name} 必须为正数: {value}")
-    return value
 
 
 class NodeCreate(BaseModel):
@@ -240,12 +229,13 @@ def _error_response(exc: manage.ManageError) -> JSONResponse:
 def create_app(
     *,
     store: PgKnowledgeStore | None = None,
+    uploads: KbUploads | None = None,
     schema: str | None = KB_SCHEMA,
 ) -> FastAPI:
     """组装 kb-api；默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储（规格 §9.2.4）。
 
-    `store` 与 `schema` 仅供测试注入独立 schema；生产入口不留文件存储退路，
-    `search_path` 固定为 `kb`。
+    `store` 与 `schema` 仅供测试注入独立 schema；`uploads` 允许测试注入指向
+    ingest 内部接口的客户端。生产入口不留文件存储退路，`search_path` 固定为 `kb`。
     """
     web_dist_raw = os.environ.get("MEMHUB_KB_WEB_DIST", "")
     web_dist = Path(web_dist_raw) if web_dist_raw else None
@@ -254,12 +244,13 @@ def create_app(
         owned = create_runtime_store(schema=schema)
         store = owned
     api = KnowledgeApi(store)
-    data_dir_raw = os.environ.get("MEMHUB_DATA_DIR", "").strip()
-    uploads: KbUploads | None = None
-    if data_dir_raw:
-        data_dir = Path(data_dir_raw).expanduser()
-        queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
-        uploads = KbUploads(data_dir, RawStoreQuota(data_dir / "raw_store", queue_max))
+    owned_uploads = False
+    if uploads is None:
+        ingest_url = os.environ.get("MEMHUB_INGEST_URL", "").strip()
+        internal_token = os.environ.get("MEMHUB_INTERNAL_TOKEN", "")
+        if ingest_url and internal_token:
+            uploads = KbUploads(ingest_url, internal_token)
+            owned_uploads = True
 
     mcp = McpEndpoint(api.store, load_grants(os.environ.get("MEMHUB_MCP_GRANTS", "")))
 
@@ -269,6 +260,8 @@ def create_app(
             async with mcp.lifespan():
                 yield
         finally:
+            if owned_uploads and uploads is not None:
+                await uploads.close()
             if owned is not None:
                 await owned.aclose()
 
@@ -331,6 +324,19 @@ def create_app(
                 "code": int(ErrorCode.KB_QUEUE_FULL),
                 "message": "提炼队列已满，请稍后重试",
                 "data": {"used": exc.used, "limit": exc.limit, "incoming": exc.incoming},
+            },
+        )
+
+    @app.exception_handler(IngestUnavailable)
+    async def on_ingest_unavailable(_: Request, exc: Exception) -> JSONResponse:
+        if not isinstance(exc, IngestUnavailable):
+            raise exc
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": int(ErrorCode.INTERNAL),
+                "message": "提炼服务暂不可用，请稍后重试",
+                "data": {},
             },
         )
 
@@ -607,7 +613,7 @@ def create_app(
             status_code=503,
             content={
                 "code": int(ErrorCode.INTERNAL),
-                "message": "未配置 MEMHUB_DATA_DIR，上传不可用",
+                "message": "未配置 MEMHUB_INGEST_URL / MEMHUB_INTERNAL_TOKEN，上传不可用",
                 "data": {},
             },
         )

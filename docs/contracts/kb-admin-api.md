@@ -1,6 +1,6 @@
 # 知识库管理 API（kb-api）
 
-> 版本: 0.7（ADR-0016：长期记忆管理 API）
+> 版本: 0.8（ADR-0020：上传改走 ingest 内部接口；长期记忆 API 见 0.7 / ADR-0016）
 > 适用范围：本地管理台（`memhub kb`）的 HTTP 接口——列表、详情、新增、编辑、废弃、归档删除、回收站、边编辑、审计、上传入队、MCP 调用轨迹查询、长期记忆、当前登录身份。
 > 不负责：采集入口（见 [ingest-api.md](ingest-api.md)）、MCP 工具（见 [mcp-tools.md](mcp-tools.md)）、节点字段枚举（见 [node-schema.md](node-schema.md)）。
 
@@ -8,14 +8,14 @@
 
 - **只绑回环地址、无鉴权**：kb-api 与 worker、collector、浏览器在同一台机器上；公网入口（如果将来有）由 nginx + oauth2-proxy 负责，不在本层做会话。
 - **PostgreSQL 是唯一真源**：所有写操作都落到 `kb_*` 表（`kb_nodes` / `kb_edges` / `kb_projects` / `kb_archives`）。图谱与检索直接查询真源，不再生成文件投影。
-- **单机写入互斥**：每次写入是一个 PG 事务，事务级 advisory lock 串行化跨进程写入；进程退出即释放。归档中的库禁止普通写入，worker 保留队列文件并推迟处理，不计失败。
+- **单机写入互斥**：每次写入是一个 PG 事务，事务级 advisory lock 串行化跨进程写入；进程退出即释放。归档中的库禁止普通写入，worker 保留队列行并推迟处理，不计失败。
 - 每次写入在同一事务内追加 `kb_node_revisions`（含完整快照）；不再产生 git 提交。
-- **上传是唯一不直接写真源的入口**：它把文件送进提炼队列（raw_store），由 worker 异步提炼后写入 `kb_*`；接口返回只代表「已收到并排队」。
+- **上传是唯一不直接写真源的入口**：kb-api 把文件交给 ingest 的内部接口，由 worker 异步提炼后写入 `kb_*`；接口返回只代表「已收到并排队」。
 
-启动（必须先配 `MEMHUB_KB_DB_URL`；运行入口不再接受 `--knowledge-dir`）：
+启动（必须先配 `MEMHUB_KB_DB_URL`；上传另需 `MEMHUB_INGEST_URL` 与 `MEMHUB_INTERNAL_TOKEN`；运行入口不接受 `--knowledge-dir` / `--data-dir`）：
 
 ```bash
-memhub kb --web-dist web/dist --data-dir data   # 端口默认 8701
+memhub kb --web-dist web/dist   # 端口默认 8701
 ```
 
 ## 2. 错误信封
@@ -159,9 +159,10 @@ memhub kb --web-dist web/dist --data-dir data   # 端口默认 8701
 
 ### 4.7 上传（送进提炼队列）
 
-把文件直接投进提炼队列，与采集器推送共用同一套 raw_store 布局与配额；不需要
-device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb --data-dir`），
-未配置时两个接口都返回 503/`2001`，其余接口不受影响。
+把文件送进提炼队列，与采集器推送共用同一套正文存储、队列、去重与配额；不需要
+device token、游标与批次幂等。kb-api 只持有 `MEMHUB_INGEST_URL` 与
+`MEMHUB_INTERNAL_TOKEN`，调用 ingest 的内部接口；它不连接 PG 队列、ClickHouse 或
+本机 raw 目录。未配置这两个键时两个接口都返回 503/`2001`，其余接口不受影响。
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
@@ -170,11 +171,11 @@ device token、游标与批次幂等。需要 `MEMHUB_DATA_DIR`（或 `memhub kb
 
 - 允许后缀 `.md` / `.txt` / `.jsonl`，UTF-8，单文件 ≤60000 字符，单批 ≤20 个文件；`project` 必须匹配 `^[a-z0-9][a-z0-9._-]{0,63}$`，不得为 `auto`，且必须是**已登记的活动知识库**（否则返回 404/`1011`；暂无法核验返回 503/`2001`）。管理台鉴权不变，不使用设备授权。
 - 单个文件不合规进 `rejected`（`unsupported_type` / `not_utf8` / `empty` / `too_large` / `invalid_name`），其余文件照常接收；整批没有可接受的 → 422/`1012`，`data.rejected` 给出原因。
-- 内容按库和 sha256 寻址：已有相容的队列记录仍在原始、已处理或待复核目录时，不为重复上传新增原始副本。记录清理后不保证去重。
-- 落盘：`<DATA_DIR>/raw_store/kb-console/<project>/<sha[:2]>/<sha>.json`，由服务端标记 `producer=console`、`source_type=docs`。worker 只接受确切的管理台身份及活动目标，按 docs profile 提炼；采集设备不能使用该保留身份。批次清单在 `<DATA_DIR>/uploads/<batch_id>.json`，`uploads/` 不在 worker 扫描范围内。
-- 状态逐文件推导，与 worker 的搬运动作一致：`processed_raw/<rel>` → `processed`；`pending_review/<rel>` → `failed`；`state/failures.json[rel]` 有计数 → `failed`（带 `attempts`）；仍在 raw_store → `queued`。worker 只在时间窗口内搬运，白天长时间 `queued` 属正常排队，不是故障。
-- 队列总量受 `MEMHUB_QUEUE_MAX_BYTES` 约束，超限 503/`1013`。kb-api 与 ingest-api 是两个进程、各持一份 30 秒刷新的用量缓存，跨进程并发推送/上传可能短暂超出上限（容忍一个刷新窗口）。
-- 批次 id 非法或清单不存在 → 404/`1011`。
+- kb-api 把通过校验的文件整批 POST 到 ingest `/internal/enqueue`，服务端标记 `device_id=kb-console`、`producer=console`、`source_type=docs`、`source_id=project`。worker 只接受确切的管理台身份及活动目标，按 docs profile 提炼；采集设备不能使用该保留身份。
+- 内容按 `(project, sha256)` 寻址：队列行已存在（queued/processing/processed/pending_review）时不为重复上传新增行。队列行按保留期裁剪后不保证去重。
+- 状态由 ingest 的 `GET /internal/queue/{batch_id}` 推导：`queued`/`processing` → `queued`；`processed` → `processed`；`pending_review` → `failed`（带 `attempts`）；缺行 → `missing`。worker 只在时间窗口内领取，白天长时间 `queued` 属正常排队，不是故障。
+- 队列总量受 `MEMHUB_QUEUE_MAX_BYTES` 约束，超限 ingest 返回 `1013`，kb-api 原样转成 503/`1013`（`data` 用 `used/limit/incoming`）。
+- ingest 不可达或内部 token 不匹配 → 503/`2001`；批次 id 非法、清单不存在或跨库歧义 → 404/`1011`。
 
 ### 4.9 MCP 调用轨迹
 

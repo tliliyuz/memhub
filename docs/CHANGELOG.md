@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-11-27（原文入 ClickHouse、队列入 PG，上传走 ingest 内部接口，ADR-0020）
+
+- `docs(adr)`：新增 [ADR-0020](decisions/ADR-0020-clickhouse-raw-store.md)「原始增量入 ClickHouse、提炼队列入 PG」，负责人当次裁决为 accepted 并按「上传改走 ingest 内部接口」实现。
+- `feat(queue)`：`memhub.queue.rawstore`（本机 raw_store 内容寻址落盘、配额扫描）替换为 `queue/content.py`（正文存储：生产 ClickHouse HTTP `memhub_raw.raw_sessions`，gzip、`X-ClickHouse-User/Key`、可选 CA、按 `(project, sha256)` 去重、180 天 TTL；dev 退本地 `content_store`）与 `queue/tasks.py`（PG `ingest_queue`：主键 `(project, sha256)`，状态 queued/processing/processed/pending_review，`FOR UPDATE SKIP LOCKED` 领取 + 租约 + 重试 3 次转隔离，配额按 `queued + processing` 字节求和）；`queue/flow.py` 承载「先写正文、再入队、最后推进游标」的共用入队流程。`seen_shas` 不再写入/读取（表保留），`state/failures.json` 删除；`file_cursors`/`sources`/`batches` 不变。
+- `feat(ingest)`：`POST /ingest/raw` 在同一请求内写 CH 正文与 PG 队列行；prod 缺 `MEMHUB_DB_URL` 或 `MEMHUB_CH_URL` 拒绝启动。新增内部接口 `POST /internal/enqueue` 与 `GET /internal/queue/{batch_id}`（`MEMHUB_INTERNAL_TOKEN` Bearer 鉴权；未配置 500/2001、凭据不符 401/1001、目标未登记 400/1003、配额超限 503/1013），供 kb-api 上传使用；只接受保留管理台身份（`device_id=kb-console`、`producer=console`）。
+- `feat(kb)`：`/api/v1/kb/uploads*` 不再写本机 raw_store：`KbUploads` 校验文件后整批 POST 到 ingest 内部接口，批次进度由 `GET /internal/queue/{batch_id}` 推导（queued/processed/failed/missing）；kb-api 只持有 `MEMHUB_INGEST_URL` 与 `MEMHUB_INTERNAL_TOKEN`，不连 PG 队列、ClickHouse 或本机目录。`memhub kb` 移除 `--data-dir`。
+- `feat(cli)`：`memhub worker` 缺 `MEMHUB_DB_URL` 或（无 dev 目录时的）`MEMHUB_CH_URL` 退出 2；`purge-expired` 删除隔离区/processed_raw 文件逻辑改为按天数裁剪 `processed` 队列行（`--processed-days`），pending_review 行保留复核。
+- 文档与配置：`docs/contracts/ingest-api.md` 0.10（内部接口、purge 语义、§4）、`docs/contracts/kb-admin-api.md` 0.8（§4.7 上传改走内部接口）、`docs/contracts/README.md` 0.19、`docs/architecture.md`、`docs/guides/DEVELOPMENT.md`、`docs/tech/ENVIRONMENT.md` 与 `.env.example`（新增 `MEMHUB_CH_URL` / `MEMHUB_CH_USER` / `MEMHUB_CH_PASSWORD` / `MEMHUB_CH_CA` / `MEMHUB_INTERNAL_TOKEN` / `MEMHUB_INGEST_URL`，删除 `MEMHUB_PROCESSED_MAX_BYTES`）、`deploy/`（README、compose 上传注释、Dockerfile.kb 去掉 `--data-dir`）、`web/README.md`、`governance.toml`（`queue/` 与 `cli/` 归入 infra 层：队列与 ingest/worker 相互导入，按依赖链拆分后才能逐提交通过 mypy）。
+- 范围：只做 ADR-0020 队列与正文存储切换；CH 反向导出、向量检索、`seen_shas` 旧表清理均未涉及。
+- 验证（2026-11-27，worktree `.claude/worktree/clickhouse-raw-queue`）：目标用例 `pytest tests/unit/test_daemon.py tests/contract/test_kb_uploads.py tests/contract/test_ingest_api.py tests/unit/test_cli_ingest.py tests/unit/test_queue.py tests/unit/test_content_store.py tests/contract/test_state_store.py` 得到 176 passed / 22 errors，22 个 error 全部是 `[postgres]` 参数化用例的远端 ACL 拒绝（`no pg_hba.conf entry for host "218.1.186.94", user "memhub_dev_app"`）；全量 `pytest` 为 531 passed / 1 skipped / 201 errors，逐个核对 error 汇总行后确认全部由同一 ACL 拒绝引起，PG 契约用例本机不可执行、未验证，不计为通过；`ruff check src tests` 与 `ruff format --check src tests`（117 files）通过；`mypy src`（55 files）通过；`check_env_example_keys.py`（36 键）、`check_document_format.py`、`check_adr_governance.py`（18 份 ADR）、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py` 与 `git diff --check` 通过。
+
 ## 2026-11-26（MCP 只读长期记忆工具实现，ADR-0019）
 
 - `docs(adr)`：ADR-0019 由 `proposed` 转 `accepted`，索引同步；负责人当次指令为「接受ADR0019，你开始实现吧」。

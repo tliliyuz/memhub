@@ -127,22 +127,25 @@ def _worker_args(tmp_path: Path, store: PgKnowledgeStore | None = None) -> argpa
     return argparse.Namespace(**data)
 
 
-async def test_worker_requires_dsn_without_injected_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv(KB_DSN_KEY, raising=False)
-
-    with pytest.raises(KbDsnMissing):
-        await _worker(_worker_args(tmp_path))
-
-
-async def test_worker_requires_data_dir(
+async def test_worker_requires_queue_dsn(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """队列是共享 PG：缺 DSN 时独立进程只会空转，直接退出。"""
+    monkeypatch.delenv("MEMHUB_DB_URL", raising=False)
+
+    assert await _worker(argparse.Namespace(data_dir="", dry_run=True)) == 2
+    assert "MEMHUB_DB_URL" in capsys.readouterr().err
+
+
+async def test_worker_requires_content_source(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("MEMHUB_DB_URL", "postgresql://u@127.0.0.1/memhub")
+    monkeypatch.delenv("MEMHUB_CH_URL", raising=False)
     monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
 
     assert await _worker(argparse.Namespace(data_dir="", dry_run=True)) == 2
-    assert "MEMHUB_DATA_DIR" in capsys.readouterr().err
+    assert "MEMHUB_CH_URL" in capsys.readouterr().err
 
 
 async def test_worker_dry_run_reports_pg_truth(
@@ -151,11 +154,15 @@ async def test_worker_dry_run_reports_pg_truth(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """worker 入口不再要求/读取 `MEMHUB_KNOWLEDGE_DIR`，冒烟即报 PG 真源。"""
+    """worker 入口不再要求/读取 `MEMHUB_KNOWLEDGE_DIR`，冒烟即报 PG 队列与正文来源。"""
     monkeypatch.delenv("MEMHUB_KNOWLEDGE_DIR", raising=False)
+    monkeypatch.setenv("MEMHUB_DB_URL", "postgresql://u@127.0.0.1/memhub")
+    monkeypatch.delenv("MEMHUB_CH_URL", raising=False)
 
     assert await _worker(_worker_args(tmp_path, store)) == 0
-    assert "真源=PG" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "队列=PG" in out
+    assert "正文=" in out
 
 
 async def test_kb_console_starts_without_knowledge_dir(

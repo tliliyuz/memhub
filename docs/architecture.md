@@ -22,8 +22,9 @@
  │   /mcp              → kb-api (MCP, streamable HTTP)                     │
  │   /                → kb-api（管理台 SPA，GitHub 登录后）                  │
  ├─────────────────────────────────────────────────────────────────────────┤
- │  ingest-api / kb-api(上传) → queue.rawstore (原始增量, 按 device/source)  │
- │           → runtime state (PostgreSQL: 设备/游标/批次幂等, memhub_prod)   │
+ │  ingest-api → 正文: ClickHouse memhub_raw.raw_sessions（180 天 TTL）     │
+ │           → 队列/游标/设备: PostgreSQL memhub_prod（ingest_queue 等）    │
+ │  kb-api(上传) → ingest /internal/enqueue（不直连队列或 CH）              │
  │  worker:  value_filter(cheap) → extract(expensive) → merge              │
  │  merge → PostgreSQL 知识真源 kb_* (schema kb)                             │
  │  memory-aggregate（周任务）→ kb_memory_* → 已发布快照 → 会话抽取注入       │
@@ -44,7 +45,7 @@
 | 记忆失败 = 模型不可用 | 采集/提炼失败只影响记忆新鲜度，用户正常工作 |
 | Team Brain MCP 本地进程 + 共享 key | 远端 `/mcp`，每条凭据限定库范围与读写作用域；吊销靠改配置重启 |
 | 会话靠 Proxy 旁路抓取 | collector 直接读本地 session 文件，游标增量 |
-| 状态散在 Proxy/本地 relay | 状态只在云端（raw_store + 游标 + 知识库表） |
+| 状态散在 Proxy/本地 relay | 状态只在云端（PG 队列 + CH 原文 + 游标 + 知识库表） |
 | 数据格式即实现 | PostgreSQL `kb_*` 真源（markdown 仅一次性迁移源）；图谱与检索直接查询，不落文件投影 |
 
 ## 3. 组件职责
@@ -56,16 +57,18 @@
 - 崩溃恢复：state 文件原子写；未确认批次重推（服务端按 batch_id 幂等）。
 
 ### ingest-api（服务端）
-- 先验证设备凭据，再检查显式目标：`kb_projects` 存在该行且 `archived_at` 为空（只读，不写知识真源）；通过后才可能落 raw_store 或推进游标。
-- 只做校验，不做 LLM 调用，响应 <200ms。
+- 先验证设备凭据，再检查显式目标：`kb_projects` 存在该行且 `archived_at` 为空（只读，不写知识真源）；通过后才可能写正文、入队或推进游标。
+- 正文写 ClickHouse `memhub_raw.raw_sessions`（gzip HTTP，`(project, sha256)` 去重，180 天 TTL）；队列行写 PG `ingest_queue`（主键 `(project, sha256)`），两者在同一请求内完成，正文先于队列行。
+- 只做校验与入队，不做 LLM 调用，响应 <200ms。
 
-### queue（跨模块落盘与配额，非独立进程）
-- `memhub.queue.rawstore`：raw_store 的内容寻址布局、原子写、用量估算与配额（`MEMHUB_QUEUE_MAX_BYTES`）。
-- 写入方：ingest-api 的 `/ingest/raw`、kb-api 的知识库上传；读取方只有 worker。
-- 放在 `queue/` 而不是 `ingest/`：上传入口不该依赖采集协议层（鉴权、游标、<200ms 约束）；鉴权、游标校验与错误码映射留在各自路由层，这里只做与协议无关的落盘与计量。
+### queue（跨模块队列与正文计量，非独立进程）
+- `memhub.queue.content`：正文存储（生产 ClickHouse，dev/test 本地目录）；`memhub.queue.tasks`：PG `ingest_queue` 的领取、租约、重试、终态与批次进度。
+- 写入方：ingest-api 的 `/ingest/raw`、管理台上传（经 ingest `/internal/enqueue`）；读取方只有 worker。
+- `MEMHUB_QUEUE_MAX_BYTES` 按 `queued + processing` 行的 `size` 求和；判重与配额都只看队列主键，不再维护第二份 `seen_shas`。
+- 放在 `queue/` 而不是 `ingest/`：上传入口不该依赖采集协议层（鉴权、游标、<200ms 约束）；鉴权、游标校验与错误码映射留在各自路由层，这里只做与协议无关的存储与计量。
 
 ### worker（服务端，单机串行 + 少量并发）
-- 先确认队列来源和目标授权，再按类型抽取；写入作用域内再次确认。明确不合规的队列项隔离，暂不能核验时留队。管理台凭据不与设备授权混用。
+- 用 `FOR UPDATE SKIP LOCKED` 领取队列行并带租约；先确认队列身份和目标授权，再按 `(project, sha256)` 从 ClickHouse 取正文。明确不合规或正文缺失的队列行隔离，暂不能核验时退回队列且不消耗失败次数。管理台凭据不与设备授权混用。
 - 会话只从有出处的对话提炼候选，允许零结果；文档和 wiki 继续走文档提炼管线。合并直接写 PG `kb_*` 表（一次写入 = 一个事务），不再落 markdown。
 - 会话抽取注入已发布的长期记忆（ADR-0016）：worker 启动时固定一个快照版本，按 BM25 取 top-k 并受字符预算约束，`extract_session` 审计记录版本；手工 `memhub ingest --profile sessions` 走同一口径。记忆只作判断与归一化准则，不能充当逐字证据。
 - 长期记忆由独立命令 `memhub memory-aggregate` 周期聚合跨项目 canonical 节点，产出条目/候选并发布快照；worker 的抽取路径不写记忆，也不把记忆当模型输入。
@@ -74,7 +77,7 @@
 - 管理台：`memhub kb` 在同一进程托管打包前端，`/` 由 nginx 反代；页面直接调 `/api/v1/kb/*`，没有 explorer 子进程，也没有文件投影。
 - 检索：按授权范围与 `kind` 过滤后，应用层 BM25 排序；默认排除 `deprecated`（`tier=canonical`），`tier=all` 才包含废弃节点。向量混合检索按 ADR-0007 另案推进。
 - 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
-- 上传：`/api/v1/kb/uploads` 把文件直接投进 queue.rawstore，由 worker 按 docs profile 提炼，不经过采集协议（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
+- 上传：`/api/v1/kb/uploads` 校验文件后调用 ingest 的内部接口 `/internal/enqueue`，由 worker 按 docs profile 提炼，不经过采集协议；kb-api 不持有队列、ClickHouse 或本机 raw 目录（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
 - 长期记忆：`/api/v1/kb/memories*` 提供条目、候选与快照的查询和治理动作，管理台「长期记忆」页只展示元数据与结论；会话抽取的注入不经过该入口。
 - 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 
@@ -87,9 +90,9 @@
 
 1. **采集器不可用时**：知识库停在旧状态，agent 照常工作（MCP 读云端，与采集器无关）。
 2. **云端不可用时**：采集器本地累积，退避重试；不阻塞本地文件读写。
-3. **LLM 不可用时**：raw 片段留在队列，不丢；ingest-api 仍 200（排队的语义就是"已收到"）。
+3. **LLM 不可用时**：队列行留在 PG、正文留在 CH，不丢；ingest-api 仍 200（排队的语义就是"已收到"）。
 4. **提炼出错**：单文档失败不影响同批次其它文档；失败 3 次进 pending_review。
-5. **磁盘水位**：daemon.json 日志上限 + `memhub-disk-guard.timer` 告警 + worker 队列上限（超过则 ingest-api 返回 1008 让客户端降级）。
+5. **磁盘水位**：daemon.json 日志上限 + `memhub-disk-guard.timer` 告警 + 队列上限（超过则 ingest-api 返回 1008、管理台上传返回 1013）。原文不占本机数据盘。
    > 上一次是日志写满磁盘导致全栈清空，这条是硬性要求。
 
 ## 5. 部署形态
@@ -106,8 +109,8 @@
 memhub/
   src/memhub/
     contract/      # 跨端模型与枚举（对外字段的唯一实现）
-    queue/         # raw_store 落盘与配额（ingest / kb 上传共用）
-    ingest/        # 鉴权、游标、幂等、入队
+    queue/         # CH 正文存储 + PG 队列、配额（ingest / worker / 上传共用）
+    ingest/        # 鉴权、游标、幂等、正文入 CH、队列入 PG
     worker/        # value_filter / extract / merge
     kb/            # 真源读写（PG kb_*）、检索、管理台 API
     mcp/           # MCP 工具

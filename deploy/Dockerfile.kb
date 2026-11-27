@@ -35,6 +35,4 @@ EXPOSE 8701
 # kb-api 代码里固定绑 127.0.0.1（host 网络下由 nginx 反代），不做可配置。
 # 真源是 PG（MEMHUB_KB_DB_URL）；图谱与检索直读 kb_* 表，没有 --knowledge-dir，
 # 也没有文件投影或 explorer。
-CMD ["memhub", "kb", \
-     "--web-dist", "/app/web-dist", \
-     "--data-dir", "/var/lib/memhub/data"]
+CMD ["memhub", "kb", "--web-dist", "/app/web-dist"]

@@ -1,4 +1,4 @@
-"""用合成会话验证 HTTP → 队列 → worker → 指定知识库，不联网调用模型。"""
+"""用合成会话验证 HTTP → PG 队列/CH 正文 → worker → 指定知识库，不联网调用模型。"""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from memhub.ingest.store import MemoryStore
 from memhub.kb.models import Base
 from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.session import create_sessionmaker
+from memhub.queue.content import LocalContentStore
+from memhub.queue.tasks import MemoryQueue
 from memhub.worker.daemon import WorkerConfig, run_round
 
 PROJECTS = ("fixture-left", "fixture-right", "fixture-denied")
@@ -60,15 +62,17 @@ async def test_selected_target_is_the_only_landing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: PgKnowledgeStore
 ) -> None:
     data = tmp_path / "data"
+    data.mkdir()
     device = str(uuid.uuid4())
     monkeypatch.setenv("MEMHUB_ENV", "dev")
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(data))
     # `fixture-denied` 未登记：这正是当初被隐式建库的事故形态；目标只认 `kb_projects`。
     # 随机测试凭据仅留在本地进程内；不用任何操作系统已保存凭据。
     token = uuid.uuid4().hex
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", token)
     state = MemoryStore()
     await state.register_device(device)
+    queue = MemoryQueue()
+    content_store = LocalContentStore(data / "content_store")
     content = (
         "\n".join(
             json.dumps(item)
@@ -102,8 +106,9 @@ async def test_selected_target_is_the_only_landing(
             }
         ],
     }
+    app = create_app(state, queue=queue, content=content_store, kb_store=store)
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=create_app(state, kb_store=store)),
+        transport=httpx.ASGITransport(app=app),
         base_url="http://127.0.0.1",
         headers={"Authorization": f"Bearer {token}"},
         trust_env=False,
@@ -111,17 +116,29 @@ async def test_selected_target_is_the_only_landing(
         denied = await client.post("/ingest/raw", json=body)
         assert denied.status_code == 400
         assert denied.json()["data"] == {"reason": "unregistered"}
-        assert not (data / "raw_store").exists()
+        assert queue.rows == {}
+        assert await content_store.get("fixture-denied", sha) is None
         assert (await state.get_cursor(device, "fixture-source"))[1] == []
         accepted = await client.post("/ingest/raw", json=body | {"project": "fixture-right"})
         assert accepted.status_code == 200
+    [queued] = queue.rows.values()
+    assert (queued.project, queued.status) == ("fixture-right", "queued")
+    assert await content_store.get("fixture-right", sha) == content
     fake = Fake()
     report = await run_round(
-        fake, WorkerConfig(data, store, "fake", is_registered=state.is_registered)
+        fake,
+        WorkerConfig(
+            queue=queue,
+            content=content_store,
+            store=store,
+            model="fake",
+            is_registered=state.is_registered,
+        ),
     )
     assert (report.processed, report.created, report.failed, fake.calls) == (1, 1, 0, 1)
     assert await store.list_ids() == ["fixture-right/procedure/separate-boards-during-drying"]
     node, _ = await store.read("fixture-right/procedure/separate-boards-during-drying")
     assert node.tier == "canonical"
     assert [(source.device, source.ref) for source in node.source] == [(device, "fixture.jsonl")]
-    assert len(list((data / "processed_raw").rglob("*.json"))) == 1
+    assert queued.status == "processed"
+    assert queued.processed_at is not None

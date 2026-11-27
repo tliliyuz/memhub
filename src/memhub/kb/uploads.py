@@ -1,56 +1,44 @@
-"""知识库上传：把文件直接送进提炼队列（复用 raw_store，不经过采集协议）。
+"""知识库上传：把文件送进提炼队列（ADR-0020）。
 
-上传只是把「本地有 agent 采集」换成「人在管理台贴文件」：落盘布局、配额、
-worker 读取都与 `/ingest/raw` 完全一致，区别只在入口——这里没有 device token、
-游标与批次幂等，批次状态改为读盘推导。
+上传只是把「本地有 agent 采集」换成「人在管理台贴文件」：kb-api 做文件校验
+（后缀、UTF-8、大小、数量），随后调用 ingest 的内部接口 `POST /internal/enqueue`；
+正文、队列、配额都由 ingest 统一处理，kb-api 不再直写本机目录，也不持有运行态
+DSN 或 ClickHouse 凭据。
 
-状态推导与 worker 的搬运语义一一对应（相对路径均相对 `<DATA_DIR>/raw_store`）：
-
-- `processed_raw/<rel>` 存在 → `processed`；
-- `pending_review/<rel>` 存在 → `failed`（连续 `max_attempts` 次失败后被隔离）；
-- `state/failures.json[rel]` 有计数 → `failed`（重试中，带 `attempts`）;
-- 文件仍在 `raw_store/<rel>` → `queued`（worker 只在窗口期搬运，白天长时间
-  queued 是正常排队，不是故障）。
-
-批次清单写在 `<DATA_DIR>/uploads/<batch_id>.json`；`uploads/` 在 `raw_store/`
-之外，worker 的 `iter_pending` 不会扫到它。
+批次状态读 `GET /internal/queue/{batch_id}`，由队列行推导，不再有本地清单与
+`failures.json`。对外形状保持管理台契约：`queued / processed / failed / missing`。
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from anyio import Path as AsyncPath
+import httpx
 from starlette.datastructures import UploadFile
 
 from memhub.contract import BatchFile, IngestRequest, explicit_project
-from memhub.queue.rawstore import (
-    CONSOLE_DEVICE,
-    BatchTargetConflict,
-    QuotaExceeded,
-    RawStoreQuota,
-    batch_dir,
-    estimate_new_bytes,
-    save_batch,
-)
+from memhub.queue.identity import CONSOLE_DEVICE
 
 DEVICE_ID = CONSOLE_DEVICE
 SOURCE_TYPE = "docs"
 MAX_FILES = 20
 MAX_CHARS = 60_000
 ALLOWED_SUFFIXES = (".md", ".txt", ".jsonl")
-UPLOADS_DIR = "uploads"
-PROCESSED_DIR = "processed_raw"
-PENDING_DIR = "pending_review"
-FAILURES_PATH = Path("state") / "failures.json"
 BATCH_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+UploadFileStatus = Literal["queued", "processed", "failed", "missing"]
+_STATUS_MAP: dict[str, UploadFileStatus] = {
+    "queued": "queued",
+    "processing": "queued",
+    "processed": "processed",
+    "pending_review": "failed",
+}
 
 
 class UploadInvalid(Exception):
@@ -64,7 +52,7 @@ class UploadInvalid(Exception):
 
 
 class UploadQueueFull(Exception):
-    """raw_store 已到上限：让上传方稍后再试，不把队列撑爆。"""
+    """提炼队列已到上限：让上传方稍后再试，不把队列撑爆。"""
 
     def __init__(self, used: int, limit: int, incoming: int) -> None:
         super().__init__(f"queue full: {used}+{incoming} > {limit}")
@@ -73,20 +61,31 @@ class UploadQueueFull(Exception):
         self.incoming = incoming
 
 
+class IngestUnavailable(RuntimeError):
+    """ingest 内部接口不可达或内部 token 配置错误，上传整体不可用。"""
+
+
 class KbUploads:
-    """一次上传的落盘、清单与状态推导。配额对象由调用方持有（进程内共享）。"""
+    """ingest 内部接口的客户端；进程内共享一个连接池。"""
 
-    def __init__(self, data_dir: Path, quota: RawStoreQuota) -> None:
-        self.data_dir = data_dir
-        self.quota = quota
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = 120.0,
+    ) -> None:
+        self.client = httpx.AsyncClient(
+            base_url=base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=httpx.Timeout(timeout, connect=5.0),
+            transport=transport,
+            trust_env=False,
+        )
 
-    @property
-    def raw_root(self) -> Path:
-        return self.data_dir / "raw_store"
-
-    @property
-    def uploads_root(self) -> Path:
-        return self.data_dir / UPLOADS_DIR
+    async def close(self) -> None:
+        await self.client.aclose()
 
     # ---- 上传 ----
 
@@ -103,8 +102,7 @@ class KbUploads:
                 {"project": project},
                 status=422,
             )
-        # 只收已存在的知识库：拼错的 project 会在提炼时凭空建出一个空库目录，
-        # 管理台的库列表里就会多出一个没有节点、也说不清来源的幽灵库。
+        # 只收已存在的知识库：拼错的 project 不能凭空建出一个空库。
         if not await project_exists(project):
             raise UploadInvalid(f"知识库不存在: {project}", {"project": project}, status=404)
         if not files:
@@ -163,47 +161,17 @@ class KbUploads:
             project=project,
             files=accepted,
         )
-        try:
-            incoming = await estimate_new_bytes(self.data_dir, request, producer="console")
-            await self.quota.check(incoming)
-            await save_batch(self.data_dir, request, producer="console")
-        except QuotaExceeded as exc:
-            raise UploadQueueFull(exc.used, exc.limit, exc.incoming) from exc
-        except BatchTargetConflict as exc:
-            raise UploadInvalid("无法确认已有队列记录的目标", status=503) from exc
-        except OSError:
-            # 可能只写了一半；让下次请求重扫，别让缓存低估真实占用。
-            await self.quota.invalidate()
-            raise
-        await self.quota.record(incoming)
-
-        base = batch_dir(self.data_dir, DEVICE_ID, project).relative_to(self.raw_root)
-        manifest: dict[str, Any] = {
-            "batch_id": batch_id,
-            "project": project,
-            "device_id": DEVICE_ID,
-            "source_id": project,
-            "source_type": SOURCE_TYPE,
-            "created_at": datetime.now(UTC).isoformat(),
-            "files": [
-                {
-                    "name": batch_file.path,
-                    "sha256": batch_file.sha256,
-                    "chars": len(batch_file.content),
-                    "rel": str(base / batch_file.sha256[:2] / f"{batch_file.sha256}.json"),
-                }
-                for batch_file in accepted
-            ],
-        }
-        # raw 已落盘而清单写失败时，这个批次就查不到了；重传同一内容会拿到新
-        # batch_id，raw 按 sha 去重、不会重复提炼。宁可这样也不回滚已收到的数据。
-        await self._write_manifest(manifest)
+        await self._enqueue(request)
         return {
             "batch_id": batch_id,
             "project": project,
             "accepted": [
-                {"name": item["name"], "sha256": item["sha256"], "chars": item["chars"]}
-                for item in manifest["files"]
+                {
+                    "name": batch_file.path,
+                    "sha256": batch_file.sha256,
+                    "chars": len(batch_file.content),
+                }
+                for batch_file in accepted
             ],
             "rejected": rejected,
             "queued": True,
@@ -214,82 +182,94 @@ class KbUploads:
     async def status(self, batch_id: str) -> dict[str, Any]:
         if not BATCH_ID_RE.match(batch_id):
             raise UploadInvalid("批次 id 非法", {"batch_id": batch_id}, status=404)
-        path = self.uploads_root / f"{batch_id}.json"
-        try:
-            text = await AsyncPath(path).read_text(encoding="utf-8")
-            manifest = json.loads(text)
-        except OSError as exc:
-            raise UploadInvalid(
-                f"批次不存在: {batch_id}", {"batch_id": batch_id}, status=404
-            ) from exc
-        except ValueError as exc:
-            raise UploadInvalid(
-                f"批次清单损坏: {batch_id}", {"batch_id": batch_id}, status=500
-            ) from exc
-        if not isinstance(manifest, dict):
-            raise UploadInvalid(f"批次清单损坏: {batch_id}", status=500)
-
-        failures = await self._load_failures()
+        data = await self._call("GET", f"/internal/queue/{batch_id}")
+        counts: dict[UploadFileStatus, int] = {
+            "queued": 0,
+            "processed": 0,
+            "failed": 0,
+            "missing": 0,
+        }
         entries: list[dict[str, Any]] = []
-        counts = {"queued": 0, "processed": 0, "failed": 0, "missing": 0}
-        files = manifest.get("files")
-        for item in files if isinstance(files, list) else []:
+        raw_counts = data.get("counts")
+        raw_files = data.get("files")
+        if isinstance(raw_counts, dict):
+            counts["queued"] = int(raw_counts.get("queued", 0)) + int(
+                raw_counts.get("processing", 0)
+            )
+            counts["processed"] = int(raw_counts.get("processed", 0))
+            counts["failed"] = int(raw_counts.get("pending_review", 0))
+        for item in raw_files if isinstance(raw_files, list) else []:
             if not isinstance(item, dict):
                 continue
-            rel = str(item.get("rel", ""))
-            entry: dict[str, Any] = {"name": item.get("name", ""), "sha256": item.get("sha256", "")}
-            state = await self._file_state(rel, failures)
-            entry["status"] = state
-            if state == "failed" and rel in failures:
-                entry["attempts"] = failures[rel]
-            counts[state] += 1
+            state = _STATUS_MAP.get(str(item.get("status")), "missing")
+            entry: dict[str, Any] = {
+                "name": str(item.get("name", "")),
+                "sha256": str(item.get("sha256", "")),
+                "status": state,
+            }
+            attempts = item.get("attempts")
+            if state == "failed" and isinstance(attempts, int):
+                entry["attempts"] = attempts
             entries.append(entry)
         return {
-            "batch_id": manifest.get("batch_id", batch_id),
-            "project": manifest.get("project", ""),
-            "created_at": manifest.get("created_at", ""),
-            "total": len(entries),
+            "batch_id": str(data.get("batch_id", batch_id)),
+            "project": str(data.get("project", "")),
+            "created_at": str(data.get("created_at") or ""),
+            "total": int(data.get("total", len(entries))),
             "counts": counts,
             "files": entries,
         }
 
-    async def _file_state(self, rel: str, failures: dict[str, int]) -> str:
-        if not rel:
-            return "missing"
-        if await AsyncPath(self.data_dir / PROCESSED_DIR / rel).is_file():
-            return "processed"
-        if await AsyncPath(self.data_dir / PENDING_DIR / rel).is_file():
-            return "failed"
-        if failures.get(rel, 0) > 0:
-            return "failed"
-        if await AsyncPath(self.raw_root / rel).is_file():
-            return "queued"
-        return "missing"
+    # ---- HTTP ----
 
-    async def _load_failures(self) -> dict[str, int]:
-        try:
-            text = await AsyncPath(self.data_dir / FAILURES_PATH).read_text(encoding="utf-8")
-            data = json.loads(text)
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        return {str(key): int(value) for key, value in data.items() if isinstance(value, int)}
+    async def _enqueue(self, request: IngestRequest) -> dict[str, Any]:
+        return await self._call("POST", "/internal/enqueue", json=request.model_dump(mode="json"))
 
-    async def _write_manifest(self, manifest: dict[str, Any]) -> None:
-        target = self.uploads_root / f"{manifest['batch_id']}.json"
-        await AsyncPath(self.uploads_root).mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
-        text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+    async def _call(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
-            await AsyncPath(tmp).write_text(text, encoding="utf-8", newline="\n")
-            await AsyncPath(tmp).replace(target)
-        except BaseException:
+            response = await self.client.request(method, path, json=json)
+        except httpx.HTTPError as exc:
+            raise IngestUnavailable("ingest unreachable") from exc
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        if response.status_code >= 400:
+            data = body.get("data")
+            payload = data if isinstance(data, dict) else {}
             try:
-                await AsyncPath(tmp).unlink()
-            except OSError:
-                pass
-            raise
+                code = int(body.get("code", 0))
+            except (TypeError, ValueError):
+                code = 0
+            if code == 1013:
+                raise UploadQueueFull(
+                    int(payload.get("used_bytes", 0)),
+                    int(payload.get("limit_bytes", 0)),
+                    int(payload.get("incoming_bytes", 0)),
+                )
+            if response.status_code == 404:
+                raise UploadInvalid(
+                    f"批次不存在: {path.rsplit('/', 1)[-1]}",
+                    {"batch_id": path.rsplit("/", 1)[-1]},
+                    status=404,
+                )
+            if response.status_code == 400:
+                raise UploadInvalid(
+                    str(body.get("message") or "上传请求被拒绝"), payload, status=400
+                )
+            raise IngestUnavailable(f"ingest http {response.status_code}")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise IngestUnavailable("ingest returned invalid envelope")
+        return data
 
 
 __all__ = [
@@ -297,6 +277,7 @@ __all__ = [
     "BATCH_ID_RE",
     "MAX_CHARS",
     "MAX_FILES",
+    "IngestUnavailable",
     "KbUploads",
     "UploadInvalid",
     "UploadQueueFull",

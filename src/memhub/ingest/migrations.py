@@ -86,6 +86,42 @@ MIGRATIONS: list[tuple[str, Sequence[str]]] = [
             """,
         ),
     ),
+    (
+        # ADR-0020：正文进 ClickHouse，待提炼队列进 PG。主键 (project, sha256)
+        # 同时承担接受判重；sha256 单列索引用于「同一内容不能换目标」的跨库检查。
+        "0003_ingest_queue",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS ingest_queue (
+                project      text NOT NULL,
+                sha256       text NOT NULL,
+                device_id    text NOT NULL,
+                source_id    text NOT NULL,
+                source_type  text NOT NULL,
+                batch_id     text NOT NULL,
+                path         text NOT NULL,
+                from_offset  bigint NOT NULL,
+                to_offset    bigint NOT NULL,
+                mtime        timestamptz NOT NULL,
+                producer     text NOT NULL DEFAULT 'collector',
+                status       text NOT NULL DEFAULT 'queued'
+                             CHECK (status IN ('queued', 'processing', 'processed', 'pending_review')),
+                attempts     integer NOT NULL DEFAULT 0,
+                claimed_at   timestamptz,
+                error        text,
+                bytes        bigint NOT NULL DEFAULT 0,
+                created_at   timestamptz NOT NULL DEFAULT now(),
+                processed_at timestamptz,
+                PRIMARY KEY (project, sha256)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ingest_queue_sha256_idx ON ingest_queue (sha256)",
+            """
+            CREATE INDEX IF NOT EXISTS ingest_queue_status_idx
+                ON ingest_queue (status, created_at)
+            """,
+        ),
+    ),
 ]
 
 
