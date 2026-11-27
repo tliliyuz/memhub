@@ -14,16 +14,17 @@ repos:
     rev: v4.6.0
     hooks:
       - id: end-of-file-fixer
-        # 平台契约文档与 guard 钩子按字节与 governance-platform 比对，
-        # 平台源没有结尾换行；自动补换行会被 contract_pack 判成漂移。
-        exclude: ^(docs/contracts/governance-toml\.md|\.claude/hooks/)
+        # 平台受管文档与 guard 钩子按字节与 governance-platform 比对，
+        # 平台源不一定带结尾换行；自动补换行会被 contract_pack 判成漂移。
+        exclude: ^(docs/(contracts/governance-toml\.md|guides/(SDD|DOCUMENT_FORMAT|DOCUMENT_GOVERNANCE)\.md|tech/TIME_CONVENTIONS\.md)|\.claude/hooks/)
       - id: trailing-whitespace
-        exclude: ^\.claude/hooks/
+        exclude: ^(docs/(contracts/governance-toml\.md|guides/(SDD|DOCUMENT_FORMAT|DOCUMENT_GOVERNANCE)\.md|tech/TIME_CONVENTIONS\.md)|\.claude/hooks/)
       - id: check-merge-conflict
       - id: check-yaml
       - id: mixed-line-ending
         args: [--fix=lf]
-        exclude: ^\.claude/hooks/
+        # 同理：平台受管文档与钩子必须保持同步时的字节原样。
+        exclude: ^(docs/(contracts/governance-toml\.md|guides/(SDD|DOCUMENT_FORMAT|DOCUMENT_GOVERNANCE)\.md|tech/TIME_CONVENTIONS\.md)|\.claude/hooks/)
       - id: check-added-large-files
         args: [--maxkb=512]
 

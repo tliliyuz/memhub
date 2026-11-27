@@ -8,7 +8,7 @@ Memhub 2.0：本地采集 → 云端提炼 → PostgreSQL 知识真源 → 图�
 
 ## 文档
 
-先读 [docs/architecture.md](docs/architecture.md) 和 [docs/contracts/](docs/contracts/README.md)。开发约定见 [docs/guides/DEVELOPMENT.md](docs/guides/DEVELOPMENT.md)。
+先读 [docs/tech/architecture.md](docs/tech/architecture.md) 和 [docs/contracts/](docs/contracts/README.md)。开发约定见 [docs/guides/DEVELOPMENT.md](docs/guides/DEVELOPMENT.md)。
 
 ## 快速开始
 

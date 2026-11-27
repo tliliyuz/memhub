@@ -27,7 +27,7 @@ from memhub.kb.store import KnowledgeStore
 from memhub.kb.target_access import TargetRegistry
 from memhub.queue.content import LocalContentStore
 from memhub.queue.flow import enqueue_batch
-from memhub.queue.tasks import MemoryQueue
+from memhub.queue.tasks import DEFAULT_LEASE, MemoryQueue
 from memhub.worker.daemon import (
     RoundReport,
     WorkerConfig,
@@ -984,3 +984,56 @@ async def test_disabled_project_injects_nothing_and_audits_null(
     [audit] = await _session_audits(pg_store)
     assert audit.memory_snapshot is None
     assert audit.result == "ok"
+
+
+def test_adaptive_interval_scales_with_backlog() -> None:
+    from memhub.worker.daemon import adaptive_interval
+
+    # 空积压回到 base 慢轮询；积压超过阈值用 fast；≤阈值时积压越少间隔越长。
+    assert adaptive_interval(0, base=300.0) == 300.0
+    assert adaptive_interval(51, base=300.0) == 60.0
+    assert adaptive_interval(500, base=300.0) == 60.0
+    assert adaptive_interval(50, base=300.0) == 60.0
+    assert adaptive_interval(25, base=300.0) == 120.0
+    assert adaptive_interval(10, base=300.0) == 300.0
+    assert adaptive_interval(51, base=30.0) == 30.0, "base 比 fast 还短时不得反向变慢"
+
+
+async def test_run_forever_sleeps_shorter_when_backlog_remains(tmp_path: Path) -> None:
+    class BacklogQueue(MemoryQueue):
+        async def claim(self, *, limit: int = 20, lease: timedelta = DEFAULT_LEASE):
+            return []
+
+        async def backlog(self) -> int:
+            return 51
+
+    env = await _env(tmp_path)
+    env.config.queue = BacklogQueue()
+    env.config.interval = 300.0
+
+    sleeps: list[float] = []
+    await run_forever(
+        FakeClient(),
+        env.config,
+        now=lambda: datetime.now(UTC),
+        sleep=_sleeper(sleeps),
+        max_rounds=1,
+    )
+
+    assert sleeps == [60.0], "本轮无产出但队列仍有积压时用短轮询间隔（60s），而不是 base"
+
+
+async def test_run_forever_returns_to_base_interval_when_idle(tmp_path: Path) -> None:
+    env = await _env(tmp_path)
+    env.config.interval = 300.0
+
+    sleeps: list[float] = []
+    await run_forever(
+        FakeClient(),
+        env.config,
+        now=lambda: datetime.now(UTC),
+        sleep=_sleeper(sleeps),
+        max_rounds=1,
+    )
+
+    assert sleeps == [300.0]
