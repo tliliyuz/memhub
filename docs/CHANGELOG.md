@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-27（备案信息页脚）
+
+- `feat(web)`：新增 `AppFooter`，管理台各页面底部展示 ICP 备案号与公安联网备案号，
+  分别链接到工信部备案系统与公安备案查询页（新窗口打开、`rel="noopener noreferrer"`）；
+  `AppLayout` 在内容区末尾挂载页脚。
+- 验证：`web` 目录 `npm run typecheck` 与 `npm run build` 通过（vite 构建 1.65s，仅有既有的
+  graph-canvas 分块体积提示）；未做浏览器目视验收。
+
 ## 2026-11-27（kb 运行态角色拆分与连接预算，ADR-0021）
 
 - **ADR 检查**：命中触发清单第 7 项（访问控制/密钥边界）与第 6 项（部署环境假设）——
