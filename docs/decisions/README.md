@@ -71,6 +71,7 @@ ADR 检查
 | [ADR-0018](ADR-0018-mcp-discovery-trace.md) | MCP 发现层事件并入调用轨迹，形成连接漏斗 | accepted |
 | [ADR-0019](ADR-0019-mcp-memory-tools.md) | MCP 只读长期记忆工具，凭据显式开启 | accepted |
 | [ADR-0020](ADR-0020-clickhouse-raw-store.md) | 原始增量存百度云 ClickHouse，提炼队列放 PG | accepted |
+| [ADR-0021](ADR-0021-kb-runtime-role-split.md) | kb-api 与 ingest/worker 拆分运行态角色与连接预算 | accepted |
 
 ## 模板
 

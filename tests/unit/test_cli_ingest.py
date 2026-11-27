@@ -16,7 +16,7 @@ from memhub.cli.main import _ingest, _kb, _mcp, _worker
 from memhub.kb import catalog
 from memhub.kb.models import Base
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.session import KB_DSN_KEY, KbDsnMissing, create_sessionmaker
+from memhub.kb.session import KB_DSN_KEY, RT_DSN_KEY, KbDsnMissing, create_sessionmaker
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ async def test_dry_run_accepts_registered_active_project(
 async def test_ingest_requires_dsn_without_injected_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv(KB_DSN_KEY, raising=False)
+    monkeypatch.delenv(RT_DSN_KEY, raising=False)
     args = _args(tmp_path, None)
 
     with pytest.raises(KbDsnMissing):

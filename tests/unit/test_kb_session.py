@@ -9,14 +9,17 @@ from memhub.kb.pgstore import PgKnowledgeStore
 from memhub.kb.session import (
     KB_DSN_KEY,
     KB_SCHEMA,
+    RT_DSN_KEY,
     RUNTIME_MAX_OVERFLOW,
     RUNTIME_POOL_SIZE,
     KbDsnMissing,
     connect_args_for,
     create_engine_from_env,
+    create_rt_store,
     create_runtime_store,
     create_sessionmaker,
     kb_dsn,
+    rt_dsn,
     runtime_engine_kwargs,
 )
 
@@ -97,3 +100,40 @@ async def test_runtime_store_closes_engine() -> None:
     await store.aclose()
     assert store.engine is None
     await store.aclose()  # 幂等：停机路径可能被重复触发
+
+
+def test_rt_dsn_does_not_fall_back_to_kb_key() -> None:
+    """ADR-0021：缺 `MEMHUB_KB_RT_DB_URL` 时不得退回 kb-api 的角色，否则静默回到共用冲突。"""
+    with pytest.raises(KbDsnMissing) as err:
+        rt_dsn(environ={KB_DSN_KEY: "postgresql://memhub_kb_app@h:5432/memhub_prod"})
+    message = str(err.value)
+    assert RT_DSN_KEY in message
+    assert KB_DSN_KEY in message
+
+
+def test_rt_dsn_reads_env_key() -> None:
+    dsn = "postgresql://memhub_rt_app@10.0.0.1:5432/memhub_prod"
+    assert rt_dsn(environ={RT_DSN_KEY: dsn}) == dsn
+
+
+def test_rt_store_requires_rt_key() -> None:
+    with pytest.raises(KbDsnMissing):
+        create_rt_store(environ={KB_DSN_KEY: "postgresql://memhub_kb_app@h:5432/memhub_prod"})
+
+
+def test_rt_store_uses_its_own_pool_budget() -> None:
+    """ingest 用 2+2，worker/CLI 用 1+1；角色上限按两者之和 + 余量核算（ADR-0021）。"""
+    ingest = create_rt_store(environ={RT_DSN_KEY: "postgresql://rt@h:5432/memhub_prod"})
+    assert ingest.engine is not None
+    assert ingest.engine.pool.size() == RUNTIME_POOL_SIZE
+    assert ingest.engine.pool._max_overflow == RUNTIME_MAX_OVERFLOW
+
+    cli = create_rt_store(
+        environ={RT_DSN_KEY: "postgresql://rt@h:5432/memhub_prod"},
+        pool_size=1,
+        max_overflow=1,
+    )
+    assert cli.engine is not None
+    assert cli.engine.pool.size() == 1
+    assert cli.engine.pool._max_overflow == 1
+    assert isinstance(cli, PgKnowledgeStore)
