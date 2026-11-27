@@ -18,14 +18,13 @@ import hmac
 import logging
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from anyio import Lock
 from anyio import Path as AsyncPath
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
@@ -50,30 +49,36 @@ from memhub.kb.target_access import (
     TargetUnavailable,
     target_status,
 )
-from memhub.queue.rawstore import (
-    BatchTargetConflict,
+from memhub.queue.content import (
+    ContentUnavailable,
+    NullContentStore,
+    RawContentStore,
+    build_content_store,
+)
+from memhub.queue.flow import build_queue, enqueue_batch
+from memhub.queue.identity import BatchTargetConflict, collector_device_reserved
+from memhub.queue.tasks import (
+    BatchItem,
+    BatchProgress,
+    QueueStore,
     QuotaExceeded,
-    RawStoreQuota,
-    collector_device_reserved,
-    estimate_new_bytes,
-    purge_source_files,
-    queue_write_lock,
-    save_batch,
 )
 
 LOGGER = logging.getLogger("memhub.ingest.audit")
 
 
-def _ingest_lifespan(owned: PgKnowledgeStore | None) -> Any:
-    """应用自建的 PG 存储随应用生命周期释放；注入的存储由调用方负责。"""
+def _ingest_lifespan(
+    owned: list[Callable[[], Awaitable[None]]],
+) -> Any:
+    """应用自建的资源随生命周期释放；注入的资源由调用方负责。"""
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            if owned is not None:
-                await owned.aclose()
+            for close in owned:
+                await close()
 
     return lifespan
 
@@ -216,6 +221,36 @@ def _ok(data: object) -> dict[str, object]:
     return {"code": 0, "message": "ok", "data": data}
 
 
+def _progress_payload(
+    project: str, progress: BatchProgress, items: list[BatchItem]
+) -> dict[str, object]:
+    return {
+        "batch_id": progress.batch_id,
+        "project": project,
+        "total": progress.total,
+        "status": progress.status,
+        "counts": {
+            "queued": progress.queued,
+            "processing": progress.processing,
+            "processed": progress.processed,
+            "pending_review": progress.pending_review,
+        },
+        "errors": list(progress.errors),
+        "created_at": (
+            progress.created_at.astimezone(UTC).isoformat() if progress.created_at else None
+        ),
+        "files": [
+            {
+                "name": item.name,
+                "sha256": item.sha256,
+                "status": item.status,
+                "attempts": item.attempts,
+            }
+            for item in items
+        ],
+    }
+
+
 def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
@@ -274,6 +309,8 @@ def build_store() -> StateStore:
 def create_app(
     store: StateStore | None = None,
     *,
+    queue: QueueStore | None = None,
+    content: RawContentStore | None = None,
     kb_store: PgKnowledgeStore | None = None,
     schema: str | None = KB_SCHEMA,
 ) -> FastAPI:
@@ -281,16 +318,17 @@ def create_app(
 
     默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储，缺 DSN 启动即抛 `KbDsnMissing`；
     `kb_store` 与 `schema` 供测试注入与隔离。采集侧只读该表，不写知识真源。
+
+    `queue` / `content` 可注入；缺省按环境构造：生产必须有 `MEMHUB_DB_URL`
+    （队列）与 `MEMHUB_CH_URL`（正文），否则启动即失败，不退回本机文件。
     """
     prod = os.environ.get("MEMHUB_ENV") == "prod"
     # 文档约定：prod 下忽略 MEMHUB_DEV_TOKEN，避免误配成共享后门。
     dev_token = "" if prod else os.environ.get("MEMHUB_DEV_TOKEN", "")
     token_secret = os.environ.get("MEMHUB_DEVICE_TOKEN_SECRET", "")
     provision_token = os.environ.get("MEMHUB_PROVISION_TOKEN", "")
+    internal_token = os.environ.get("MEMHUB_INTERNAL_TOKEN", "")
     data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
-    if prod and not data_dir:
-        # 生产没有 DATA_DIR 意味着原始增量无处可落：宁可不启动，也不要静默丢数据。
-        raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DATA_DIR")
     if prod and not token_secret:
         # 没有签发密钥就只能共享 dev token，等于任何设备都能冒领。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DEVICE_TOKEN_SECRET")
@@ -298,23 +336,50 @@ def create_app(
         # 开放注册 = 任何人自助领 token 往知识库里灌内容。契约要求注册是用户态操作，
         # 用户体系还没做，先用 provision token 把口子关上。
         raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_PROVISION_TOKEN")
+    if prod and not os.environ.get("MEMHUB_DB_URL", "").strip():
+        # 队列真源在 PG，缺 DSN 时 raw 会落下来但没人提炼。宁可不启动。
+        raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_DB_URL")
+    if prod and not os.environ.get("MEMHUB_CH_URL", "").strip():
+        # 正文真源在 ClickHouse，缺它就是丢原文。宁可不启动。
+        raise RuntimeError("MEMHUB_ENV=prod 必须设置 MEMHUB_CH_URL")
     raw_root = Path(data_dir) if data_dir else None
-    # 同一进程内串行校验批次绑定和配额、写盘、记账；跨进程绑定由 rawstore 保证。
-    queue_lock = Lock()
-    # 即便当前没配 DATA_DIR 也要校验：配错的值应该在启动时就炸，而不是等哪天补上
-    # DATA_DIR 后突然把某个上限换成另一个数。环境校验先于建库，配错优先于缺 DSN。
+    # 配错的值应该在启动时就炸，而不是等哪天补上 DATA_DIR 后突然把某个上限换成另一个数。
+    # 环境校验先于建库，配错优先于缺 DSN。
     queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
-    quota = RawStoreQuota(raw_root / "raw_store", queue_max) if raw_root is not None else None
     # 目标登记只读 `kb_projects`（规格 §9.2.4）；缺 DSN 在构造时即抛 `KbDsnMissing`。
-    owned: PgKnowledgeStore | None = None
+    owned_kb: PgKnowledgeStore | None = None
     if kb_store is None:
         kb_store = create_runtime_store(schema=schema)
-        owned = kb_store
-    registry = TargetRegistry(kb_store)
+        owned_kb = kb_store
     state = store or build_store()
+    queue_store = queue or build_queue(state)
+    if content is not None:
+        content_store: RawContentStore = content
+    elif raw_root is not None:
+        content_store = build_content_store(raw_root)
+    else:
+        # 只用于 dev：没有正文存储时仍推进游标与队列，worker 取不到正文会推迟。
+        content_store = NullContentStore()
+    owned_closers: list[Callable[[], Awaitable[None]]] = []
+    if owned_kb is not None:
+        owned_closers.append(owned_kb.aclose)
+    if content is None:
+        owned_closers.append(content_store.close)
+    if store is None:
+        from memhub.ingest.postgres import PostgresStore
+
+        if isinstance(state, PostgresStore):
+            owned_closers.append(state.close)
+    registry = TargetRegistry(kb_store)
     kb_api_url = os.environ.get("MEMHUB_KB_API_URL", DEFAULT_KB_API_URL)
-    app = FastAPI(title="memhub ingest", version="0.1.0", lifespan=_ingest_lifespan(owned))
+    app = FastAPI(
+        title="memhub ingest",
+        version="0.1.0",
+        lifespan=_ingest_lifespan(owned_closers),
+    )
     app.state.store = state
+    app.state.queue = queue_store
+    app.state.content = content_store
 
     async def active_project(project: str) -> bool:
         try:
@@ -495,44 +560,40 @@ def create_app(
                     {"path": batch_file.path},
                 )
         try:
-            async with queue_lock:
-                if raw_root is not None and quota is not None:
-                    # 跨进程也要串行处理：批次目标检查与状态落库之间不能插入另一笔写入。
-                    async with queue_write_lock(raw_root):
-                        replay = await state.check_replay_target(body)
-                        if replay is not None:
-                            await _audit(body.device_id, project, "accept", "replay")
-                            return _ok(replay.model_dump(mode="json"))
-                        # 配额先于落盘，只算新增内容；重放不应被视为新增数据。
-                        incoming = await estimate_new_bytes(raw_root, body, producer="collector")
-                        await quota.check(incoming)
-                        # 先落盘再推进游标；即使是空批，也要绑定其目标。
-                        await save_batch(raw_root, body, producer="collector")
-                        await quota.record(incoming)
-                        result: IngestResult = await state.apply(body)
-                else:
-                    replay = await state.check_replay_target(body)
-                    result = replay if replay is not None else await state.apply(body)
+            replay = await state.check_replay_target(body)
+            if replay is not None:
+                await _audit(body.device_id, project, "accept", "replay")
+                return _ok(replay.model_dump(mode="json"))
+            result: IngestResult = await enqueue_batch(
+                state,
+                queue_store,
+                content_store,
+                body,
+                producer="collector",
+                limit=queue_max,
+            )
         except BatchTargetConflict as exc:
             await _audit(body.device_id, body.project, "reject", "target_conflict")
             raise _target_unavailable("target_conflict") from exc
         except QuotaExceeded as exc:
-            await _audit(body.device_id, project, "reject", "quota_exceeded")
+            await _audit(body.device_id, project, "reject", "queue_backpressure")
             raise ApiError(
                 ErrorCode.QUEUE_BACKPRESSURE,
-                "raw_store quota exceeded",
+                "queue quota exceeded",
                 {
                     "used_bytes": exc.used,
                     "limit_bytes": exc.limit,
                     "incoming_bytes": exc.incoming,
                 },
             ) from exc
-        except OSError as exc:
-            # 可能只写了一半；让下次请求重扫，别让缓存低估占用。
-            await _audit(body.device_id, project, "reject", "raw_store_unavailable")
-            if quota is not None:
-                await quota.invalidate()
-            raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
+        except ContentUnavailable as exc:
+            # 正文存储（ClickHouse）不可用：这是服务端临时问题，客户端按背压退避重试。
+            await _audit(body.device_id, project, "reject", "content_store_unavailable")
+            raise ApiError(
+                ErrorCode.QUEUE_BACKPRESSURE,
+                "raw content store unavailable",
+                {"reason": "content_store_unavailable"},
+            ) from exc
         await _audit(body.device_id, project, "accept")
         return _ok(result.model_dump(mode="json"))
 
@@ -543,7 +604,11 @@ def create_app(
         purge: Annotated[str | None, Query()] = None,
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        """按用户 provision token 清理一个设备源的原始队列，不改运行态与知识。"""
+        """按用户 provision token 清理一个设备源的待提炼队列，不改运行态与知识。
+
+        只删 PG 队列行；正文在 ClickHouse，账号无 DELETE 权限，保留到 180 天 TTL。
+        响应显式标记 `content_retained`，不再声称清理了原始字节。
+        """
         supplied = ""
         if authorization and authorization.startswith("Bearer "):
             supplied = authorization.removeprefix("Bearer ")
@@ -561,20 +626,17 @@ def create_app(
         ):
             raise ApiError(ErrorCode.BAD_REQUEST, "invalid purge target")
 
-        counts = {"raw_store": 0, "processed_raw": 0, "pending_review": 0}
+        counts = {"queued": 0, "processing": 0, "processed": 0, "pending_review": 0}
         try:
-            async with queue_lock:
-                if raw_root is not None:
-                    async with queue_write_lock(raw_root):
-                        counts = await purge_source_files(raw_root, device_id, source_id)
-                        if quota is not None:
-                            await quota.invalidate()
-        except BatchTargetConflict as exc:
-            raise ApiError(ErrorCode.BAD_REQUEST, "invalid purge target") from exc
-        except OSError as exc:
-            if quota is not None:
-                await quota.invalidate()
-            raise ApiError(ErrorCode.INTERNAL, "raw store unavailable") from exc
+            raw_counts = await queue_store.purge_source(device_id, source_id)
+        except ContentUnavailable as exc:
+            raise ApiError(
+                ErrorCode.QUEUE_BACKPRESSURE,
+                "queue unavailable",
+                {"reason": "queue_unavailable"},
+            ) from exc
+        for status in counts:
+            counts[status] = raw_counts.get(status, 0)
 
         await kb_store.record_write_audit(
             actor="provision",
@@ -583,7 +645,95 @@ def create_app(
             action="ingest_purge",
             result="ok",
         )
-        return _ok({"device_id": device_id, "source_id": source_id, "purged": counts})
+        return _ok(
+            {
+                "device_id": device_id,
+                "source_id": source_id,
+                "purged": counts,
+                "content_retained": True,
+                "content_retention": "clickhouse_ttl_180d",
+            }
+        )
+
+    # -- 内部接口：管理台上传（kb-api 调用，MEMHUB_INTERNAL_TOKEN 鉴权） --------
+
+    async def internal_auth(authorization: str | None) -> None:
+        if not internal_token:
+            raise ApiError(ErrorCode.INTERNAL, "internal api disabled")
+        supplied = ""
+        if authorization and authorization.startswith("Bearer "):
+            supplied = authorization.removeprefix("Bearer ")
+        if not hmac.compare_digest(supplied.encode(), internal_token.encode()):
+            raise ApiError(ErrorCode.TOKEN_INVALID, "invalid internal token")
+
+    @app.post("/internal/enqueue")
+    async def internal_enqueue(
+        body: IngestRequest,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        """管理台上传批次入队：与采集同一套正文存储与队列，只是没有设备 token。"""
+        await internal_auth(authorization)
+        project = explicit_project(body.project)
+        if project is None:
+            raise ApiError(ErrorCode.BAD_REQUEST, "project required")
+        # 目标必须是已登记且活动的知识库；拼错的库名不能凭空建出空库。
+        await check_target(body.device_id, project)
+        replay = await state.check_replay_target(body)
+        if replay is not None:
+            return _ok(replay.model_dump(mode="json"))
+        try:
+            result = await enqueue_batch(
+                state,
+                queue_store,
+                content_store,
+                body,
+                producer="console",
+                limit=queue_max,
+            )
+        except BatchTargetConflict as exc:
+            raise ApiError(ErrorCode.BAD_REQUEST, "queue target conflict") from exc
+        except QuotaExceeded as exc:
+            raise ApiError(
+                ErrorCode.KB_QUEUE_FULL,
+                "queue quota exceeded",
+                {
+                    "used_bytes": exc.used,
+                    "limit_bytes": exc.limit,
+                    "incoming_bytes": exc.incoming,
+                },
+            ) from exc
+        except ContentUnavailable as exc:
+            raise ApiError(
+                ErrorCode.QUEUE_BACKPRESSURE,
+                "raw content store unavailable",
+                {"reason": "content_store_unavailable"},
+            ) from exc
+        return _ok(result.model_dump(mode="json"))
+
+    @app.get("/internal/queue/{batch_id}")
+    async def internal_queue(
+        batch_id: str,
+        project: Annotated[str | None, Query()] = None,
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> dict[str, object]:
+        """批次提炼进度；kb-api 据此展示上传状态。
+
+        `project` 可省略：管理台上传的 batch_id 是 uuid，可唯一反查所属库；
+        采集批次可能出现同名 batch_id，省略时按歧义处理（404）。
+        """
+        await internal_auth(authorization)
+        resolved = project
+        if resolved is None:
+            resolved = await queue_store.batch_project(batch_id)
+        elif explicit_project(resolved) is None:
+            raise ApiError(ErrorCode.BAD_REQUEST, "invalid project")
+        if resolved is None or explicit_project(resolved) is None:
+            raise ApiError(ErrorCode.KB_NOT_FOUND, "batch not found")
+        progress = await queue_store.batch_progress(resolved, batch_id)
+        if progress is None:
+            raise ApiError(ErrorCode.KB_NOT_FOUND, "batch not found")
+        items = await queue_store.batch_items(resolved, batch_id)
+        return _ok(_progress_payload(resolved, progress, items))
 
     @app.post("/ingest/heartbeat")
     async def heartbeat(

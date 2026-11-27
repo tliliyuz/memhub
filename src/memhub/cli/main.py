@@ -90,22 +90,16 @@ def main(argv: list[str] | None = None) -> int:
     token.add_argument("--json", action="store_true", help="输出单行 JSON，供脚本读取")
 
     purge = sub.add_parser(
-        "purge-expired", help="删掉重放窗口（24h）外的批次记录，供 systemd timer 调用"
+        "purge-expired", help="删掉重放窗口（24h）外的批次记录并裁剪队列，供 systemd timer 调用"
     )
     purge.add_argument(
         "--keep-hours", type=int, default=25, help="保留最近 N 小时的批次（默认 25）"
     )
     purge.add_argument(
-        "--pending-review-days",
-        type=int,
-        default=30,
-        help="pending_review/ 隔离文件保留天数（默认 30；0 表示不清理）",
-    )
-    purge.add_argument(
-        "--processed-raw-days",
+        "--processed-days",
         type=int,
         default=7,
-        help="processed_raw/ 副本保留天数（默认 7；0 表示不按时间清理）",
+        help="processed 队列行保留天数（默认 7；0 表示不裁剪）",
     )
 
     forget = sub.add_parser(
@@ -114,16 +108,16 @@ def main(argv: list[str] | None = None) -> int:
     forget.add_argument("--project", required=True, help="知识库 id")
     forget.add_argument("--source", dest="source_id", default=None, help="只清该源；缺省清整库")
 
-    worker = sub.add_parser("worker", help="提炼守护进程：raw_store → 知识真源（串行）")
+    worker = sub.add_parser("worker", help="提炼守护进程：PG 队列 + CH 原文 → 知识真源（串行）")
     worker.add_argument("--once", action="store_true", help="只跑一轮后退出（timer 用）")
     worker.add_argument(
         "--window", default="21:00-02:00", help="处理窗口（本地时间，HH:MM-HH:MM；空串=全天）"
     )
     worker.add_argument("--interval", type=float, default=300.0, help="轮询间隔秒数")
     worker.add_argument("--limit", type=int, default=20, help="每轮最多处理文件数")
-    worker.add_argument("--data-dir", default=None)
+    worker.add_argument("--data-dir", default=None, help="dev 本地正文目录（缺省 MEMHUB_DATA_DIR）")
     worker.add_argument(
-        "--dry-run", action="store_true", help="只校验目录/配置并打印计划后退出（冒烟用）"
+        "--dry-run", action="store_true", help="只校验配置并打印计划后退出（冒烟用）"
     )
 
     aggregate = sub.add_parser(
@@ -144,11 +138,6 @@ def main(argv: list[str] | None = None) -> int:
     kb = sub.add_parser("kb", help="启动知识库管理 API（本地管理台后端 + 静态前端）")
     kb.add_argument("--port", type=int, default=None, help="默认 8701（MEMHUB_KB_HTTP_PORT）")
     kb.add_argument("--web-dist", default=None, help="前端构建产物目录（含 index.html）")
-    kb.add_argument(
-        "--data-dir",
-        default=None,
-        help="提炼队列数据目录（缺省 MEMHUB_DATA_DIR）；配置后开放 /api/v1/kb/uploads",
-    )
 
     provision = sub.add_parser(
         "provision-device", help="在库里登记设备并把 per-device token 打到标准输出"
@@ -524,46 +513,29 @@ async def _mcp(args: argparse.Namespace) -> int:
 
 
 async def _purge_expired(args: argparse.Namespace) -> int:
-    """批次 TTL 与隔离区清理：给 systemd timer 单独调用，不拉起 API 进程。"""
-    from datetime import timedelta
+    """批次 TTL 与队列行裁剪：给 systemd timer 单独调用，不拉起 API 进程。
 
-    from memhub.worker.daemon import PROCESSED_MAX_BYTES, prune_processed_raw, purge_pending_review
-
-    data_dir = os.environ.get("MEMHUB_DATA_DIR", "")
-    if data_dir and args.pending_review_days > 0:
-        # 隔离区不属于批次记录，DSN 缺省时也要清理：毒文件不清理会无限占盘。
-        files, size = await purge_pending_review(
-            Path(data_dir), older_than=timedelta(days=args.pending_review_days)
-        )
-        print(f"已清理隔离区 {files} 个文件（{size} 字节）")
-
-    if data_dir and args.processed_raw_days > 0:
-        # processed_raw 是 raw_store 的完整副本，不受配额约束；不裁剪同样会写满磁盘。
-        raw = os.environ.get("MEMHUB_PROCESSED_MAX_BYTES", "").strip()
-        try:
-            max_bytes = int(raw) if raw else PROCESSED_MAX_BYTES
-        except ValueError:
-            print(f"MEMHUB_PROCESSED_MAX_BYTES 必须是整数：{raw!r}", file=sys.stderr)
-            return 2
-        if max_bytes <= 0:
-            print(f"MEMHUB_PROCESSED_MAX_BYTES 必须大于 0：{max_bytes}", file=sys.stderr)
-            return 2
-        files, size = await prune_processed_raw(
-            Path(data_dir),
-            max_bytes=max_bytes,
-            older_than=timedelta(days=args.processed_raw_days),
-        )
-        print(f"已裁剪 processed_raw {files} 个文件（{size} 字节）")
+    队列行不含正文（正文在 ClickHouse，按 180 天 TTL 清理），因此只按天数裁剪
+    `processed` 行；`pending_review` 保留给人复核，不自动删除。
+    """
+    from datetime import UTC, datetime, timedelta
 
     dsn = os.environ.get("MEMHUB_DB_URL", "")
     if not dsn:
-        print("MEMHUB_DB_URL 未设置；内存实现无需清理批次", file=sys.stderr)
+        print("MEMHUB_DB_URL 未设置；批次与队列都在共享库，跳过清理", file=sys.stderr)
         return 0
     from memhub.ingest.postgres import PostgresStore
+    from memhub.queue.tasks import PostgresQueue
 
     store = PostgresStore(dsn, min_size=1, max_size=1)
     try:
         await store.migrate()  # 幂等：库是空的也能自建表，timer 不依赖部署顺序
+        if args.processed_days > 0:
+            queue = PostgresQueue(store.sessions)
+            trimmed = await queue.trim(
+                before=datetime.now(UTC) - timedelta(days=args.processed_days)
+            )
+            print(f"已裁剪 {trimmed} 条已处理队列行")
         deleted = await store.purge_expired(keep=timedelta(hours=args.keep_hours))
     finally:
         await store.close()
@@ -596,7 +568,15 @@ async def _forget_messages(args: argparse.Namespace) -> int:
 
 
 async def _worker(args: argparse.Namespace) -> int:
-    """提炼守护进程。退出码：0 无失败；1 有失败；2 配置/LLM 端点错误。"""
+    """提炼守护进程。退出码：0 无失败；1 有失败；2 配置/LLM 端点错误。
+
+    队列在 PG（`ingest_queue`），正文在 ClickHouse（ADR-0020）。两者都必须是共享
+    存储：独立进程用本机内存队列只会空转，因此缺 `MEMHUB_DB_URL` 直接退出。
+    dev 未接 ClickHouse 时可用 `--data-dir` / `MEMHUB_DATA_DIR` 退回本地正文目录。
+    """
+    from memhub.ingest.app import build_store
+    from memhub.queue.content import build_content_store
+    from memhub.queue.flow import build_queue
     from memhub.worker.daemon import (
         WorkerConfig,
         parse_window_tz,
@@ -605,9 +585,14 @@ async def _worker(args: argparse.Namespace) -> int:
         run_round,
     )
 
+    dsn = os.environ.get("MEMHUB_DB_URL", "").strip()
+    ch_url = os.environ.get("MEMHUB_CH_URL", "").strip()
     data_dir = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
-    if not data_dir:
-        print("缺少 MEMHUB_DATA_DIR", file=sys.stderr)
+    if not dsn:
+        print("缺少 MEMHUB_DB_URL（提炼队列在共享库）", file=sys.stderr)
+        return 2
+    if not ch_url and not data_dir:
+        print("缺少 MEMHUB_CH_URL（正文存储）或 MEMHUB_DATA_DIR（dev 本地正文）", file=sys.stderr)
         return 2
     try:
         memory_settings = _memory_settings()
@@ -615,85 +600,80 @@ async def _worker(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     store = _runtime_store(args)
-    if args.dry_run:
-        # 容器冒烟用：只验证入口、环境与目录布局，不探 LLM、不碰真源。
-        raw_root = Path(data_dir) / "raw_store"
-        exists = await AsyncPath(raw_root).is_dir()
-        print(
-            f"[dry-run] data={data_dir} 真源=PG "
-            f"raw_root={'exists' if exists else 'missing'} "
-            f"window={args.window or 'all-day'} once={args.once}",
-            flush=True,
+    state = build_store()
+    queue_store = build_queue(state)
+    content = build_content_store(Path(data_dir) if data_dir else None)
+    try:
+        if args.dry_run:
+            # 容器冒烟用：只验证入口与配置，不探 LLM、不碰真源。
+            backend = "clickhouse" if ch_url else str(Path(data_dir) / "content_store")
+            print(
+                f"[dry-run] 队列=PG 正文={backend} "
+                f"window={args.window or 'all-day'} once={args.once}",
+                flush=True,
+            )
+            return 0
+        memory = await load_memory_context(store, memory_settings)
+        base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
+        api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+        if not base_url or not api_key:
+            print("缺少 MEMHUB_LLM_BASE_URL / MEMHUB_LLM_API_KEY", file=sys.stderr)
+            return 2
+        try:
+            await probe_endpoint(base_url)
+        except LLMError as exc:
+            # 端点不可达时直接退出：进循环只会空转把日志写满（上次事故的教训）。
+            print(f"LLM 端点自检失败: {exc}", file=sys.stderr)
+            return 2
+
+        # 输出预算含 thinking：默认 8000 时模型会把预算全花在思考上、不给 text 块
+        # （stop_reason=max_tokens, blocks=[thinking]，线上首跑已踩）。默认 32000，
+        # 用 MEMHUB_LLM_MAX_TOKENS 覆盖；非法值按配置错误退出（2），不静默回退。
+        raw_max_tokens = os.environ.get("MEMHUB_LLM_MAX_TOKENS", "").strip()
+        try:
+            max_tokens = int(raw_max_tokens) if raw_max_tokens else 32000
+        except ValueError:
+            print(f"MEMHUB_LLM_MAX_TOKENS 必须是整数：{raw_max_tokens!r}", file=sys.stderr)
+            return 2
+        if max_tokens <= 0:
+            print(f"MEMHUB_LLM_MAX_TOKENS 必须为正数：{max_tokens}", file=sys.stderr)
+            return 2
+
+        # 窗口时区：容器默认 UTC，`--window 21:00-02:00` 会实际跑在 05:00-10:00 CST。
+        # 生产用 MEMHUB_WINDOW_TZ=+08:00（显式偏移，不依赖镜像里的 tzdata）。
+        try:
+            window_tz = parse_window_tz(os.environ.get("MEMHUB_WINDOW_TZ", ""))
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+
+        client, model = _llm_client()
+        config = WorkerConfig(
+            queue=queue_store,
+            content=content,
+            store=store,
+            model=model,
+            max_tokens=max_tokens,
+            window=args.window or None,
+            window_tz=window_tz,
+            interval=args.interval,
+            limit=args.limit,
+            is_registered=state.is_registered,
+            state=state,
+            memory=memory,
         )
-        await store.aclose()
-        return 0
-    memory = await load_memory_context(store, memory_settings)
-    base_url = os.environ.get("MEMHUB_LLM_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
-    api_key = os.environ.get("MEMHUB_LLM_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    if not base_url or not api_key:
-        print("缺少 MEMHUB_LLM_BASE_URL / MEMHUB_LLM_API_KEY", file=sys.stderr)
-        return 2
-    try:
-        await probe_endpoint(base_url)
-    except LLMError as exc:
-        # 端点不可达时直接退出：进循环只会空转把日志写满（上次事故的教训）。
-        print(f"LLM 端点自检失败: {exc}", file=sys.stderr)
-        return 2
-
-    # 输出预算含 thinking：默认 8000 时模型会把预算全花在思考上、不给 text 块
-    # （stop_reason=max_tokens, blocks=[thinking]，线上首跑已踩）。默认 32000，
-    # 用 MEMHUB_LLM_MAX_TOKENS 覆盖；非法值按配置错误退出（2），不静默回退。
-    raw_max_tokens = os.environ.get("MEMHUB_LLM_MAX_TOKENS", "").strip()
-    try:
-        max_tokens = int(raw_max_tokens) if raw_max_tokens else 32000
-    except ValueError:
-        print(f"MEMHUB_LLM_MAX_TOKENS 必须是整数：{raw_max_tokens!r}", file=sys.stderr)
-        return 2
-    if max_tokens <= 0:
-        print(f"MEMHUB_LLM_MAX_TOKENS 必须为正数：{max_tokens}", file=sys.stderr)
-        return 2
-
-    # 窗口时区：容器默认 UTC，`--window 21:00-02:00` 会实际跑在 05:00-10:00 CST。
-    # 生产用 MEMHUB_WINDOW_TZ=+08:00（显式偏移，不依赖镜像里的 tzdata）。
-    try:
-        window_tz = parse_window_tz(os.environ.get("MEMHUB_WINDOW_TZ", ""))
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-
-    # 数据库迁移由 ingest 负责；worker 只查设备登记。
-    # 独立进程的内存状态无法感知 ingest 登记的设备。
-    state = None
-    if os.environ.get("MEMHUB_DB_URL"):
-        from memhub.ingest.app import build_store
-
-        state = build_store()
-    client, model = _llm_client()
-    config = WorkerConfig(
-        data_dir=Path(data_dir),
-        store=store,
-        model=model,
-        max_tokens=max_tokens,
-        window=args.window or None,
-        window_tz=window_tz,
-        interval=args.interval,
-        limit=args.limit,
-        is_registered=state.is_registered if state is not None else None,
-        state=state,
-        memory=memory,
-    )
-    try:
-        if args.once:
-            report = await run_round(client, config)
-            return 1 if report.failed else 0
-        return await run_forever(client, config)
+        try:
+            if args.once:
+                report = await run_round(client, config)
+                return 1 if report.failed else 0
+            return await run_forever(client, config)
+        finally:
+            await client.aclose()
     finally:
         try:
-            await client.aclose()
+            await content.close()
+            await state.close()
         finally:
-            close = getattr(state, "close", None)
-            if close is not None:
-                await close()
             await store.aclose()
 
 
@@ -877,21 +857,20 @@ async def _kb(args: argparse.Namespace) -> int:
     """本地知识库管理台：kb-api + 静态前端。
 
     只绑回环：这是单用户管理面，没有公网入口。前端构建产物缺失时纯 API 运行，
-    开发期用 Vite 的 5173 端口直连。
+    开发期用 Vite 的 5173 端口直连。上传经 ingest 内部接口（ADR-0020），
+    kb-api 不碰本机目录、运行态 DSN 或 ClickHouse 凭据。
     """
     web_dist = args.web_dist or os.environ.get("MEMHUB_KB_WEB_DIST", "")
-    data_dir_raw = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
-    if data_dir_raw:
-        # 上传要落 raw_store：解析成绝对路径再交给 create_app，避免受启动目录影响。
-        os.environ["MEMHUB_DATA_DIR"] = str(await AsyncPath(data_dir_raw).resolve())
     if web_dist:
         os.environ["MEMHUB_KB_WEB_DIST"] = str(await AsyncPath(web_dist).resolve())
     port = args.port or int(os.environ.get("MEMHUB_KB_HTTP_PORT", "8701"))
     print(f"memhub kb-api: http://127.0.0.1:{port}/  真源=PG（schema kb）", flush=True)
-    if data_dir_raw:
-        print(f"上传→提炼队列: {os.environ['MEMHUB_DATA_DIR']}", flush=True)
+    ingest_url = os.environ.get("MEMHUB_INGEST_URL", "").strip()
+    internal_token = os.environ.get("MEMHUB_INTERNAL_TOKEN", "").strip()
+    if ingest_url and internal_token:
+        print(f"上传→ingest 内部接口: {ingest_url}", flush=True)
     else:
-        print("上传未启用（未配置 MEMHUB_DATA_DIR / --data-dir）", flush=True)
+        print("上传未启用（需要 MEMHUB_INGEST_URL 与 MEMHUB_INTERNAL_TOKEN）", flush=True)
     await _run_server(
         "memhub.kb.api:create_app",
         host="127.0.0.1",
