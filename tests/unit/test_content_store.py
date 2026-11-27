@@ -186,7 +186,25 @@ async def test_clickhouse_existing_maps_shas_to_projects() -> None:
     assert isinstance(params, dict)
     assert params["param_device"] == "dev-1"
     assert params["param_source"] == "cc-sessions"
-    assert json.loads(params["param_shas"]) == ["b" * 64], "重复 sha 只查一次"
+    assert params["param_shas"] == f"['{'b' * 64}']", "重复 sha 只查一次；必须是单引号数组字面量"
+
+
+async def test_clickhouse_existing_escapes_array_literal() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, text="")
+
+    store = _ch_store(httpx.MockTransport(handler))
+    await store.existing("dev-1", "cc-sessions", ["e\nf", "a'b", "c\\d"])
+    await store.close()
+
+    params = seen["params"]
+    assert isinstance(params, dict)
+    # ClickHouse 数组参数按字面量解析，字符串内的反斜杠、单引号与控制字符必须转义，
+    # 否则会在服务端拆词或形成语法错误（26.9 实测 400）。
+    assert params["param_shas"] == "['a\\'b', 'c\\\\d', 'e\\nf']"
 
 
 async def test_clickhouse_http_error_is_unavailable_without_credentials() -> None:

@@ -36,6 +36,35 @@ from anyio import Path as AsyncPath
 CH_DATABASE = "memhub_raw"
 CH_TABLE = "raw_sessions"
 
+# ClickHouse HTTP 的 `param_*` 不做类型解析，服务端把值当 SQL 字面量读：
+# `Array(String)` 只能传 `['a', 'b']` 这种单引号数组，JSON 数组会在解析处报 400。
+_CH_LITERAL_ESCAPES = {
+    "\\": "\\\\",
+    "'": "\\'",
+    "\0": "\\0",
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
+def _ch_string_literal(value: str) -> str:
+    """单引号字符串字面量；控制字符按 ClickHouse 转义，避免拆词或语法错误。"""
+    parts: list[str] = []
+    for char in value:
+        escaped = _CH_LITERAL_ESCAPES.get(char)
+        if escaped is None and ord(char) < 0x20:
+            escaped = f"\\x{ord(char):02x}"
+        parts.append(escaped if escaped is not None else char)
+    return "'" + "".join(parts) + "'"
+
+
+def _ch_string_array(values: Sequence[str]) -> str:
+    """把字符串序列渲染成 ClickHouse `Array(String)` 字面量。"""
+    return "[" + ", ".join(_ch_string_literal(value) for value in values) + "]"
+
 
 class ContentUnavailable(RuntimeError):
     """正文存储不可用（网络/TLS/服务端错误）；调用方按「临时不可用」推迟，不算文件失败。"""
@@ -229,7 +258,7 @@ class ClickHouseContentStore:
             params={
                 "param_device": device_id,
                 "param_source": source_id,
-                "param_shas": json.dumps(sorted(set(shas))),
+                "param_shas": _ch_string_array(sorted(set(shas))),
             },
             compress_response=True,
         )
