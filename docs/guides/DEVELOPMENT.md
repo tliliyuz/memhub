@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | specified |
-| 最后更新 | 2026-11-25 |
+| 最后更新 | 2026-11-27 |
 | 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
 | 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../architecture.md) 与 [contracts](../contracts/README.md)） |
 
@@ -176,6 +176,52 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
   `knowledge/` 打包备份、删除动作都由负责人在服务器上执行或明确授权（ADR-0013 §9）。
 - 迁移前若 `knowledge/_kb_archives/pending.json` 存在，先用 `memhub recover-kb-archive --knowledge-dir ./knowledge`
   续做未完成的归档事务；它没解决就不要开始迁移（迁移会显式阻断）。
+
+### 9.2 一次性导入旧本机队列（raw_store → ClickHouse + PG 队列）
+
+ADR-0020 切换后，旧版 `raw_store/` 里「已接收但未提炼」的文件不会自动进入 CH 与 `ingest_queue`。
+`memhub import-raw-store` 负责把它们补进去；它是迁移工具，不是采集入口，也不替代正常的
+`POST /ingest/raw`。
+
+```bash
+# 前置：暂停旧 ingest 与 worker，确认没有进程再写该 DATA_DIR；先做文件级备份（脚本不删任何文件）。
+# 1) 只读盘点：校验记录、统计导入/重复/失败，不写库、不写文件
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main import-raw-store \
+  --data-dir /var/lib/memhub --dry-run
+# 2) 导入：正文先写 CH，再按 (project, sha256) 入队；可重复运行
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main import-raw-store \
+  --data-dir /var/lib/memhub
+# 3) 核验：逐条确认 CH 正文与队列行存在，不写库；缺失即非 0 退出
+PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main import-raw-store \
+  --data-dir /var/lib/memhub --verify-only
+```
+
+行为口径：
+
+- **来源**：只读 `<data-dir>/raw_store/<device>/<source>/<sha[:2]>/<sha>.json`。`processed_raw/` 与
+  `pending_review/` 只统计不导入——前者已提炼，重排会产生重复知识；后者是终态失败，重新入队
+  会绕过复核语义。两者的文件原样保留。
+- **记录校验**：JSON 必须含旧版字段 `producer/device_id/source_id/source_type/project/batch_id/path/
+  from_offset/to_offset/mtime/sha256/content`；文件名、`sha256` 字段与 `content` 的 SHA-256 三者必须一致；
+  目标必须显式（`project` 非空且未使用保留值），身份规则与采集一致（`console` 只能是
+  `kb-console`/`docs`/目标库，采集器不得占用 `kb-console`）。任一违反计为失败并跳过该条，其余继续。
+- **幂等与断点重跑**：正文按 `(project, sha256)` 内容寻址，队列行按同键去重；已存在的正文或队列行
+  计为重复并跳过。中途失败后直接重跑即可从断点继续，不需要标记文件。
+- **顺序**：每条先 `content.put` 再 `queue.enqueue`，与在线路径一致；worker 不会领到取不到正文的任务。
+  导入不推进 `file_cursors`、不写 `batches`，也不修改 `raw_store/` 本身。
+- **退出码**：`0` 全部导入或核验通过；`1` 有失败记录（汇总打印失败数，不打印正文与凭据）；
+  `2` 配置错误（缺 `--data-dir`、缺 `MEMHUB_DB_URL`/`MEMHUB_KB_DB_URL`、既无 `MEMHUB_CH_URL`
+  也无本地正文目录）。
+- **并发**：脚本不获取跨进程锁。必须在旧 ingest / worker 停止后运行；新 worker 在导入核验通过后才启用，
+  否则会与导入抢同一批任务。
+
+容器内正文存储自检（TLS 与 `httpx` 链路）：
+
+```bash
+docker compose -f /opt/memhub/app/compose.yml exec ingest \
+  python -m memhub.cli.main check-content-store
+# 退出码 0 = 已连上 CH（含 MEMHUB_CH_CA 校验）；1 = 不可用；2 = 配置错误
+```
 
 ## 10. MCP 检索服务（stdio 与 HTTP）
 

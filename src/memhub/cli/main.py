@@ -170,6 +170,20 @@ def main(argv: list[str] | None = None) -> int:
         help="整库归档快照的处理方式；dry-run 下两者都只统计",
     )
 
+    backfill = sub.add_parser(
+        "import-raw-store", help="一次性把旧 raw_store 积压导入 CH 正文与 PG 队列"
+    )
+    backfill.add_argument("--data-dir", default=None, help="旧 DATA_DIR（缺省 MEMHUB_DATA_DIR）")
+    backfill.add_argument("--dry-run", action="store_true", help="只校验与统计，不写库不删文件")
+    backfill.add_argument("--verify-only", action="store_true", help="逐条核验正文与队列行，不写库")
+
+    check_store = sub.add_parser(
+        "check-content-store", help="自检正文存储（ClickHouse TLS 或本地目录），容器冒烟用"
+    )
+    check_store.add_argument(
+        "--data-dir", default=None, help="本地正文目录（缺省 MEMHUB_DATA_DIR）"
+    )
+
     args = parser.parse_args(argv)
     if args.version:
         print(__version__)
@@ -199,6 +213,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         "kb": _kb,
         "provision-device": _provision_device,
         "migrate-kb": _migrate_kb,
+        "import-raw-store": _import_raw_store,
+        "check-content-store": _check_content_store,
     }
     handler = handlers.get(args.command or "")
     if handler is None:
@@ -675,6 +691,92 @@ async def _worker(args: argparse.Namespace) -> int:
             await state.close()
         finally:
             await store.aclose()
+
+
+async def _import_raw_store(args: argparse.Namespace) -> int:
+    """旧 raw_store 一次性导入（DEVELOPMENT §9.2）；不是采集入口，不推进游标。"""
+    from memhub.ingest.app import DEFAULT_QUEUE_MAX_BYTES, _env_bytes, build_store
+    from memhub.queue.backfill import run_backfill
+    from memhub.queue.content import build_content_store
+    from memhub.queue.flow import build_queue
+
+    if args.dry_run and args.verify_only:
+        print("--dry-run 与 --verify-only 不能同时使用", file=sys.stderr)
+        return 2
+    data_dir_text = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
+    if not data_dir_text:
+        print("缺少 --data-dir 或 MEMHUB_DATA_DIR（旧队列根目录）", file=sys.stderr)
+        return 2
+    data_dir = Path(data_dir_text)
+    if not await AsyncPath(data_dir).is_dir():
+        print(f"数据目录不存在：{data_dir}", file=sys.stderr)
+        return 2
+    if not os.environ.get("MEMHUB_DB_URL", "").strip():
+        print("缺少 MEMHUB_DB_URL（提炼队列在共享库）", file=sys.stderr)
+        return 2
+    try:
+        limit = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        content = build_content_store(data_dir)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    state = build_store()
+    queue_store = build_queue(state)
+    try:
+        report = await run_backfill(
+            data_dir,
+            queue=queue_store,
+            content=content,
+            limit=limit,
+            dry_run=args.dry_run,
+            verify_only=args.verify_only,
+        )
+    finally:
+        try:
+            await content.close()
+        finally:
+            await state.close()
+    for failure in report.failures:
+        print(f"失败：{failure}", file=sys.stderr)
+    mode = "核验" if report.verify_only else ("盘点" if report.dry_run else "导入")
+    counts = (
+        f"核验通过 {report.verified}/{report.valid}"
+        if report.verify_only
+        else f"导入 {report.imported}，重复 {report.duplicates}"
+    )
+    print(
+        f"{mode}：扫描 {report.scanned} 条（有效 {report.valid}）→ {counts}；"
+        f"失败 {len(report.failures)}；processed_raw {report.processed_raw}、"
+        f"pending_review {report.pending_review} 未导入"
+    )
+    return 1 if report.failures else 0
+
+
+async def _check_content_store(args: argparse.Namespace) -> int:
+    """容器内正文存储自检：验证 CH 的 TLS/httpx 链路或本地目录可读写。"""
+    from memhub.queue.content import ContentUnavailable, build_content_store
+
+    data_dir_text = args.data_dir or os.environ.get("MEMHUB_DATA_DIR", "")
+    try:
+        store = build_content_store(Path(data_dir_text) if data_dir_text else None)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    backend = "clickhouse" if os.environ.get("MEMHUB_CH_URL", "").strip() else data_dir_text
+    try:
+        # 只做一次按 (project, sha) 的不存在性查询；命中与否不影响连通性判定。
+        await store.get("memhub-smoke", "0" * 64)
+    except ContentUnavailable as exc:
+        print(f"正文存储不可用（{backend}）：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        await store.close()
+    print(f"正文存储可用：{backend}")
+    return 0
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}

@@ -49,6 +49,12 @@ services:
     # 实测：空载 50MB，推一枚 190KB 批次后峰值 59MB（本机 venv），384m 是 6 倍余量。
     mem_limit: 384m
     memswap_limit: 384m
+    volumes:
+      - /var/lib/memhub:/var/lib/memhub
+      # 正文存储（ClickHouse）私有 CA，路径须与 MEMHUB_CH_CA 一致。只给 ingest 与 worker；
+      # kb 与 oauth2-proxy 不连 CH，不挂载。宿主机文件不存在时 Docker 会建出空目录，
+      # 部署前先 install -m 644 <ca.pem> /etc/memhub/ch-ca.pem。
+      - /etc/memhub/ch-ca.pem:/etc/memhub/ch-ca.pem:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8700/healthz', timeout=3)"]
       interval: 30s
@@ -78,6 +84,10 @@ services:
     # 单并发 + 60K 输入上限让峰值有界。640m 是 4 倍余量。
     mem_limit: 640m
     memswap_limit: 640m
+    volumes:
+      - /var/lib/memhub:/var/lib/memhub
+      # 与 ingest 相同的 CH CA 只读挂载（worker 直接读 ClickHouse 正文）。
+      - /etc/memhub/ch-ca.pem:/etc/memhub/ch-ca.pem:ro
 
   kb:
     <<: *defaults
