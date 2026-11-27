@@ -743,6 +743,10 @@ async def _import_raw_store(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     state = build_store()
+    if not (args.dry_run or args.verify_only):
+        # 导入会直接写 ingest_queue；本命令不经过 `memhub api` 的启动建表，
+        # 空库或落后版本必须自己补迁移（幂等）。盘点与核验保持只读。
+        await state.migrate()
     queue_store = build_queue(state)
     try:
         report = await run_backfill(
