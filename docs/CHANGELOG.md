@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 2026-11-27（修复 ADR-0020 上线阻断：CH 数组参数与导入建表）
+
+- `fix(queue)`：`ClickHouseContentStore.existing()` 的 `param_shas` 由 JSON 数组改为
+  ClickHouse 单引号数组字面量，并统一转义反斜杠、单引号与控制字符。HTTP `param_*`
+  按 SQL 字面量解析，JSON 数组在 26.9 实测直接 400（`cannot be parsed as Array(String)`），
+  采集侧「查已有正文」因此必然失败。
+- `fix(cli)`：`import-raw-store` 写库前调用 `StateStore.migrate()`（幂等）。该命令不经过
+  `memhub api` 的启动建表，空库会报 `relation "ingest_queue" does not exist`；`--dry-run`
+  与 `--verify-only` 保持只读，不对目标库做结构变更。`StateStore` 协议补 `migrate`，
+  `MemoryStore` 为空实现，CLI 与内存实现按同一契约接线。
+- 验证（worktree `.claude/worktree/import-blockers`）：RED 先观察到 3 个用例失败（数组
+  字面量断言 2 个、导入未建表 1 个）；GREEN 后 `pytest tests/unit/test_content_store.py
+  tests/unit/test_cli_backfill.py -q` 19 passed；`pytest tests/unit tests/contract -q`
+  548 passed / 1 skipped / 201 errors，错误全部为既有 `no pg_hba.conf entry`（本机 IP 被
+  远端测试库拒绝，改动前同样存在）；`ruff check`/`format --check` 与 `mypy src` 通过。
+
 ## 2026-11-27（备案信息页脚）
 
 - `feat(web)`：新增 `AppFooter`，管理台各页面底部展示 ICP 备案号与公安联网备案号，
