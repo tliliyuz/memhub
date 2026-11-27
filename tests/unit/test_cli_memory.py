@@ -22,7 +22,7 @@ from memhub.kb.models import (
     KbWriteAudit,
 )
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.session import KB_DSN_KEY, create_sessionmaker
+from memhub.kb.session import RT_DSN_KEY, create_sessionmaker
 
 SESSION_TEXT = "失败后的重试要带指数退避。"
 MEMORY_CONCLUSION = "重试必须带指数退避"
@@ -137,10 +137,10 @@ async def test_memory_aggregate_reports_no_nodes_without_calling_model(
 async def test_memory_aggregate_requires_kb_dsn(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.delenv(KB_DSN_KEY, raising=False)
+    monkeypatch.delenv(RT_DSN_KEY, raising=False)
 
     assert await _memory_aggregate(_aggregate_args(None)) == 2
-    assert KB_DSN_KEY in capsys.readouterr().err
+    assert RT_DSN_KEY in capsys.readouterr().err
 
 
 async def test_memory_aggregate_requires_llm_config(

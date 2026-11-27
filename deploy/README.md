@@ -139,6 +139,47 @@ wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）�
   备份 DATA_DIR（脚本不删文件）→ `import-raw-store --dry-run` → 正式导入 → `--verify-only` → 确认通过后
   才启用新 worker。命令与判定口径见 [DEVELOPMENT §9.2](../docs/guides/DEVELOPMENT.md)。
 
+### kb 运行态角色拆分（ADR-0021 上线前置）
+
+线上曾因 `memhub_kb_app`（`CONNECTION LIMIT 4`）被 ingest、worker、kb-api 三个进程共用而频繁
+`too many connections`（graph 等接口 500）。ADR-0021 把 ingest / worker / CLI 拆到独立角色
+`memhub_rt_app`，各自核算连接预算；kb-api 保持 `memhub_kb_app` 不变。
+
+- **连接上限公式**：`Σ（使用该角色的容器数 × (pool + overflow)）+ 运维余量 2`。
+  ingest 用 `2+2`、worker/CLI 用 `1+1`，所以 `memhub_rt_app` 上限 = (2+2)+(1+1)+2 = **8**；
+  `memhub_kb_app` 上限 = (2+2)+2 = **6**。ALTER 前先核对全实例：
+  `SELECT rolname, rolconnlimit FROM pg_roles WHERE rolcanlogin` 的合计必须
+  ≤ `max_connections − 3`（超级用户预留）；超限时先下调其他角色或由负责人决定提高
+  `max_connections`，不得无视。
+- **建角色与授权**（超级用户执行；口令只写进 `/etc/memhub/env`，不进仓库）：
+
+  ```sql
+  CREATE ROLE memhub_rt_app LOGIN PASSWORD '<口令>' CONNECTION LIMIT 8;
+  GRANT USAGE ON SCHEMA kb TO memhub_rt_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA kb TO memhub_rt_app;
+  ALTER DEFAULT PRIVILEGES FOR ROLE memhub_kb_migrate IN SCHEMA kb
+      GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO memhub_rt_app;
+  ALTER ROLE memhub_kb_app CONNECTION LIMIT 6;
+  ```
+
+  权限与 `memhub_kb_app` 对齐，**不授权** `public`（运行态 5 表所在）与任何 `ingest_queue`
+  访问：队列读写走 ingest/worker 自己的 `MEMHUB_DB_URL`（`memhub_app`），与知识角色无关。
+  不给超集授权；后续迁移新增 `kb_*` 表时，`ALTER DEFAULT PRIVILEGES` 已覆盖，仍建议迁移后
+  复查 `\dp kb.*`。
+- **env 拆分（防混用）**：`/etc/memhub/env`（ingest、worker）新增
+  `MEMHUB_KB_RT_DB_URL=postgresql://memhub_rt_app:<口令>@127.0.0.1:5432/memhub_prod`；
+  `/etc/memhub/env.kb`（kb-api）保持 `MEMHUB_KB_DB_URL=postgresql://memhub_kb_app:...`。
+  两个文件**不要**同时出现两把键；ingest/worker 缺 `MEMHUB_KB_RT_DB_URL` 会以
+  `KbDsnMissing` 启动失败，不会退回 kb-api 的角色（刻意如此，避免静默回到共用冲突）。
+- **并发验收**：角色与 env 生效后执行
+  `python scripts/kb_concurrency_smoke.py --base-url http://127.0.0.1:8701 --concurrency 6 --rounds 3`
+  （可加 `--project <库 id>`，缺省取第一个已登记库）；全部响应非 5xx 且
+  `docker logs memhub-kb memhub-ingest memhub-worker` 中无 `too many connections` 才算通过。
+- **回滚**：本次不改变任何表结构与数据，回滚只需把 `/etc/memhub/env` 的
+  `MEMHUB_KB_RT_DB_URL` 换回原 `memhub_kb_app` 的 DSN（或恢复旧 env 文件）并重启 ingest/worker；
+  kb-api 与 `MEMHUB_KB_DB_URL` 无感。新角色可保留或 `DROP ROLE`（已无对象依赖）。
+  回滚后连接上限恢复共用，需同时把 `memhub_kb_app` 的限额调回原值或接受原冲突。
+
 **知识表（`kb_*`）是另一套迁移**（ADR-0013 §4）：建在专用 schema `kb`，版本表 `alembic_version`，
 由迁移角色 `MEMHUB_KB_MIGRATE_DB_URL` **带外执行**，不在任何容器启动时跑。kb 镜像已烘入
 `alembic.ini` 与 `alembic/`，服务器上没有宿主 venv，按「知识真源切换」小节用一次性容器执行。
@@ -213,7 +254,7 @@ systemctl enable --now memhub-memory-aggregate.timer
 systemctl list-timers memhub-memory-aggregate.timer
 ```
 
-- `/etc/memhub/env` 必须提供 `MEMHUB_KB_DB_URL`、`MEMHUB_LLM_BASE_URL` / `MEMHUB_LLM_API_KEY`，
+- `/etc/memhub/env` 必须提供 `MEMHUB_KB_RT_DB_URL`、`MEMHUB_LLM_BASE_URL` / `MEMHUB_LLM_API_KEY`，
   以及 `MEMHUB_LLM_MODEL_MEMORY`（未设置时回退 `MEMHUB_LLM_MODEL_EXTRACT`）；缺任一则容器退出 2。
 - 聚合发布的快照不会热替换正在运行的 worker：抽取固定使用进程启动时读到的版本，要让新快照生效
   需重启 worker。管理台「长期记忆」页的发布/回滚/停用同样要重启 worker 才改变注入内容。
@@ -241,11 +282,13 @@ systemctl list-timers memhub-memory-aggregate.timer
      `GRANT USAGE ON SEQUENCE kb.<表>_id_seq TO memhub_kb_app`。漏掉这步不会让部署失败：新表对运行态角色
      不可见，MCP 调用轨迹写入会全部退到 spool、轨迹查询直接报权限错（2026-11-26 发版的 `0002_kb_mcp_trace`
      已实际命中）。
-   - 连接配额建议：`memhub_kb_app` 限 4（连接池 2+2，ADR-0013 §6 的最小可行值），`memhub_kb_owner` 限 2
-     （带外 `alembic` 与 `migrate-kb` 各占一条）。加上运行态现有 2+3（ingest）与 1+1（worker），都在
-     `max_connections=60` 内。
-   - `/etc/memhub/env`（0600）只追加 `MEMHUB_KB_DB_URL`（指向 `memhub_kb_app`）。值只经该文件注入；
-     文档与提交信息只写键名。**迁移 DSN 不进常驻 env**：`MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）
+   - 连接配额（ADR-0021 拆分后）：`memhub_kb_app` 限 6（kb-api 池 2+2 + 余量 2），
+     `memhub_rt_app` 限 8（ingest 2+2 + worker 1+1 + 余量 2），`memhub_kb_owner` 限 2
+     （带外 `alembic` 与 `migrate-kb` 各占一条）。运行态 `MEMHUB_DB_URL`（`memhub_app`）仍按
+     ingest 2+3、worker 1+1 核算；全实例 `Σ rolconnlimit ≤ max_connections − 3`。
+   - `/etc/memhub/env`（0600）追加 `MEMHUB_KB_RT_DB_URL`（指向 `memhub_rt_app`），供 ingest / worker /
+     `memory-aggregate` 使用；kb-api 的角色在 `/etc/memhub/env.kb` 的 `MEMHUB_KB_DB_URL` 里，两边不要混放。
+     值只经该文件注入；文档与提交信息只写键名。**迁移 DSN 不进常驻 env**：`MEMHUB_KB_MIGRATE_DB_URL`（指向 `memhub_kb_owner`）
      带 DDL 权限，而 `/etc/memhub/env` 会同时注入 ingest 与 worker，写进去等于把 DDL 凭据发给所有服务；
      迁移时按第 3 步用一次性 0600 文件注入，用完即删。
    - 另建 `/etc/memhub/env.kb`（0600，归属同前）：kb 容器的独立 env_file，只放 kb 进程读取的键。
@@ -294,7 +337,7 @@ systemctl list-timers memhub-memory-aggregate.timer
 6. **删除 markdown**（负责人授权后执行）：`--delete-source` 只与 `--verify-only` 同用，校验通过也只返回 3、
    不动文件——删除由负责人在服务器执行。删的是整个 `knowledge/`（含 `.kbs.json`、`_trash/`、`_kb_archives/`），
    不是逐文件清理。
-7. **切换容器**：三个服务都强制 PG（缺 `MEMHUB_KB_DB_URL` 启动即失败，不退回 markdown），须一起换新镜像：
+7. **切换容器**：三个服务都强制 PG（kb-api 缺 `MEMHUB_KB_DB_URL`、ingest/worker 缺 `MEMHUB_KB_RT_DB_URL` 启动即失败，不退回 markdown），须一起换新镜像：
    ```bash
    docker compose up -d --force-recreate ingest worker kb
    ```

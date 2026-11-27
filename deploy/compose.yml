@@ -22,6 +22,8 @@
 
 x-defaults: &defaults
   user: "999:987"
+  # ingest / worker 共用的 env；ADR-0021 起这里的 MEMHUB_KB_RT_DB_URL 指向 memhub_rt_app，
+  # kb-api 用的 /etc/memhub/env.kb 里才是 MEMHUB_KB_DB_URL（memhub_kb_app）。不要两边都放。
   env_file: /etc/memhub/env
   network_mode: host
   read_only: true

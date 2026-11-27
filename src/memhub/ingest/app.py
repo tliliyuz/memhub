@@ -2,7 +2,7 @@
 
 存储由环境决定：设置了 `MEMHUB_DB_URL` 用共享 PG 实例（生产），否则退回进程内
 `MemoryStore`（仅 dev 联调，重启即丢）。采集目标登记一律读 PG 的 `kb_projects`
-（`MEMHUB_KB_DB_URL`，只读；规格 §9.2.4）。路由、信封、错误码在两种状态存储下完全一致。
+（`MEMHUB_KB_RT_DB_URL`，只读；规格 §9.2.4，ADR-0021）。路由、信封、错误码在两种状态存储下完全一致。
 
 启动：
 
@@ -42,7 +42,7 @@ from memhub.contract import (
 )
 from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.session import KB_SCHEMA, create_runtime_store
+from memhub.kb.session import KB_SCHEMA, create_rt_store
 from memhub.kb.target_access import (
     TargetRegistry,
     TargetStatus,
@@ -316,7 +316,7 @@ def create_app(
 ) -> FastAPI:
     """组装采集应用；目标登记一律读 `kb_projects`（规格 §9.2.4）。
 
-    默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储，缺 DSN 启动即抛 `KbDsnMissing`；
+    默认按 `MEMHUB_KB_RT_DB_URL` 强制构造 PG 存储，缺 DSN 启动即抛 `KbDsnMissing`；
     `kb_store` 与 `schema` 供测试注入与隔离。采集侧只读该表，不写知识真源。
 
     `queue` / `content` 可注入；缺省按环境构造：生产必须有 `MEMHUB_DB_URL`
@@ -347,9 +347,10 @@ def create_app(
     # 环境校验先于建库，配错优先于缺 DSN。
     queue_max = _env_bytes("MEMHUB_QUEUE_MAX_BYTES", DEFAULT_QUEUE_MAX_BYTES)
     # 目标登记只读 `kb_projects`（规格 §9.2.4）；缺 DSN 在构造时即抛 `KbDsnMissing`。
+    # 用运行态角色（ADR-0021）：与 kb-api 分开核算连接预算。
     owned_kb: PgKnowledgeStore | None = None
     if kb_store is None:
-        kb_store = create_runtime_store(schema=schema)
+        kb_store = create_rt_store(schema=schema)
         owned_kb = kb_store
     state = store or build_store()
     queue_store = queue or build_queue(state)

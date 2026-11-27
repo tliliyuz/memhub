@@ -389,7 +389,7 @@ def test_reserved_collector_device_is_denied(client: TestClient) -> None:
 def test_unconfigured_ingest_target_is_default_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     """缺 DSN 直接启动失败：登记状态没有内存或文件退路（规格 §9.2.4）。"""
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    for key in ("MEMHUB_DATA_DIR", "MEMHUB_KB_DB_URL"):
+    for key in ("MEMHUB_DATA_DIR", "MEMHUB_KB_RT_DB_URL"):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(KbDsnMissing):
         create_app()

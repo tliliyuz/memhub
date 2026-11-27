@@ -20,7 +20,13 @@ from memhub.contract import SourceKind, SourceRef
 from memhub.kb import archive, catalog, manage, target_access
 from memhub.kb.memory import MemoryAggregateError
 from memhub.kb.pgstore import PgKnowledgeStore
-from memhub.kb.session import KbDsnMissing, create_runtime_store
+from memhub.kb.session import (
+    WORKER_MAX_OVERFLOW,
+    WORKER_POOL_SIZE,
+    KbDsnMissing,
+    create_rt_store,
+    create_runtime_store,
+)
 from memhub.kb.store import KnowledgeStore
 from memhub.mcp.server import serve as serve_mcp
 from memhub.worker.extract import ExtractionFailed, extract_document, extract_session
@@ -227,7 +233,7 @@ def _knowledge_dir(override: str | None) -> Path:
 
 
 def _runtime_store(args: argparse.Namespace) -> PgKnowledgeStore:
-    """运行入口统一构造 PG 存储；缺 `MEMHUB_KB_DB_URL` 直接抛 `KbDsnMissing`。
+    """kb-api / MCP 统一构造 PG 存储；缺 `MEMHUB_KB_DB_URL` 直接抛 `KbDsnMissing`。
 
     `store` 属性只给测试注入独立 schema 用，命令行不会传。
     """
@@ -235,6 +241,18 @@ def _runtime_store(args: argparse.Namespace) -> PgKnowledgeStore:
     if isinstance(injected, PgKnowledgeStore):
         return injected
     return create_runtime_store()
+
+
+def _rt_store(args: argparse.Namespace) -> PgKnowledgeStore:
+    """ingest / worker / CLI 的运行态知识存储（ADR-0021，角色 `memhub_rt_app`）。
+
+    缺 `MEMHUB_KB_RT_DB_URL` 直接抛 `KbDsnMissing`，不回退 kb-api 的角色。
+    单并发使用，池按 1+1；ingest API 进程自己用 2+2（`create_rt_store` 默认值）。
+    """
+    injected = getattr(args, "store", None)
+    if isinstance(injected, PgKnowledgeStore):
+        return injected
+    return create_rt_store(pool_size=WORKER_POOL_SIZE, max_overflow=WORKER_MAX_OVERFLOW)
 
 
 def _llm_client() -> tuple[AnthropicClient, str]:
@@ -287,7 +305,7 @@ async def _ingest(args: argparse.Namespace) -> int:
         return 0
 
     project = args.project or source_path.name
-    store = _runtime_store(args)
+    store = _rt_store(args)
     if args.create_project and not args.dry_run:
         try:
             await catalog.create_kb(store, kb_id=project)
@@ -405,7 +423,7 @@ async def _ingest(args: argparse.Namespace) -> int:
 async def _memory_aggregate(args: argparse.Namespace) -> int:
     """周期聚合入口（规格 §5.5）。退出码：0 成功（含无节点）；1 聚合失败；2 配置错误。"""
     try:
-        store = _runtime_store(args)
+        store = _rt_store(args)
     except KbDsnMissing as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -615,7 +633,7 @@ async def _worker(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    store = _runtime_store(args)
+    store = _rt_store(args)
     state = build_store()
     queue_store = build_queue(state)
     content = build_content_store(Path(data_dir) if data_dir else None)
