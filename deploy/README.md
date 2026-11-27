@@ -125,6 +125,20 @@ wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）�
 运行态 5 表由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
 563fefe 未新增迁移（仍只有 `0001_state`），旧库启动即打印 `schema: already up to date`。
 
+### 正文存储 CA 与旧队列导入（ADR-0020 上线前置）
+
+- **CA 挂载**：生产 `ingest` 与 `worker` 用 `MEMHUB_CH_CA=/etc/memhub/ch-ca.pem`；compose 已只对这两个服务
+  只读挂载该文件，`kb` 与 `oauth2-proxy` 不挂载、也不持有 CH 凭据。宿主机文件必须先存在
+  （`install -m 644 <ca.pem> /etc/memhub/ch-ca.pem`）——路径不存在时 Docker 会把它建成空目录，
+  容器内校验会以目录路径失败。自检：`docker compose exec ingest python -m memhub.cli.main check-content-store`
+  （0 已连通、1 不可用、2 配置错误）。
+- **env_file 边界（已知缺口）**：`/etc/memhub/env` 仍同时注入 `ingest`、`worker` 与 `oauth2-proxy`，
+  所以认证网关当前也能读到 CH 与 LLM 凭据。拆成按服务独立的 `env.oauth2` 需要机上先建文件再改 compose，
+  属独立变更；在拆分前不要往该文件加与这三个服务无关的键。
+- **旧队列导入**：ADR-0020 切换后，旧 `raw_store/` 的积压不会自动进 CH/PG。顺序：暂停旧 ingest 与 worker →
+  备份 DATA_DIR（脚本不删文件）→ `import-raw-store --dry-run` → 正式导入 → `--verify-only` → 确认通过后
+  才启用新 worker。命令与判定口径见 [DEVELOPMENT §9.2](../docs/guides/DEVELOPMENT.md)。
+
 **知识表（`kb_*`）是另一套迁移**（ADR-0013 §4）：建在专用 schema `kb`，版本表 `alembic_version`，
 由迁移角色 `MEMHUB_KB_MIGRATE_DB_URL` **带外执行**，不在任何容器启动时跑。kb 镜像已烘入
 `alembic.ini` 与 `alembic/`，服务器上没有宿主 venv，按「知识真源切换」小节用一次性容器执行。

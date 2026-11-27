@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-11-27（旧本机队列一次性导入、CH CA 挂载与容器内自检）
+
+- `docs`：明确 [`memhub import-raw-store`](guides/DEVELOPMENT.md) 的一次性导入口径（只读 `raw_store/`、
+  记录校验、内容地址幂等、断点重跑、不推进游标、不删除源文件、退出码）与 `check-content-store`
+  容器内自检；部署文档补充 CA 只读挂载的前置条件、`env_file` 尚未按服务拆分的已知缺口与导入顺序。
+- 待实现：`feat(queue/cli)` 导入命令与自检命令，`fix(deploy)` compose 对 ingest/worker 的 CA 只读挂载。
+
 ## 2026-11-27（原文入 ClickHouse、队列入 PG，上传走 ingest 内部接口，ADR-0020）
 
 - `docs(adr)`：新增 [ADR-0020](decisions/ADR-0020-clickhouse-raw-store.md)「原始增量入 ClickHouse、提炼队列入 PG」，负责人当次裁决为 accepted 并按「上传改走 ingest 内部接口」实现。
