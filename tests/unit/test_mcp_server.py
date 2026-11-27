@@ -84,17 +84,29 @@ async def test_tools_list_exposes_the_retrieval_group(store: KnowledgeStore) -> 
     response = await handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, store)
     assert response is not None
     names = [tool["name"] for tool in response["result"]["tools"]]
-    # stdio 是本机全库权限，写工具也可见。
+    # stdio 是本机全库权限，写工具与长期记忆工具也可见。
     assert names == [
         "kb_search",
         "kb_read",
         "kb_related",
         "kb_audit_list",
+        "kb_memory_search",
+        "kb_memory_read",
         "kb_write_candidate",
         "kb_update_candidate",
         "kb_deprecate",
     ]
     assert [tool["name"] for tool in TOOLS] == names
+
+
+async def test_stdio_has_full_local_memory_access(store: KnowledgeStore) -> None:
+    # 文件存储没有记忆快照：搜索返回空结果与 hint，读取按「不存在」处理。
+    payload = _payload(await _call(store, "kb_memory_search", {"query": "重试"}))
+    assert payload["results"] == []
+    assert payload["hint"]
+    response = await _call(store, "kb_memory_read", {"slug": "retry-backoff"})
+    assert response["result"]["isError"] is True
+    assert _payload(response)["code"] == 3001
 
 
 async def test_kb_search_returns_candidates_when_asked(store: KnowledgeStore) -> None:

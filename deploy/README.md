@@ -6,7 +6,7 @@
 
 - 云端（43.142.18.23）跑 4 个容器：ingest-api、worker、kb-api（管理台 + 静态前端）、oauth2-proxy；nginx `/` 与 `/api/v1/kb/` 走 GitHub 登录，`/api/v1/` 仍由设备 token 自鉴权。
 - **kb-api 取代 explorer**：图谱页由前端自带 cytoscape 渲染，数据来自 `GET /api/v1/kb/graph`（直读 PG `kb_*` 表）；不再部署 explorer，也不再有 `kg.json` 投影。
-- `knowledge/`（markdown 真源）与 `data/`（raw_store）从本地同步到 `/var/lib/memhub/`，由 worker 继续提炼。
+- `knowledge/`（markdown 一次性迁移源）从本地同步到 `/var/lib/memhub/`；原始增量在 ClickHouse，队列与运行态在 PG，本机不再留 `data/`（raw_store）。
 - collector 仍在客户端（e4 负责），本版发布后联调 session 采集。
 - **下一版**把知识真源从 markdown 换成 PostgreSQL 的 `kb_*` 表（ADR-0013），`knowledge/` 只作一次性迁移源、迁移后删除；切换步骤见 §6「知识真源切换（markdown → PG，一次性）」。
 
@@ -65,10 +65,10 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 | 项 | 预算 |
 |:---|:---|
 | 内存峰值 | ≤1.5 GiB（compose 限额 ingest 384m + worker 640m + kb 384m + oauth2-proxy 128m = 1536m；实测 ingest ≈60MB、worker 抽一枚 60K 字符会话 ≈155MB、kb 历史图谱重建（437 节点 / 2631 边）≈143MB） |
-| 磁盘 | ≤12 GiB（knowledge 5G / raw_store 4G 硬上限 / 日志 2G / 余量） |
-| raw_store 上限 | `MEMHUB_QUEUE_MAX_BYTES`（`.env.example` 为 1 GiB；磁盘预算硬顶 4 GiB，别超过），超出时 ingest 返回 `1008`，采集端降级 |
-| 隔离区清理 | `pending_review/` 中超过 30 天的文件由 purge timer 删除（`--pending-review-days`） |
-| 处理副本上限 | `processed_raw/`（raw_store 的完整副本）按 7 天或 `MEMHUB_PROCESSED_MAX_BYTES`（默认 2 GiB）先到先裁 |
+| 磁盘 | ≤12 GiB（knowledge 5G / 日志 2G / 余量；原文在 ClickHouse，不占本机数据盘） |
+| 队列上限 | `MEMHUB_QUEUE_MAX_BYTES`（`.env.example` 为 1 GiB），按 `queued + processing` 队列行字节求和；超出时 ingest 返回 `1008`、管理台上传返回 `1013`，采集端降级 |
+| 队列行裁剪 | `processed` 行超过 7 天（`--processed-days`）由 purge timer 删除；`pending_review` 行保留给人复核，不自动删除 |
+| 正文保留 | ClickHouse 侧按 180 天 TTL 清理（`content_retention: clickhouse_ttl_180d`），运行账号无 DELETE 权限 |
 | 告警水位 | 磁盘 ≥80% 已用；可用内存 <300 MiB |
 
 同机评测中台：内存按 1.2 GiB 设计（1.5 GiB 为上限），磁盘 10 GiB；Postgres `shared_buffers`/`work_mem` 设上限，MinIO 计入内存与磁盘水位。
@@ -151,7 +151,7 @@ kb-api 只监听回环，公网唯一入口是 nginx 的登录墙；健康检查
 
 | 命令 | 作用 | 退出码 |
 |:---|:---|:---|
-| `memhub purge-expired` | 删 25h 外批次记录 + 30 天外隔离文件 + 裁剪 processed_raw | 0 正常 / 2 配置错 |
+| `memhub purge-expired` | 删 25h 外批次记录 + 裁剪 7 天外的 processed 队列行 | 0 正常 / 2 配置错 |
 | `memhub worker --once` | 只跑一轮提炼 | 0 全部成功 / 1 有失败 / 2 配置错 |
 | `memhub memory-aggregate --publish` | 聚合跨项目 canonical 节点，写入记忆条目/候选并发布快照 | 0 成功（含无节点）/ 1 聚合或模型失败 / 2 配置错 |
 
@@ -242,7 +242,7 @@ systemctl list-timers memhub-memory-aggregate.timer
      中实际设置过的项。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
      kb 用受限角色，只该看到知识表的 DML 权限。
 2. **停写**：`docker compose stop kb worker`，等正在跑的 `worker --once` 结束。
-   ingest 可以继续跑（只写 `raw_store/` 队列，不碰 `knowledge/`）。
+   ingest 可以继续跑（只写 PG 队列与 CH 原文，不碰 `knowledge/`）。
 3. **建表**（Alembic 带外执行，不在任何容器启动时跑）：
    ```bash
    umask 077

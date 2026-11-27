@@ -66,6 +66,20 @@ def test_write_scope_and_multiple_projects(capsys: pytest.CaptureFixture[str]) -
     assert json.loads(out)["grant"]["projects"] == ["memhub", "other"]
 
 
+def test_memory_flag_is_carried_into_grant(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = _run(capsys, "--projects", "memhub", "--memory", "--json")
+    assert code == 0
+    grant = json.loads(out)["grant"]
+    assert grant["memory"] is True
+    assert load_grants(json.dumps([grant]))[grant["sha256"]].memory is True
+
+
+def test_memory_defaults_to_false(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = _run(capsys, "--projects", "memhub", "--json")
+    assert code == 0
+    assert json.loads(out)["grant"]["memory"] is False
+
+
 def test_human_output_shows_token_once_with_paste_ready_grant(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

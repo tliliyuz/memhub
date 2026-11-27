@@ -16,9 +16,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
+from memhub.contract.mcp import MEMORY_SLUG_PATTERN
 from memhub.kb.bm25 import BM25Okapi, tokenize
 
-MEMORY_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,99}$"
 MEMORY_SLUG_RE = re.compile(MEMORY_SLUG_PATTERN)
 ENTRY_STATUSES = frozenset({"active", "deprecated"})
 CANDIDATE_STATUSES = frozenset({"pending", "conflict", "promoted"})
@@ -406,15 +406,11 @@ def _entry_text(entry: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def select_memories(
-    entries: Sequence[Mapping[str, Any]],
-    query: str,
-    *,
-    top_k: int = 8,
-    budget_chars: int = 4000,
-) -> list[dict[str, Any]]:
-    """按 BM25 相关性选 top-k；只取分数 > 0 的条目，并受字符预算约束。"""
-    if top_k <= 0 or budget_chars <= 0 or not query.strip() or not entries:
+def rank_memories(
+    entries: Sequence[Mapping[str, Any]], query: str
+) -> list[tuple[float, Mapping[str, Any]]]:
+    """按 BM25 相关性排序；只保留分数 > 0 的条目，不施加 top-k 与字符预算。"""
+    if not query.strip() or not entries:
         return []
     corpus = [
         tokenize(
@@ -430,14 +426,27 @@ def select_memories(
         ((score, index) for index, score in enumerate(scores) if score > 0),
         key=lambda item: (-item[0], item[1]),
     )
+    return [(score, entries[index]) for score, index in ranked]
+
+
+def select_memories(
+    entries: Sequence[Mapping[str, Any]],
+    query: str,
+    *,
+    top_k: int = 8,
+    budget_chars: int = 4000,
+) -> list[dict[str, Any]]:
+    """按 BM25 相关性选 top-k；只取分数 > 0 的条目，并受字符预算约束。"""
+    if top_k <= 0 or budget_chars <= 0:
+        return []
     selected: list[dict[str, Any]] = []
     used = 0
-    for _score, index in ranked[:top_k]:
-        entry = dict(entries[index])
-        used += len(_entry_text(entry))
+    for _score, entry in rank_memories(entries, query)[:top_k]:
+        item = dict(entry)
+        used += len(_entry_text(item))
         if used > budget_chars:
             break
-        selected.append(entry)
+        selected.append(item)
     return selected
 
 

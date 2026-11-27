@@ -22,7 +22,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, literal, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -32,14 +32,18 @@ from memhub.ingest.models import (
     Batch,
     Device,
     SeenMessage,
-    SeenSha,
     Source,
 )
 from memhub.ingest.models import (
     FileCursor as FileCursorRow,
 )
-from memhub.ingest.store import REPLAY_WINDOW, SEEN_MESSAGE_BATCH, CursorConflict
-from memhub.queue.rawstore import BatchTargetConflict
+from memhub.ingest.store import (
+    REPLAY_WINDOW,
+    SEEN_MESSAGE_BATCH,
+    CursorConflict,
+    Dedupe,
+)
+from memhub.queue.identity import BatchTargetConflict
 
 
 def _chunks(values: Sequence[str], size: int = SEEN_MESSAGE_BATCH) -> Iterator[Sequence[str]]:
@@ -195,7 +199,7 @@ class PostgresStore:
         async with self.sessions() as session:
             return await self._check_replay_target(session, request, datetime.now(UTC))
 
-    async def apply(self, request: IngestRequest) -> IngestResult:
+    async def apply(self, request: IngestRequest, *, dedupe: Dedupe | None = None) -> IngestResult:
         now = datetime.now(UTC)
         async with self.sessions() as session, session.begin():
             await session.execute(
@@ -225,8 +229,6 @@ class PostgresStore:
             current_rev = int(current_raw) if current_raw is not None else 0
             reset_allowed = request.source_rev > current_rev
 
-            accepted = 0
-            duplicates = 0
             for batch_file in request.files:
                 known = None
                 if not reset_allowed:
@@ -240,19 +242,6 @@ class PostgresStore:
                 expected = int(known) if known is not None else 0
                 if batch_file.from_offset < expected:
                     raise CursorConflict(batch_file.path, expected)
-
-                marker = (
-                    await session.execute(
-                        pg_insert(SeenSha)
-                        .values(source_id=request.source_id, sha256=batch_file.sha256)
-                        .on_conflict_do_nothing(index_elements=[SeenSha.source_id, SeenSha.sha256])
-                        .returning(literal(1))
-                    )
-                ).scalar_one_or_none()
-                if marker is None:
-                    duplicates += 1
-                else:
-                    accepted += 1
 
                 # rescan（更高的 source_rev）时以客户端为准重置游标；
                 # 常规追加时 expected 已保证 to_offset >= known offset。
@@ -296,8 +285,8 @@ class PostgresStore:
             )
             result = IngestResult(
                 batch_id=request.batch_id,
-                accepted=accepted,
-                duplicates=duplicates,
+                accepted=dedupe.accepted if dedupe is not None else len(request.files),
+                duplicates=dedupe.duplicates if dedupe is not None else 0,
                 cursor=await self._cursor_summary(session, request.device_id, request.source_id),
             )
             # 内部目标绑定保存在现有 JSONB 列，不改变公开结果或数据库结构。

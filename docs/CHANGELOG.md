@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## 2026-11-27（原文入 ClickHouse、队列入 PG，上传走 ingest 内部接口，ADR-0020）
+
+- `docs(adr)`：新增 [ADR-0020](decisions/ADR-0020-clickhouse-raw-store.md)「原始增量入 ClickHouse、提炼队列入 PG」，负责人当次裁决为 accepted 并按「上传改走 ingest 内部接口」实现。
+- `feat(queue)`：`memhub.queue.rawstore`（本机 raw_store 内容寻址落盘、配额扫描）替换为 `queue/content.py`（正文存储：生产 ClickHouse HTTP `memhub_raw.raw_sessions`，gzip、`X-ClickHouse-User/Key`、可选 CA、按 `(project, sha256)` 去重、180 天 TTL；dev 退本地 `content_store`）与 `queue/tasks.py`（PG `ingest_queue`：主键 `(project, sha256)`，状态 queued/processing/processed/pending_review，`FOR UPDATE SKIP LOCKED` 领取 + 租约 + 重试 3 次转隔离，配额按 `queued + processing` 字节求和）；`queue/flow.py` 承载「先写正文、再入队、最后推进游标」的共用入队流程。`seen_shas` 不再写入/读取（表保留），`state/failures.json` 删除；`file_cursors`/`sources`/`batches` 不变。
+- `feat(ingest)`：`POST /ingest/raw` 在同一请求内写 CH 正文与 PG 队列行；prod 缺 `MEMHUB_DB_URL` 或 `MEMHUB_CH_URL` 拒绝启动。新增内部接口 `POST /internal/enqueue` 与 `GET /internal/queue/{batch_id}`（`MEMHUB_INTERNAL_TOKEN` Bearer 鉴权；未配置 500/2001、凭据不符 401/1001、目标未登记 400/1003、配额超限 503/1013），供 kb-api 上传使用；只接受保留管理台身份（`device_id=kb-console`、`producer=console`）。
+- `feat(kb)`：`/api/v1/kb/uploads*` 不再写本机 raw_store：`KbUploads` 校验文件后整批 POST 到 ingest 内部接口，批次进度由 `GET /internal/queue/{batch_id}` 推导（queued/processed/failed/missing）；kb-api 只持有 `MEMHUB_INGEST_URL` 与 `MEMHUB_INTERNAL_TOKEN`，不连 PG 队列、ClickHouse 或本机目录。`memhub kb` 移除 `--data-dir`。
+- `feat(cli)`：`memhub worker` 缺 `MEMHUB_DB_URL` 或（无 dev 目录时的）`MEMHUB_CH_URL` 退出 2；`purge-expired` 删除隔离区/processed_raw 文件逻辑改为按天数裁剪 `processed` 队列行（`--processed-days`），pending_review 行保留复核。
+- 文档与配置：`docs/contracts/ingest-api.md` 0.10（内部接口、purge 语义、§4）、`docs/contracts/kb-admin-api.md` 0.8（§4.7 上传改走内部接口）、`docs/contracts/README.md` 0.19、`docs/architecture.md`、`docs/guides/DEVELOPMENT.md`、`docs/tech/ENVIRONMENT.md` 与 `.env.example`（新增 `MEMHUB_CH_URL` / `MEMHUB_CH_USER` / `MEMHUB_CH_PASSWORD` / `MEMHUB_CH_CA` / `MEMHUB_INTERNAL_TOKEN` / `MEMHUB_INGEST_URL`，删除 `MEMHUB_PROCESSED_MAX_BYTES`）、`deploy/`（README、compose 上传注释、Dockerfile.kb 去掉 `--data-dir`）、`web/README.md`、`governance.toml`（`queue/` 与 `cli/` 归入 infra 层：队列与 ingest/worker 相互导入，按依赖链拆分后才能逐提交通过 mypy）。
+- 范围：只做 ADR-0020 队列与正文存储切换；CH 反向导出、向量检索、`seen_shas` 旧表清理均未涉及。
+- 验证（2026-11-27，worktree `.claude/worktree/clickhouse-raw-queue`）：目标用例 `pytest tests/unit/test_daemon.py tests/contract/test_kb_uploads.py tests/contract/test_ingest_api.py tests/unit/test_cli_ingest.py tests/unit/test_queue.py tests/unit/test_content_store.py tests/contract/test_state_store.py` 得到 176 passed / 22 errors，22 个 error 全部是 `[postgres]` 参数化用例的远端 ACL 拒绝（`no pg_hba.conf entry for host "218.1.186.94", user "memhub_dev_app"`）；全量 `pytest` 为 531 passed / 1 skipped / 201 errors，逐个核对 error 汇总行后确认全部由同一 ACL 拒绝引起，PG 契约用例本机不可执行、未验证，不计为通过；`ruff check src tests` 与 `ruff format --check src tests`（117 files）通过；`mypy src`（55 files）通过；`check_env_example_keys.py`（36 键）、`check_document_format.py`、`check_adr_governance.py`（18 份 ADR）、`check_document_ownership.py --changed`、`check_agent_entrypoints_sync.py` 与 `git diff --check` 通过。
+
+## 2026-11-26（MCP 只读长期记忆工具实现，ADR-0019）
+
+- `docs(adr)`：ADR-0019 由 `proposed` 转 `accepted`，索引同步；负责人当次指令为「接受ADR0019，你开始实现吧」。
+- `feat(mcp)`：新增 `kb_memory_search` / `kb_memory_read` 两个只读工具与 `MemorySearchInput` / `MemoryReadInput` 输入契约。数据面只读 `published_memory_snapshot()` 的冻结条目，并用 `memory_states` 再按当前状态过滤，使发布后发生的废弃立即生效；搜索复用 worker 的 BM25 排序（`rank_memories`，对 `title + conclusion + boundary` 打分，`select_memories` 改为基于它），结果分数归一化到 0–1。`Grant` 新增正交布尔 `memory`（默认 `false`），`Credential` 透传；`tools_for` 与 `call_tool` 增加 `memory` 参数，未开启时记忆工具不可见，调用返回 `3001`（与越权直读同码），HTTP 与 stdio 分别按凭据与全权限接入。读取只进 `kb_mcp_trace`，不写 `kb_write_audit`。
+- `feat(cli)`：`memhub mcp token` 新增 `--memory`，grant 输出显式包含 `memory` 字段（默认 `false`）。
+- 文档：`docs/contracts/mcp-tools.md` 0.9（工具行、可见范围、错误码、裁剪矩阵 4/6/7/9、令牌参数、观测边界）、`docs/contracts/README.md` 0.18、`docs/tech/ENVIRONMENT.md` 的 `MEMHUB_MCP_GRANTS` 行、`docs/plans/long-term-memory-spec.md` §12 原「是否需要只读 MCP 工具」待评审项结案。
+- 范围：只做 ADR-0019 两个只读工具；记忆写入、候选查询、快照发布/回滚/停用、向量检索均未涉及。
+- RED（2026-11-26，worktree `.claude/worktree/mcp-memory-tools`）：先写 `tests/unit/test_mcp_memory_tools.py` 并更新发现、stdio、令牌与 HTTP 契约用例；`pytest tests/unit/test_mcp_memory_tools.py tests/contract/test_mcp_discovery.py tests/unit/test_mcp_server.py tests/unit/test_mcp_token.py` 得到 17 failed（`tools_for`/`call_tool` 无 `memory` 参数、两个工具未注册、令牌参数不识别、grant 无 `memory` 字段），HTTP 契约 `test_sdk_memory_grant_exposes_and_reads_memory_tools` 因 `Grant` 的 `extra="forbid"` 拒绝未知键而失败；均为目标行为缺失，非 Fixture、语法或环境问题。
+- GREEN：实现后同一组 43 项通过（含 HTTP 契约），再跑相关回归 `pytest tests/unit/test_mcp_read_tools.py tests/unit/test_mcp_candidate_tools.py tests/unit/test_mcp_write.py tests/contract/test_mcp_trace.py tests/unit/test_memory.py tests/unit/test_memory_worker.py tests/contract/test_memory_store.py tests/unit/test_cli_memory.py` 得到 123 passed / 1 skipped。
+- 验证（2026-11-26）：`pytest`（以 `PYTHONPATH=<worktree>/src` 规避共享 venv 的 editable 失效）717 passed / 1 skipped（skip 为既有条件跳过，非本次范围）；`ruff check src tests` 通过，`ruff format --check src tests` 113 files 已格式化；`mypy src` 52 files 无问题；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`（17 份 ADR）、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py`（31 键）、`check_no_raw_sql.py`、`check_async_io.py` 与 `git diff --check` 通过。
+- ADR 检查：实现 [ADR-0019](decisions/ADR-0019-mcp-memory-tools.md)（accepted），修订 ADR-0016 决策 7；未新增架构决策。
+
+## 2026-11-26（MCP 只读长期记忆工具 ADR 草案）
+
+- `docs(adr)`：新增 [ADR-0019](decisions/ADR-0019-mcp-memory-tools.md)「MCP 只读长期记忆工具，凭据显式开启」，状态 `proposed`，修订 ADR-0016 决策 7（MCP 第一期不暴露记忆）。裁决要点：新增 `kb_memory_search` / `kb_memory_read` 两个只读工具，只读当前已发布快照（与 worker 注入同一冻结口径），只返回 `active` 条目的结论、边界、失效条件、置信度与证据元数据；可见性由 `Grant` 新增的正交布尔 `memory`（默认 `false`）显式开启，令牌生成器加 `--memory`，未开启按越权直读处理；不提供任何记忆写入口，读取只进 `kb_mcp_trace`。备选（所有读凭据可见、按证据项目交集过滤、新增作用域、混入 `kb_nodes`、开放写工具、读未发布内容）均记录否决理由。
+- 范围：本次只写 ADR，不含规格、测试与实现；ADR 转 `accepted` 前不进入后续阶段。
+- ADR 检查：命中清单第 3 项（新增 MCP 工具，改变对外契约）与第 7 项（记忆是部署级全局层，改变访问控制边界），故按「创建 ADR」处理；编号 0019 未被占用。
+- 验证：纯文档变更，无业务 RED（例外理由：只有 ADR 与索引新增）；`check_document_format.py`、`check_document_ownership.py --changed`、`check_adr_governance.py`、`check_agent_entrypoints_sync.py`、`check_env_example_keys.py` 与 `git diff --check` 通过。
+
 ## 2026-11-26（长期记忆第一期：聚合、快照与会话抽取注入，ADR-0016）
 
 - `feat(db)`：新增 Alembic `0005_long_term_memory`（合入 dev 时因已有 `0004_mcp_trace_funnel` 而后移，`down_revision` 指向它）：四张表 `kb_memory_entries`（条目，slug 全局唯一）、`kb_memory_revisions`（不可变修订）、`kb_memory_snapshots`（版本化快照，部分唯一索引保证至多一个 `published`）、`kb_memory_candidates`（未达门槛或冲突候选，每 slug 一行）；`kb_write_audit` 增加可空 `memory_snapshot`。`downgrade` 逆序删列删表。

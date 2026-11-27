@@ -20,7 +20,7 @@
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev,engine]"   # engine = 上传依赖 python-multipart（含投影下线后暂留的 semantica，依赖清理另案）；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
-cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
+cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHUB_DB_URL（队列）、MEMHUB_CH_*（正文）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
 ```
 
 ## 2. 目录分层与归属门禁
@@ -28,8 +28,8 @@ cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHU
 ```text
 src/memhub/
   contract/   跨端模型与枚举（对外字段的唯一实现）
-  queue/      raw_store 落盘与配额（ingest 采集、kb 上传共用）
-  ingest/     鉴权、游标、幂等、入队
+  queue/      CH 正文存储 + PG 队列、配额（ingest 采集、worker、kb 上传共用）
+  ingest/     鉴权、游标、幂等、正文入 CH、队列入 PG
   worker/     value_filter / extract / merge
   kb/         PG 存储（kb_*）、检索、管理台 API
   mcp/        MCP 工具
@@ -50,7 +50,7 @@ prompts/      各 source_type 的抽取 profile
 |:---|:---|:---|
 | 字段、枚举、校验 | `contract/` | 在 API 或 worker 里临时解析 JSON |
 | 采集协议行为 | `ingest/` | 把提炼逻辑塞进 ingest（它必须 <200ms） |
-| 队列落盘、用量与配额 | `queue/` | 在路由层复制落盘/配额逻辑，或让 kb 直接依赖 `ingest/` |
+| 队列存储、用量与配额 | `queue/` | 在路由层复制存储/配额逻辑，或让 kb 直接依赖 `ingest/`（上传走 ingest 内部接口） |
 | 抽取 prompt | `prompts/` | 在 Python 里拼长 prompt 字符串 |
 | 检索/写入 | `kb/` | MCP 层直接读文件 |
 | 工具定义 | `mcp/` | 在工具函数里实现检索算法 |
@@ -100,7 +100,7 @@ prompts/      各 source_type 的抽取 profile
 
 - 一次提交只做一件事：一个行为、一次重构、一份文档。
 - 格式：`<type>(<scope>): <中文摘要>`，`type ∈ feat|fix|docs|refactor|test|chore|perf`，摘要 ≤50 字。
-- 不提交 `.env`、`data/`、`raw_store/`、真实会话内容。
+- 不提交 `.env`、`data/`、`content_store/`、真实会话内容。
 - 提交信息只描述实际改动，**不加 `Co-Authored-By` 等工具署名行**；`scripts/check_commit_message.py` 在 `commit-msg` 阶段强制（与评测仓同源）。署名属于提交信息正文，不属于源码、文档或发布物。
 
 ## 6. 分支、Git 授权与 worktree 闭环
@@ -145,9 +145,9 @@ MEMHUB_KB_MIGRATE_DB_URL=<迁移角色 DSN> alembic -c alembic.ini upgrade head
 # 1) 抽取：会话 jsonl → kb_nodes / kb_edges（库必须已登记且未归档）
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main ingest \
   --path .scratch/sessions --profile sessions --project memhub --limit 3 --create-project
-# 2) 管理台：http://127.0.0.1:8701/
+# 2) 管理台：http://127.0.0.1:8701/（上传需另配 MEMHUB_INGEST_URL 与 MEMHUB_INTERNAL_TOKEN）
 PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb \
-  --web-dist web/dist --data-dir data
+  --web-dist web/dist
 ```
 
 - `ingest` 只写提取出的节点，来源是本地文件；真源本身仍是库。`--create-project` 等价于先在管理台建库。

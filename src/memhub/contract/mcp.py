@@ -12,6 +12,8 @@ SLUG_PATTERN = r"[a-z0-9][a-z0-9-]{0,127}"
 _KINDS = "|".join(kind.value for kind in Kind)
 NODE_ID_PATTERN = rf"^{KB_ID_PATTERN[1:-1]}/({_KINDS})/{SLUG_PATTERN}$"
 ResultLimit = Annotated[int, Field(ge=1, le=50)]
+# 长期记忆 slug 规则由记忆条目定义（ADR-0019），输入校验与聚合侧共用同一套字符集。
+MEMORY_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,99}$"
 
 
 class ToolInput(BaseModel):
@@ -50,6 +52,22 @@ class RelatedInput(ReadInput):
 class AuditInput(ToolInput):
     limit: ResultLimit = Field(default=50, description="返回条数上限，1–50。")
     offset: int = Field(default=0, ge=0, description="分页偏移，从 0 开始。")
+
+
+class MemorySearchInput(ToolInput):
+    query: str = Field(
+        min_length=1,
+        max_length=512,
+        description="检索已发布长期记忆的关键词或结论片段；中英文均可，最多 512 字符。",
+    )
+    limit: int = Field(default=5, ge=1, le=20, description="返回条数上限，1–20。")
+
+
+class MemoryReadInput(ToolInput):
+    slug: str = Field(
+        pattern=MEMORY_SLUG_PATTERN,
+        description="记忆 slug，形如 retry-backoff；取自 kb_memory_search 的结果。",
+    )
 
 
 class WriteCandidateInput(ToolInput):

@@ -34,6 +34,7 @@ INIT = {
 
 READ_TOOLS = {"kb_search", "kb_read", "kb_related", "kb_audit_list"}
 WRITE_TOOLS = {"kb_write_candidate", "kb_update_candidate", "kb_deprecate"}
+MEMORY_TOOLS = {"kb_memory_search", "kb_memory_read"}
 
 
 def _tools() -> list[dict[str, Any]]:
@@ -56,7 +57,7 @@ def test_instructions_describe_when_to_use_within_budget() -> None:
 
 
 def test_every_tool_has_title_and_bounded_description() -> None:
-    assert {tool["name"] for tool in _tools()} == READ_TOOLS | WRITE_TOOLS
+    assert {tool["name"] for tool in _tools()} == READ_TOOLS | WRITE_TOOLS | MEMORY_TOOLS
     for tool in _tools():
         title = tool.get("title")
         assert isinstance(title, str) and title.strip(), tool["name"]
@@ -87,9 +88,24 @@ def test_every_input_field_has_description() -> None:
 def test_read_scope_still_hides_write_tools() -> None:
     assert {tool["name"] for tool in tools_for(writable=False)} == READ_TOOLS
     assert {tool["name"] for tool in tools_for(writable=True)} == READ_TOOLS | WRITE_TOOLS
-    assert TOOL_NAMES == READ_TOOLS | WRITE_TOOLS
+    assert {tool["name"] for tool in tools_for(writable=False, memory=True)} == (
+        READ_TOOLS | MEMORY_TOOLS
+    )
+    assert {tool["name"] for tool in tools_for(writable=True, memory=True)} == (
+        READ_TOOLS | WRITE_TOOLS | MEMORY_TOOLS
+    )
+    assert TOOL_NAMES == READ_TOOLS | WRITE_TOOLS | MEMORY_TOOLS
     for tool in _tools():
         assert tool["annotations"]["readOnlyHint"] is (tool["name"] not in WRITE_TOOLS)
+
+
+def test_memory_tools_self_describe_guidance_boundary_and_enablement() -> None:
+    for name in MEMORY_TOOLS:
+        tool = next(tool for tool in _tools() if tool["name"] == name)
+        description = tool["description"]
+        assert "跨项目" in description, name
+        assert "不是事实证据" in description, name
+        assert "显式开启" in description, name
 
 
 @pytest.fixture

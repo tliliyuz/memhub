@@ -1,7 +1,7 @@
-"""采集 API 契约：信封、鉴权、游标冲突、幂等。
+"""采集 API 契约：信封、鉴权、游标冲突、幂等、配额、清理与内部上传接口。
 
 采集目标只认 `kb_projects`（规格 §9.2.4）：`registered-only` 已归档，`dir-only`
-与 `ghost` 没有行，都不得写入。
+与 `ghost` 没有行，都不得写入。队列与正文可注入内存实现，契约测试不碰本机文件。
 """
 
 from __future__ import annotations
@@ -11,94 +11,113 @@ import json
 import logging
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Self
+from typing import Any, Self, cast
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 from memhub.ingest.app import create_app
-from memhub.kb.models import KbArchive, KbWriteAudit
-from memhub.kb.session import KbDsnMissing, create_runtime_store
+from memhub.ingest.store import MemoryStore
+from memhub.kb.errors import TargetUnavailable
+from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.session import KbDsnMissing
+from memhub.queue.content import LocalContentStore
+from memhub.queue.identity import CONSOLE_DEVICE
+from memhub.queue.tasks import MemoryQueue
 
 DEVICE = str(uuid.uuid4())
 TOKEN = "devtoken"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+INTERNAL = "internal-secret"
+INTERNAL_AUTH = {"Authorization": f"Bearer {INTERNAL}"}
 
 ACTIVE_PROJECTS = ("sdp-tag", "other-kb")
 ARCHIVED_PROJECTS = ("registered-only",)
 
 
-async def _seed_targets(dsn: str, schema: str) -> None:
-    store = create_runtime_store(dsn=dsn, schema=schema)
-    try:
-        for project in ACTIVE_PROJECTS:
-            await store.register_project(project)
-        for project in ARCHIVED_PROJECTS:
-            await store.register_project(project)
-            await store.archive_project(project)
-    finally:
-        await store.aclose()
+class _Targets:
+    """`kb_projects` 的替身：回答目标状态并收集写审计。"""
+
+    def __init__(self, statuses: dict[str, str]) -> None:
+        self.statuses = statuses
+        self.audits: list[dict[str, Any]] = []
+        self.registry_down = False
+        self.pending_archive = False
+
+    async def project_status(self, project: str) -> str:
+        if self.registry_down or self.pending_archive:
+            raise TargetUnavailable("registry_unavailable")
+        return self.statuses.get(project, "unregistered")
+
+    async def record_write_audit(self, **kwargs: Any) -> None:
+        self.audits.append(kwargs)
+
+
+@dataclass
+class Harness:
+    state: MemoryStore
+    queue: MemoryQueue
+    content: LocalContentStore
+    targets: _Targets
+    audits: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _targets() -> _Targets:
+    statuses = {project: "active" for project in ACTIVE_PROJECTS}
+    statuses.update({project: "inactive" for project in ARCHIVED_PROJECTS})
+    return _Targets(statuses)
 
 
 @pytest.fixture
-def kb_targets(kb_pg_schema: str, test_dsn: str, monkeypatch: pytest.MonkeyPatch) -> str:
-    """登记采集目标并返回隔离 schema；应用用同一 schema 构造 PG 存储。"""
-    monkeypatch.setenv("MEMHUB_KB_DB_URL", test_dsn)
-    asyncio.run(_seed_targets(test_dsn, kb_pg_schema))
-    return kb_pg_schema
+def h(tmp_path: Any) -> Harness:
+    return Harness(
+        state=MemoryStore(),
+        queue=MemoryQueue(),
+        content=LocalContentStore(tmp_path / "content"),
+        targets=_targets(),
+    )
 
 
-def _archive_target(schema: str, project: str) -> None:
-    """测试中途归档：模拟「已落盘批次的目标后来被归档」。"""
-
-    async def run() -> None:
-        store = create_runtime_store(schema=schema)
-        try:
-            await store.archive_project(project)
-        finally:
-            await store.aclose()
-
-    asyncio.run(run())
+def _app(harness: Harness) -> Any:
+    return create_app(
+        harness.state,
+        queue=harness.queue,
+        content=harness.content,
+        kb_store=cast(PgKnowledgeStore, harness.targets),
+    )
 
 
-def _open_pending_archive(schema: str) -> None:
-    """留下未完成的归档事务：目标登记状态不可确认。"""
-
-    async def run() -> None:
-        store = create_runtime_store(schema=schema)
-        try:
-            async with store.sessions() as session:
-                session.add(
-                    KbArchive(
-                        archive_id="p" * 32,
-                        project="sdp-tag",
-                        status="pending",
-                        snapshot=b"",
-                        archived_count=0,
-                        removed_edges=0,
-                        created_at=datetime.now(UTC),
-                    )
-                )
-                await session.commit()
-        finally:
-            await store.aclose()
-
-    asyncio.run(run())
-
-
-@pytest.fixture
-def client(kb_targets: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+@contextmanager
+def _serve(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    register: bool = True,
+    **env: str,
+) -> Iterator[TestClient]:
+    for key in ("MEMHUB_ENV", "MEMHUB_DATA_DIR", "MEMHUB_CH_URL", "MEMHUB_DB_URL"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
-    with TestClient(create_app(schema=kb_targets)) as test_client:
-        response = test_client.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
-        assert response.status_code == 200
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    with TestClient(_app(harness)) as client:
+        if register:
+            provision = env.get("MEMHUB_PROVISION_TOKEN")
+            response = client.post(
+                "/devices/register",
+                json={"device_id": DEVICE, "name": "test", "platform": "win32"},
+                headers={"Authorization": f"Bearer {provision}"} if provision else {},
+            )
+            assert response.status_code == 200
+        yield client
+
+
+@pytest.fixture
+def client(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    with _serve(h, monkeypatch) as test_client:
         yield test_client
 
 
@@ -160,10 +179,14 @@ def test_cursor_is_empty_before_first_push(client: TestClient) -> None:
     assert body["data"]["source_rev"] == 0
 
 
-def test_push_advances_cursor(client: TestClient) -> None:
+def test_push_advances_cursor_and_queues_content(client: TestClient, h: Harness) -> None:
     status, body = _push(client, [_file("a.jsonl", "hello")])
     assert status == 200
     assert body["data"]["accepted"] == 1
+    [row] = h.queue.rows.values()
+    assert (row.project, row.status, row.size) == ("sdp-tag", "queued", 5)
+    sha = row.sha256
+    assert asyncio.run(h.content.get("sdp-tag", sha)) == "hello"
 
     response = client.get(
         "/ingest/cursor",
@@ -175,13 +198,14 @@ def test_push_advances_cursor(client: TestClient) -> None:
     assert files[0]["offset"] == 5
 
 
-def test_replayed_batch_returns_previous_result(client: TestClient) -> None:
+def test_replayed_batch_returns_previous_result(client: TestClient, h: Harness) -> None:
     batch_id = str(uuid.uuid4())
     first = _push(client, [_file("a.jsonl", "hello")], batch_id=batch_id)
     second = _push(client, [_file("a.jsonl", "hello")], batch_id=batch_id)
     assert first[1]["data"]["replayed"] is False
     assert second[1]["data"]["replayed"] is True
     assert second[1]["data"]["accepted"] == first[1]["data"]["accepted"]
+    assert len(h.queue.rows) == 1
 
 
 def test_offset_rollback_is_conflict(client: TestClient) -> None:
@@ -218,10 +242,11 @@ def test_unregistered_device_is_rejected(client: TestClient) -> None:
     assert response.json()["code"] == 1002
 
 
-def test_binary_content_is_rejected(client: TestClient) -> None:
+def test_binary_content_is_rejected(client: TestClient, h: Harness) -> None:
     status, body = _push(client, [_file("a.bin", "abc\x00def")])
     assert status == 422
     assert body["code"] == 1006
+    assert h.queue.rows == {}
 
 
 def test_register_is_idempotent_for_same_device(client: TestClient) -> None:
@@ -234,24 +259,6 @@ def test_register_is_idempotent_for_same_device(client: TestClient) -> None:
     assert first["data"]["device_token"] == second["data"]["device_token"]
 
 
-def test_raw_bytes_are_persisted_when_data_dir_is_set(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """配置 DATA_DIR 后原始字节必须落盘。"""
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
-        status, _ = _push(fresh, [_file("a.jsonl", "hello")])
-        assert status == 200
-    stored = list((tmp_path / "raw_store").rglob("*.json"))
-    assert len(stored) == 1
-    assert __import__("json").loads(stored[0].read_text(encoding="utf-8"))["content"] == "hello"
-
-
 @pytest.mark.parametrize(
     ("project", "reason"),
     [
@@ -262,31 +269,18 @@ def test_raw_bytes_are_persisted_when_data_dir_is_set(
     ],
 )
 def test_unavailable_project_never_reaches_quota_or_state(
-    kb_targets: str,
+    h: Harness,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     project: str,
     reason: str,
 ) -> None:
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     # 配额先于目标检查会让拒绝类型泄露，而且同一批修正目标后必须能正常提交。
-    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "1000")
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
+    with _serve(h, monkeypatch, MEMHUB_QUEUE_MAX_BYTES="1000") as fresh:
         _assert_target_denied(
-            *_push(
-                fresh,
-                [_file("a.jsonl", "x" * 2000)],
-                batch_id="b1",
-                project=project,
-            ),
+            *_push(fresh, [_file("a.jsonl", "x" * 2000)], batch_id="b1", project=project),
             reason,
         )
-        assert not (tmp_path / "raw_store").exists()
+        assert h.queue.rows == {}
         cursor = fresh.get(
             "/ingest/cursor",
             params={"device_id": DEVICE, "source_id": "cc-sessions"},
@@ -299,16 +293,10 @@ def test_unavailable_project_never_reaches_quota_or_state(
 
 @pytest.mark.parametrize("empty_first", [False, True])
 def test_replay_cannot_change_target(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, empty_first: bool
+    h: Harness, monkeypatch: pytest.MonkeyPatch, empty_first: bool
 ) -> None:
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     first = [] if empty_first else [_file("a.jsonl", "hello")]
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
+    with _serve(h, monkeypatch) as fresh:
         assert _push(fresh, first, batch_id="b1", project="sdp-tag")[0] == 200
         _assert_target_denied(
             *_push(
@@ -325,64 +313,39 @@ def test_replay_cannot_change_target(
         )
         assert status == 200 and body["data"]["replayed"] is True
         assert body["data"]["accepted"] == len(first)
-    assert len(list((tmp_path / "raw_store").rglob("*.json"))) == len(first)
+    assert len(h.queue.rows) == len(first)
 
 
 def test_archived_target_denies_existing_replay(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
+    with _serve(h, monkeypatch) as fresh:
         files = [_file("a.jsonl", "hello")]
         assert _push(fresh, files, batch_id="b1")[0] == 200
         # 已落盘批次的目标后来被归档（`kb_projects.archived_at`）：重放也不能借旧记录继续写。
-        _archive_target(kb_targets, "sdp-tag")
+        h.targets.statuses["sdp-tag"] = "inactive"
         _assert_target_denied(*_push(fresh, files, batch_id="b1"), "inactive")
 
 
-def test_target_lookup_failure_is_generic(
-    kb_targets: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
+def test_target_lookup_failure_is_generic(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    with _serve(h, monkeypatch) as fresh:
         # 未完成的归档事务让「已登记且活动」无法确认：只能给通用 500，不能泄露目标细节。
-        _open_pending_archive(kb_targets)
+        h.targets.registry_down = True
         status, body = _push(fresh, [_file("a.jsonl", "hello")], project="sdp-tag")
         assert status == 500
         assert body["code"] == 2001
         assert body["data"] == {}
         assert "sdp-tag" not in body["message"]
-        assert str(tmp_path) not in body["message"]
-        assert not (tmp_path / "raw_store").exists()
+        assert h.queue.rows == {}
 
 
-def test_chosen_project_is_persisted_for_the_worker(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_chosen_project_is_persisted_for_the_worker(client: TestClient, h: Harness) -> None:
     """桌面端选的知识库要随批次落盘，worker 才能写进对应的 `kb_projects`。"""
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
-        status, _ = _push(fresh, [_file("a.jsonl", "hello")], project="sdp-tag")
-        assert status == 200
-    stored = list((tmp_path / "raw_store").rglob("*.json"))
-    assert json.loads(stored[0].read_text(encoding="utf-8"))["project"] == "sdp-tag"
+    status, _ = _push(client, [_file("a.jsonl", "hello")], project="sdp-tag")
+    assert status == 200
+    [row] = h.queue.rows.values()
+    assert row.project == "sdp-tag"
+    assert asyncio.run(h.content.get("sdp-tag", row.sha256)) == "hello"
 
 
 @pytest.mark.parametrize(
@@ -432,18 +395,25 @@ def test_unconfigured_ingest_target_is_default_denied(monkeypatch: pytest.Monkey
         create_app()
 
 
-def test_prod_start_also_requires_kb_dsn(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_prod_start_requires_queue_and_content_dsn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
     monkeypatch.setenv("MEMHUB_ENV", "prod")
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
-    monkeypatch.delenv("MEMHUB_KB_DB_URL", raising=False)
-    with pytest.raises(KbDsnMissing):
+    monkeypatch.delenv("MEMHUB_DB_URL", raising=False)
+    monkeypatch.setenv("MEMHUB_CH_URL", "http://ch.invalid:8123")
+    with pytest.raises(RuntimeError, match="MEMHUB_DB_URL"):
+        create_app()
+
+    monkeypatch.setenv("MEMHUB_DB_URL", "postgresql://u@127.0.0.1/memhub")
+    monkeypatch.delenv("MEMHUB_CH_URL", raising=False)
+    with pytest.raises(RuntimeError, match="MEMHUB_CH_URL"):
         create_app()
 
 
 def test_ingest_decisions_are_audited_without_content(
-    client: TestClient, caplog: pytest.LogCaptureFixture
+    client: TestClient, caplog: pytest.LogCaptureFixture, h: Harness
 ) -> None:
     """每次采集一条审计：设备、目标、接受/拒绝、理由；不含正文与 token。"""
     caplog.set_level(logging.INFO, logger="memhub.ingest.audit")
@@ -460,23 +430,15 @@ def test_ingest_decisions_are_audited_without_content(
     assert TOKEN not in accepted + rejected
 
 
-def test_ingest_decisions_are_recorded_in_write_audit(
-    client: TestClient, kb_targets: str, test_dsn: str
-) -> None:
-    """采集写审计落 `kb_write_audit`：设备、目标、结果；不含正文与 token。"""
+def test_ingest_decisions_are_recorded_in_write_audit(client: TestClient, h: Harness) -> None:
+    """采集写审计：设备、目标、结果；不含正文与 token。"""
     _push(client, [_file("a2.jsonl", "secret-body")], project="sdp-tag")
     _push(client, [_file("b2.jsonl", "secret-body")], project="ghost")
 
-    async def read_rows() -> list[tuple[str | None, str | None, str | None, str, str]]:
-        store = create_runtime_store(dsn=test_dsn, schema=kb_targets)
-        try:
-            async with store.sessions() as session:
-                rows = (await session.scalars(select(KbWriteAudit).order_by(KbWriteAudit.id))).all()
-            return [(row.actor, row.project, row.node_id, row.action, row.result) for row in rows]
-        finally:
-            await store.aclose()
-
-    rows = asyncio.run(read_rows())
+    rows = [
+        (row["actor"], row["project"], row["node_id"], row["action"], row["result"])
+        for row in h.targets.audits
+    ]
     assert rows == [
         (f"device:{DEVICE}", "sdp-tag", None, "ingest", "ok"),
         (f"device:{DEVICE}", "ghost", None, "ingest", "unregistered"),
@@ -575,32 +537,26 @@ def test_kb_api_outage_is_internal_error(
     assert response.json()["code"] == 2001
 
 
-def test_prod_requires_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    """生产缺 DATA_DIR 时拒绝启动，不静默丢原始增量。"""
-    monkeypatch.setenv("MEMHUB_ENV", "prod")
-    monkeypatch.delenv("MEMHUB_DATA_DIR", raising=False)
-    with pytest.raises(RuntimeError, match="MEMHUB_DATA_DIR"):
-        create_app()
+_PROD_ENV = {
+    "MEMHUB_ENV": "prod",
+    "MEMHUB_DEVICE_TOKEN_SECRET": "test-secret",
+    "MEMHUB_PROVISION_TOKEN": "prov-secret",
+    "MEMHUB_DB_URL": "postgresql://u@127.0.0.1/memhub",
+    "MEMHUB_CH_URL": "http://127.0.0.1:8123",
+}
 
 
-def test_prod_requires_device_token_secret(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_prod_requires_device_token_secret(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMHUB_ENV", "prod")
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("MEMHUB_DEVICE_TOKEN_SECRET", raising=False)
     with pytest.raises(RuntimeError, match="MEMHUB_DEVICE_TOKEN_SECRET"):
-        create_app()
+        _app(h)
 
 
-def test_prod_ignores_dev_token(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_prod_ignores_dev_token(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     """prod 下共享 dev token 即便被误配也不生效（文档约定）。"""
-    monkeypatch.setenv("MEMHUB_ENV", "prod")
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
-    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", "shared-dev")
-    with TestClient(create_app(schema=kb_targets)) as fresh:
+    env = {**_PROD_ENV, "MEMHUB_DEV_TOKEN": "shared-dev"}
+    with _serve(h, monkeypatch, register=False, **env) as fresh:
         token = fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -615,25 +571,23 @@ def test_prod_ignores_dev_token(
         assert denied.status_code == 401
 
 
-def test_prod_requires_provision_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_prod_requires_provision_token(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     """生产缺 provision token 拒绝启动——否则注册端点等于开放自助领 token。"""
     monkeypatch.setenv("MEMHUB_ENV", "prod")
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.delenv("MEMHUB_PROVISION_TOKEN", raising=False)
     with pytest.raises(RuntimeError, match="MEMHUB_PROVISION_TOKEN"):
-        create_app()
+        _app(h)
 
 
 def test_register_requires_provision_token_when_set(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
     monkeypatch.delenv("MEMHUB_DEV_TOKEN", raising=False)
     payload = {"device_id": DEVICE, "name": "test", "platform": "win32"}
-    with TestClient(create_app(schema=kb_targets)) as fresh:
+    with TestClient(_app(h)) as fresh:
         assert fresh.post("/devices/register", json=payload).status_code == 401
         wrong = fresh.post(
             "/devices/register", json=payload, headers={"Authorization": "Bearer nope"}
@@ -648,15 +602,9 @@ def test_register_requires_provision_token_when_set(
         assert ok.json()["data"]["device_token"].startswith("v1.")
 
 
-def test_prod_requires_device_id(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_prod_requires_device_id(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     """契约 0.3：生产 device_id 必填，服务端自动生成只留给 dev stub。"""
-    monkeypatch.setenv("MEMHUB_ENV", "prod")
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
-    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", "prov-secret")
-    with TestClient(create_app(schema=kb_targets)) as fresh:
+    with _serve(h, monkeypatch, register=False, **_PROD_ENV) as fresh:
         response = fresh.post(
             "/devices/register",
             json={"name": "test", "platform": "win32"},
@@ -665,14 +613,11 @@ def test_prod_requires_device_id(
         assert response.status_code == 400
 
 
-def test_per_device_token_is_issued_and_scoped(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_per_device_token_is_issued_and_scoped(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     """生产 token 与设备绑定：签给别人设备的 token 用不了。"""
     monkeypatch.setenv("MEMHUB_DEVICE_TOKEN_SECRET", "test-secret")
     monkeypatch.delenv("MEMHUB_DEV_TOKEN", raising=False)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app(schema=kb_targets)) as fresh:
+    with TestClient(_app(h)) as fresh:
         registered = fresh.post(
             "/devices/register",
             json={"device_id": DEVICE, "name": "test", "platform": "win32"},
@@ -709,37 +654,24 @@ def test_per_device_token_is_issued_and_scoped(
         assert bad.status_code == 401
 
 
-def test_raw_store_quota_returns_1008_before_writing(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_queue_quota_returns_1008_before_writing(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """raw_store 满了返回 1008 而不是写满磁盘；被拒批次一个字节都不落。"""
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "600")
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
+    """队列满了返回 1008；被拒批次一个字节都不落，队列也不多一行。"""
+    with _serve(h, monkeypatch, MEMHUB_QUEUE_MAX_BYTES="600") as fresh:
         status, body = _push(fresh, [_file("a.jsonl", "x" * 1000)])
         assert status == 503
         assert body["code"] == 1008
         assert body["data"]["limit_bytes"] == 600
-        assert list((tmp_path / "raw_store").rglob("*.json")) == []
+        assert h.queue.rows == {}
+        assert not h.content.root.exists()
 
 
 def test_quota_rejects_only_new_content_not_replays(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """配额按新增字节算：重放已收下的批次仍成功，新内容才被拒。"""
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "2000")
-    with TestClient(create_app(schema=kb_targets)) as fresh:
-        fresh.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-        )
+    with _serve(h, monkeypatch, MEMHUB_QUEUE_MAX_BYTES="2000") as fresh:
         first = _file("a.jsonl", "small")
         status, _ = _push(fresh, [first], batch_id="b-1")
         assert status == 200
@@ -748,6 +680,7 @@ def test_quota_rejects_only_new_content_not_replays(
         status, body = _push(fresh, [big])
         assert status == 503
         assert body["code"] == 1008
+        assert len(h.queue.rows) == 1
 
         # 已接收批次重放不执行配额检查；否则客户端重试会被永久卡死。
         status, body = _push(fresh, [first], batch_id="b-1")
@@ -755,32 +688,21 @@ def test_quota_rejects_only_new_content_not_replays(
         assert body["code"] == 0
 
 
-def test_invalid_queue_max_bytes_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invalid_queue_max_bytes_fails_startup(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEMHUB_QUEUE_MAX_BYTES", "not-a-number")
     with pytest.raises(RuntimeError, match="MEMHUB_QUEUE_MAX_BYTES"):
-        create_app()
+        _app(h)
 
 
 PROVISION = "prov-secret"
 PROVISION_AUTH = {"Authorization": f"Bearer {PROVISION}"}
 
 
-@pytest.fixture
-def purge_client(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> Iterator[TestClient]:
-    """带 provision token 与 DATA_DIR 的应用；设备 token 走 dev token。"""
-    monkeypatch.setenv("MEMHUB_DEV_TOKEN", TOKEN)
-    monkeypatch.setenv("MEMHUB_PROVISION_TOKEN", PROVISION)
-    monkeypatch.setenv("MEMHUB_DATA_DIR", str(tmp_path))
-    with TestClient(create_app(schema=kb_targets)) as test_client:
-        registered = test_client.post(
-            "/devices/register",
-            json={"device_id": DEVICE, "name": "test", "platform": "win32"},
-            headers=PROVISION_AUTH,
-        )
-        assert registered.status_code == 200
-        yield test_client
+@contextmanager
+def _provisioned(h: Harness, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """带 provision token 的应用；设备 token 走 dev token。"""
+    with _serve(h, monkeypatch, MEMHUB_PROVISION_TOKEN=PROVISION) as client:
+        yield client
 
 
 def _purge(
@@ -800,102 +722,90 @@ def _purge(
     return response.status_code, response.json()
 
 
-def _seed_queue_copies(root: Path, device_id: str, source_id: str) -> None:
-    """把已推送的 raw 批次镜像到 processed_raw 与 pending_review，模拟 worker 处理后的布局。"""
-    for batch in (root / "raw_store" / device_id / source_id).rglob("*.json"):
-        relative = batch.relative_to(root / "raw_store")
-        for queue in ("processed_raw", "pending_review"):
-            target = root / queue / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(batch.read_bytes())
+async def _drain(h: Harness, *, processed: int = 0, reviewed: int = 0) -> None:
+    for _ in range(processed):
+        [task] = await h.queue.claim(limit=1)
+        await h.queue.complete(task)
+    for _ in range(reviewed):
+        [task] = await h.queue.claim(limit=1)
+        await h.queue.review(task, "boom")
 
 
 @pytest.mark.parametrize("headers", [None, {"Authorization": "Bearer nope"}, AUTH])
 def test_purge_rejects_missing_wrong_and_device_token(
-    purge_client: TestClient, headers: dict[str, str] | None
+    h: Harness, monkeypatch: pytest.MonkeyPatch, headers: dict[str, str] | None
 ) -> None:
     """设备 token 与错误 token 都不能清理；采集器不得删自己的数据。"""
-    _push(purge_client, [_file("a.jsonl", "hello")])
-    status, body = _purge(purge_client, headers=headers)
-    assert status == 401
-    assert body["code"] == 1001
+    with _provisioned(h, monkeypatch) as client:
+        _push(client, [_file("a.jsonl", "hello")])
+        status, body = _purge(client, headers=headers)
+        assert status == 401
+        assert body["code"] == 1001
+        assert len(h.queue.rows) == 1
 
 
 def test_purge_without_configured_provision_token_is_denied(
-    kb_targets: str, monkeypatch: pytest.MonkeyPatch
+    h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """dev stub 没配 provision token 时也不放开删除。"""
-    monkeypatch.delenv("MEMHUB_PROVISION_TOKEN", raising=False)
-    with TestClient(create_app(schema=kb_targets)) as test_client:
-        status, body = _purge(test_client, headers=AUTH)
+    with _serve(h, monkeypatch) as client:
+        status, body = _purge(client, headers=AUTH)
         assert status == 401
         assert body["code"] == 1001
-        status, _ = _purge(test_client, headers={"Authorization": "Bearer "})
+        status, _ = _purge(client, headers={"Authorization": "Bearer "})
         assert status == 401
 
 
-def test_purge_removes_only_the_requested_source(purge_client: TestClient, tmp_path: Path) -> None:
-    """删除三个队列根下该 (device, source) 的目录，别的源与别的设备不动。"""
-    _push(purge_client, [_file("a.jsonl", "hello")])
-    _seed_queue_copies(tmp_path, DEVICE, "cc-sessions")
-    other_source = tmp_path / "raw_store" / DEVICE / "other-src" / "aa" / "x.json"
-    other_device = tmp_path / "raw_store" / str(uuid.uuid4()) / "cc-sessions" / "aa" / "x.json"
-    for keep in (other_source, other_device):
-        keep.parent.mkdir(parents=True)
-        keep.write_text("{}", encoding="utf-8")
+def test_purge_removes_only_the_requested_source(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只删该 (device, source) 的队列行，别的源与别的设备不动。"""
+    other_device = str(uuid.uuid4())
+    with _provisioned(h, monkeypatch) as client:
+        _push(client, [_file("a.jsonl", "hello")])
+        _push(client, [_file("b.jsonl", "other")])
+        registered = client.post(
+            "/devices/register",
+            json={"device_id": other_device, "name": "other", "platform": "win32"},
+            headers=PROVISION_AUTH,
+        )
+        assert registered.status_code == 200
+        assert _push(client, [_file("c.jsonl", "keep")], device_id=other_device)[0] == 200
+        asyncio.run(_drain(h, processed=1, reviewed=1))
 
-    status, body = _purge(purge_client)
+        status, body = _purge(client)
 
     assert status == 200
-    assert body == {
-        "code": 0,
-        "message": "ok",
-        "data": {
-            "device_id": DEVICE,
-            "source_id": "cc-sessions",
-            "purged": {"raw_store": 1, "processed_raw": 1, "pending_review": 1},
-        },
+    assert body["data"] == {
+        "device_id": DEVICE,
+        "source_id": "cc-sessions",
+        "purged": {"queued": 0, "processing": 0, "processed": 1, "pending_review": 1},
+        "content_retained": True,
+        "content_retention": "clickhouse_ttl_180d",
     }
-    for queue in ("raw_store", "processed_raw", "pending_review"):
-        assert not (tmp_path / queue / DEVICE / "cc-sessions").exists()
-    assert other_source.exists()
-    assert other_device.exists()
+    assert [row.device_id for row in h.queue.rows.values()] == [other_device]
 
 
-def test_purge_refuses_a_directory_shared_with_another_source(
-    purge_client: TestClient, tmp_path: Path
-) -> None:
-    """旧队列名映射不是一一对应，目录名对上不代表内容属于请求的源。"""
-    assert _push(purge_client, [_file("a.jsonl", "hello")])[0] == 200
-    _seed_queue_copies(tmp_path, DEVICE, "cc-sessions")
-    (batch,) = (tmp_path / "pending_review" / DEVICE / "cc-sessions").rglob("*.json")
-    payload = json.loads(batch.read_text(encoding="utf-8"))
-    payload["source_id"] = "CC-SESSIONS"
-    batch.write_text(json.dumps(payload), encoding="utf-8")
-
-    status, body = _purge(purge_client)
-
-    assert status == 400
-    assert body["code"] == 1003
-    assert batch.exists()
-    assert len(list((tmp_path / "raw_store").rglob("*.json"))) == 1
-    assert len(list((tmp_path / "processed_raw").rglob("*.json"))) == 1
-
-
-def test_purge_is_idempotent_and_keeps_cursor(purge_client: TestClient) -> None:
+def test_purge_is_idempotent_and_keeps_cursor(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
     """重复清理仍 200 且计数为 0；游标保留，同一内容不会被重新接收。"""
     first = _file("a.jsonl", "hello")
-    assert _push(purge_client, [first], batch_id="b-1")[0] == 200
-    assert _purge(purge_client)[0] == 200
-    status, body = _purge(purge_client)
-    assert status == 200
-    assert body["data"]["purged"] == {"raw_store": 0, "processed_raw": 0, "pending_review": 0}
-    cursor = purge_client.get(
-        "/ingest/cursor",
-        params={"device_id": DEVICE, "source_id": "cc-sessions"},
-        headers=AUTH,
-    ).json()["data"]
-    assert cursor["files"][0]["offset"] == first["to_offset"]
+    with _provisioned(h, monkeypatch) as client:
+        assert _push(client, [first], batch_id="b-1")[0] == 200
+        assert _purge(client)[0] == 200
+        status, body = _purge(client)
+        assert status == 200
+        assert body["data"]["purged"] == {
+            "queued": 0,
+            "processing": 0,
+            "processed": 0,
+            "pending_review": 0,
+        }
+        cursor = client.get(
+            "/ingest/cursor",
+            params={"device_id": DEVICE, "source_id": "cc-sessions"},
+            headers=AUTH,
+        ).json()["data"]
+        assert cursor["files"][0]["offset"] == first["to_offset"]
 
 
 @pytest.mark.parametrize(
@@ -912,34 +822,171 @@ def test_purge_is_idempotent_and_keeps_cursor(purge_client: TestClient) -> None:
     ],
 )
 def test_purge_rejects_bad_parameters(
-    purge_client: TestClient, tmp_path: Path, source_id: str, device_id: str, purge: str | None
+    h: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    source_id: str,
+    device_id: str | None,
+    purge: str | None,
 ) -> None:
-    _push(purge_client, [_file("a.jsonl", "hello")])
-    status, body = _purge(purge_client, source_id, device_id=device_id, purge=purge)
-    assert status == 400
-    assert body["code"] == 1003
-    assert len(list((tmp_path / "raw_store").rglob("*.json"))) == 1
+    with _provisioned(h, monkeypatch) as client:
+        _push(client, [_file("a.jsonl", "hello")])
+        status, body = _purge(client, source_id, device_id=device_id, purge=purge)
+        assert status == 400
+        assert body["code"] == 1003
+        assert len(h.queue.rows) == 1
 
 
-def test_purge_is_recorded_in_write_audit(
-    purge_client: TestClient, kb_targets: str, test_dsn: str
-) -> None:
-    _push(purge_client, [_file("a.jsonl", "secret-body")])
-    _purge(purge_client)
+def test_purge_is_recorded_in_write_audit(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    with _provisioned(h, monkeypatch) as client:
+        _push(client, [_file("a.jsonl", "secret-body")])
+        _purge(client)
 
-    async def read_rows() -> list[tuple[str | None, str | None, str | None, str, str]]:
-        store = create_runtime_store(dsn=test_dsn, schema=kb_targets)
-        try:
-            async with store.sessions() as session:
-                rows = (
-                    await session.scalars(
-                        select(KbWriteAudit).where(KbWriteAudit.action == "ingest_purge")
-                    )
-                ).all()
-            return [(row.actor, row.project, row.node_id, row.action, row.result) for row in rows]
-        finally:
-            await store.aclose()
-
-    rows = asyncio.run(read_rows())
+    rows = [
+        (row["actor"], row["project"], row["node_id"], row["action"], row["result"])
+        for row in h.targets.audits
+        if row["action"] == "ingest_purge"
+    ]
     assert rows == [("provision", None, None, "ingest_purge", "ok")]
     assert PROVISION not in repr(rows)
+
+
+# ---- 内部接口：管理台上传（MEMHUB_INTERNAL_TOKEN） ------------------------
+
+
+def _internal_enqueue(
+    client: TestClient,
+    *,
+    project: str = "sdp-tag",
+    content: str = "hello",
+    path: str = "note.md",
+    headers: dict[str, str] | None = INTERNAL_AUTH,
+    device_id: str = CONSOLE_DEVICE,
+    source_type: str = "docs",
+    batch_id: str | None = None,
+) -> tuple[int, dict[str, Any]]:
+    body = {
+        "batch_id": batch_id or uuid.uuid4().hex,
+        "device_id": device_id,
+        "source_id": project,
+        "source_type": source_type,
+        "project": project,
+        "files": [_file(path, content)],
+    }
+    response = client.post("/internal/enqueue", json=body, headers=headers)
+    return response.status_code, cast(dict[str, Any], response.json())
+
+
+def test_internal_endpoints_require_configured_token(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _serve(h, monkeypatch) as client:
+        status, body = _internal_enqueue(client)
+        assert (status, body["code"]) == (500, 2001), "未配置内部 token 即关闭接口"
+        assert h.queue.rows == {}
+
+
+def test_internal_endpoint_rejects_wrong_token(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    with _serve(h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL) as client:
+        status, body = _internal_enqueue(client, headers={"Authorization": "Bearer nope"})
+        assert (status, body["code"]) == (401, 1001)
+        assert h.queue.rows == {}
+
+
+def test_internal_enqueue_lands_in_the_same_queue(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _serve(h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL) as client:
+        status, body = _internal_enqueue(client)
+        assert status == 200
+        assert body["data"]["accepted"] == 1
+
+        batch_id = body["data"]["batch_id"]
+        progress = client.get(f"/internal/queue/{batch_id}", headers=INTERNAL_AUTH)
+        assert progress.status_code == 200
+        data = progress.json()["data"]
+        assert data["project"] == "sdp-tag"
+        assert data["counts"] == {
+            "queued": 1,
+            "processing": 0,
+            "processed": 0,
+            "pending_review": 0,
+        }
+        assert data["files"][0]["status"] == "queued"
+
+    [row] = h.queue.rows.values()
+    assert (row.producer, row.device_id, row.project) == ("console", CONSOLE_DEVICE, "sdp-tag")
+    assert asyncio.run(h.content.get("sdp-tag", row.sha256)) == "hello"
+
+
+def test_internal_enqueue_denies_unregistered_target(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _serve(h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL) as client:
+        status, body = _internal_enqueue(client, project="ghost")
+        assert status == 400
+        assert body["data"] == {"reason": "unregistered"}
+        assert h.queue.rows == {}
+
+
+def test_internal_enqueue_rejects_collector_identity(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """内部接口也走 console 生产者校验：不能让采集器身份混进来。"""
+    with _serve(h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL) as client:
+        status, _body = _internal_enqueue(client, device_id=str(uuid.uuid4()))
+        assert status == 400
+        assert h.queue.rows == {}
+
+
+def test_internal_queue_reports_worker_progress(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _serve(h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL) as client:
+        _, created = _internal_enqueue(client, content="first", path="a.md")
+        _, second = _internal_enqueue(client, content="second", path="b.md")
+        asyncio.run(_drain(h, processed=1, reviewed=1))
+
+        queued = client.get(f"/internal/queue/{created['data']['batch_id']}", headers=INTERNAL_AUTH)
+        assert queued.status_code == 200
+        queued_data = queued.json()["data"]
+        assert (queued_data["counts"]["processed"], queued_data["status"]) == (1, "processed")
+
+        reviewed = client.get(
+            f"/internal/queue/{second['data']['batch_id']}", headers=INTERNAL_AUTH
+        )
+        reviewed_data = reviewed.json()["data"]
+        assert reviewed_data["counts"]["pending_review"] == 1
+        assert reviewed_data["files"][0]["attempts"] == 1
+        assert reviewed_data["errors"] == ["boom"]
+
+
+def test_internal_queue_unknown_and_ambiguous_batch(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _serve(h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL) as client:
+        missing = client.get("/internal/queue/deadbeef", headers=INTERNAL_AUTH)
+        assert (missing.status_code, missing.json()["code"]) == (404, 1011)
+
+        _, created = _internal_enqueue(client, project="sdp-tag")
+        batch_id = created["data"]["batch_id"]
+        # 指定了错误的库：批次不属于它，不能拿到别库的进度。
+        wrong = client.get(
+            f"/internal/queue/{batch_id}", params={"project": "other-kb"}, headers=INTERNAL_AUTH
+        )
+        assert wrong.status_code == 404
+        resolved = client.get(
+            f"/internal/queue/{batch_id}", params={"project": "sdp-tag"}, headers=INTERNAL_AUTH
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["data"]["project"] == "sdp-tag"
+
+
+def test_internal_enqueue_reports_queue_full(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    with _serve(
+        h, monkeypatch, MEMHUB_INTERNAL_TOKEN=INTERNAL, MEMHUB_QUEUE_MAX_BYTES="1"
+    ) as client:
+        status, body = _internal_enqueue(client, content="larger than one byte")
+        assert status == 503
+        assert body["code"] == 1013
+        assert body["data"] == {"used_bytes": 0, "limit_bytes": 1, "incoming_bytes": 20}
+        assert h.queue.rows == {}

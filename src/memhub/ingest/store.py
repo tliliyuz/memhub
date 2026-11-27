@@ -5,8 +5,12 @@
 接口是 **async** 的（ADR-0005）：生产实现走 SQLAlchemy async engine，内存实现是
 纯 dict 操作，不会阻塞事件循环。
 
-**这里不存知识**：知识是 `knowledge/**/*.md` + git（ADR-0002），原始增量是文件系统里的
-`raw_store/`。本模块的行都是「推到哪儿了、收过哪批、谁注册过」这类运行状态。
+**这里不存知识**：知识在 PG 的 `kb_*` 表（ADR-0013），原文在 ClickHouse、待提炼
+队列在 `ingest_queue`（ADR-0020）。本模块的行都是「推到哪儿了、收过哪批、谁注册过」
+这类运行状态。
+
+接受判重（哪条内容已收下）已移到 `ingest_queue` 主键：`apply` 只做游标与批次幂等，
+调用方把队列给出的 `Dedupe` 传进来，避免出现两套「是否已收」的事实。
 """
 
 from __future__ import annotations
@@ -17,10 +21,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from memhub.contract import Cursor, FileCursor, IngestRequest, IngestResult
-from memhub.queue.rawstore import BatchTargetConflict
+from memhub.queue.identity import BatchTargetConflict
 
 REPLAY_WINDOW = timedelta(hours=24)
 SEEN_MESSAGE_BATCH = 1000
+
+
+@dataclass(frozen=True)
+class Dedupe:
+    """一次入队的判重结果（文件级计数）；缺省表示整批都是新内容。"""
+
+    accepted: int
+    duplicates: int
 
 
 class CursorConflict(Exception):
@@ -49,8 +61,12 @@ class StateStore(Protocol):
         """验证已接收批次的目标，并返回仍在重放窗口内的结果。"""
         ...
 
-    async def apply(self, request: IngestRequest) -> IngestResult:
-        """落一批增量：幂等重放、游标冲突、去重、更新游标，一次事务完成。"""
+    async def apply(self, request: IngestRequest, *, dedupe: Dedupe | None = None) -> IngestResult:
+        """落一批增量：幂等重放、游标冲突、更新游标，一次事务完成。
+
+        `dedupe` 由队列给出（`EnqueueOutcome.accepted/duplicates`）；缺省按整批新增，
+        仅用于不经过队列的单元测试。
+        """
         ...
 
     # -- 消息去重索引（ADR-0017） ----------------------------------------
@@ -64,6 +80,10 @@ class StateStore(Protocol):
 
     async def forget_messages(self, project: str, *, source_id: str | None = None) -> int:
         """删除该库（可选限定源）的已见记录并返回行数；`source_id=None` 清整库。"""
+        ...
+
+    async def close(self) -> None:
+        """释放连接池；内存实现为空操作。"""
         ...
 
 
@@ -89,7 +109,6 @@ class MemoryStore:
         self.devices: dict[str, dict[str, str]] = {}
         self.sources: dict[tuple[str, str], SourceState] = {}
         self.batches: dict[tuple[str, str], ReplayedBatch] = {}
-        self.seen_shas: set[tuple[str, str]] = set()
         self.seen_message_keys: set[tuple[str, str, str]] = set()
 
     # -- devices ---------------------------------------------------------
@@ -98,6 +117,9 @@ class MemoryStore:
 
     async def is_registered(self, device_id: str) -> bool:
         return device_id in self.devices
+
+    async def close(self) -> None:
+        return None
 
     # -- cursors ---------------------------------------------------------
     async def get_cursor(self, device_id: str, source_id: str) -> tuple[int, list[FileCursor]]:
@@ -125,7 +147,7 @@ class MemoryStore:
         self,
         request: IngestRequest,
         *,
-        stored_paths: dict[str, str] | None = None,
+        dedupe: Dedupe | None = None,
     ) -> IngestResult:
         key = (request.device_id, request.batch_id)
         now = datetime.now(UTC)
@@ -136,26 +158,13 @@ class MemoryStore:
         state = self.sources.setdefault((request.device_id, request.source_id), SourceState())
         reset_allowed = request.source_rev > state.source_rev
 
-        # 先校验整批，再落状态：任何一个文件冲突都整批回滚，不留半批游标或哈希。
-        accepted = 0
-        duplicates = 0
+        # 先校验整批，再落状态：任何一个文件冲突都整批回滚，不留半批游标。
         updates: list[FileCursor] = []
-        new_shas: list[tuple[str, str]] = []
-        seen = set(self.seen_shas)
         for batch_file in request.files:
             known = None if reset_allowed else state.files.get(batch_file.path)
             expected = known.offset if known is not None else 0
             if batch_file.from_offset < expected:
                 raise CursorConflict(batch_file.path, expected)
-
-            sha_key = (request.source_id, batch_file.sha256)
-            if sha_key in seen:
-                duplicates += 1
-            else:
-                seen.add(sha_key)
-                new_shas.append(sha_key)
-                accepted += 1
-
             updates.append(
                 FileCursor(
                     path=batch_file.path,
@@ -165,7 +174,6 @@ class MemoryStore:
                 )
             )
 
-        self.seen_shas.update(new_shas)
         for file_cursor in updates:
             state.files[file_cursor.path] = file_cursor
         if reset_allowed:
@@ -175,8 +183,8 @@ class MemoryStore:
 
         result = IngestResult(
             batch_id=request.batch_id,
-            accepted=accepted,
-            duplicates=duplicates,
+            accepted=dedupe.accepted if dedupe is not None else len(request.files),
+            duplicates=dedupe.duplicates if dedupe is not None else 0,
             cursor=await self.cursor_summary(request.device_id, request.source_id),
         )
         self.batches[key] = ReplayedBatch(at=now, result=result, project=request.project)
@@ -202,6 +210,7 @@ class MemoryStore:
 __all__ = [
     "REPLAY_WINDOW",
     "CursorConflict",
+    "Dedupe",
     "MemoryStore",
     "ReplayedBatch",
     "SourceState",

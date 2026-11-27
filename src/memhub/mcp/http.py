@@ -215,8 +215,11 @@ def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
             request.scope.get("state", {}).get(_SCOPE_KEY) if isinstance(request, Request) else None
         )
         writable = credential.writable if isinstance(credential, Credential) else False
+        memory = credential.memory if isinstance(credential, Credential) else False
         return ListToolsResult(
-            tools=[Tool.model_validate(tool) for tool in tools_for(writable=writable)]
+            tools=[
+                Tool.model_validate(tool) for tool in tools_for(writable=writable, memory=memory)
+            ]
         )
 
     async def invoke(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
@@ -228,10 +231,12 @@ def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
         if isinstance(credential, Credential):
             projects = credential.projects
             writable = credential.writable
+            memory = credential.memory
             grant_id = credential.grant_id
         else:
             projects = frozenset()
             writable = False
+            memory = False
             grant_id = ""
         error_code: int | None = None
         error_kind: str | None = None
@@ -244,6 +249,7 @@ def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
                 store,
                 projects=projects,
                 writable=writable,
+                memory=memory,
                 grant_id=grant_id,
             )
             payload = result.get("content", [])

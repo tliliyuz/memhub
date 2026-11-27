@@ -34,8 +34,9 @@ pnpm typecheck
 构建产物 `dist/` 由 kb-api 托管：
 
 ```bash
-memhub kb --web-dist web/dist --data-dir data
-# 真源是 PostgreSQL（MEMHUB_KB_DB_URL，经 .env 注入）；没有 --knowledge-dir
+memhub kb --web-dist web/dist
+# 真源是 PostgreSQL（MEMHUB_KB_DB_URL，经 .env 注入）；没有 --knowledge-dir / --data-dir
+# 上传经 ingest 内部接口，需另配 MEMHUB_INGEST_URL 与 MEMHUB_INTERNAL_TOKEN
 ```
 
 图谱数据来自 `GET /api/v1/kb/graph?project=<库>`：节点数 ≤60 时直接显示标签，更大的图只在枢纽/命中搜索/悬停邻域时显示标签；节点按 kind 上色、按度数定大小，支持类型过滤、隐藏废弃/孤立、搜索与重新布局。全局图谱（`/graph`）把各库子图合并显示，按知识库配色。

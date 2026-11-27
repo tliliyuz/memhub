@@ -24,6 +24,8 @@ class Grant(BaseModel):
     expires_at: datetime
     projects: Annotated[frozenset[Project], Field(min_length=1, max_length=128)]
     name: Annotated[str | None, Field(default=None, min_length=1, max_length=64)]
+    # 长期记忆是跨项目数据面，与 `projects` 正交；默认关闭（ADR-0019）。
+    memory: bool = False
 
     @field_validator("expires_at")
     @classmethod
@@ -68,6 +70,7 @@ class Credential:
     writable: bool
     grant_id: str
     name: str | None = None
+    memory: bool = False
 
 
 def authorize(grants: dict[str, Grant], authorization: str) -> Credential | None:
@@ -83,4 +86,5 @@ def authorize(grants: dict[str, Grant], authorization: str) -> Credential | None
         writable=grant.scope == "mcp:write",
         grant_id=digest[:12],
         name=grant.name,
+        memory=grant.memory,
     )

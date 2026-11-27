@@ -1,4 +1,4 @@
-# 跨端契约（v0.17）
+# 跨端契约（v0.19）
 
 本目录是 **memhub 新架构**唯一的事实来源之一：客户端（agent-console / collector）、服务端、MCP 消费方都以此为准。改契约先改这里，再改实现。
 
@@ -23,6 +23,8 @@
 
 ## 变更记录
 
+- 0.19 — 原文入 ClickHouse、队列入 PG（ADR-0020，[ingest-api.md](ingest-api.md) 0.10、[kb-admin-api.md](kb-admin-api.md) 0.8）：`POST /ingest/raw` 同时写 CH `memhub_raw.raw_sessions` 与 PG `ingest_queue`，判重改为 `(project, sha256)` 主键；清理接口只删队列行，正文按 180 天 TTL 保留。新增内部接口 `POST /internal/enqueue`、`GET /internal/queue/{batch_id}`（`MEMHUB_INTERNAL_TOKEN`）；管理台上传改走该接口，kb-api 不再写本机 raw 目录、不连队列或 CH。客户端端点、信封与错误码不变。
+- 0.18 — MCP 只读长期记忆工具（ADR-0019，[mcp-tools.md](mcp-tools.md) 0.9）：新增 `kb_memory_search` / `kb_memory_read`，只读当前 `published` 快照的 `active` 条目；`Grant` 新增布尔 `memory`（默认 `false`，与 `projects` 正交），`tools/list` 按读写与记忆开关组合裁剪为 4/6/7/9 个工具；`memhub mcp token --memory` 生成对应 grant；未开启的调用按 `3001` 拒绝。读调用只进 `kb_mcp_trace`，不写 `kb_write_audit`。
 - 0.17 — 长期记忆管理 API（ADR-0016，[kb-admin-api.md](kb-admin-api.md) 0.7）：新增 `/api/v1/kb/memories*`——条目列表/详情/乐观锁更新/废弃、聚合候选查询、快照发布/回滚/停用；记忆不挂知识库、不进节点检索，也不提供给 MCP 消费方。
 - 0.16 — MCP 服务端自描述（[mcp-tools.md](mcp-tools.md) 0.8）：`initialize` 的 `instructions` 统一为 HTTP/stdio 共用常量，说明服务定位与「何时该检索」；七个工具补中英 `title`，`kb_search` 描述补触发场景与中英同义词，所有输入字段补 `description`；参数约束与返回结构不变。新增本地令牌生成器 `memhub mcp token`（输出一次性令牌与可直接粘贴的 grant，UTC 有效期、非空库名单，经 `Grant` 校验后输出）。
 - 0.15 — 发现层事件并入 MCP 调用轨迹（ADR-0018，[mcp-tools.md](mcp-tools.md) §5、[kb-admin-api.md](kb-admin-api.md) §4.9）：`initialize` 与 `tools/list` 与 `tools/call`、鉴权/路由拒绝同表记录，新增 `event`（`call`/`list_tools`/`initialize`）与 `tool_count`；查询默认只统计 `call`，另给连接漏斗汇总。`notifications/*` 与 `ping` 不记录。
