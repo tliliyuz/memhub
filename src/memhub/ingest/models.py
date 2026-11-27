@@ -85,6 +85,8 @@ class Batch(Base):
 
 
 class SeenSha(Base):
+    """旧版按源的 sha 去重表（ADR-0020 起不再写入/读取，保留到切换后清理）。"""
+
     __tablename__ = "seen_shas"
 
     source_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -92,6 +94,44 @@ class SeenSha(Base):
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class IngestQueue(Base):
+    """待提炼队列（ADR-0020）：正文在 ClickHouse，这里只存归属与状态。
+
+    主键 `(project, sha256)` 同时承担接受判重：同一目标下同一内容只入队一次。
+    `status ∈ {queued, processing, processed, pending_review}`；worker 用
+    `FOR UPDATE SKIP LOCKED` 领取，租约过期由下一轮回收。
+    """
+
+    __tablename__ = "ingest_queue"
+    __table_args__ = (
+        # 跨目标重定向检查按 sha 查，不能用主键前缀。
+        Index("ingest_queue_sha256_idx", "sha256"),
+        # 领取与积压统计按状态过滤。
+        Index("ingest_queue_status_idx", "status", "created_at"),
+    )
+
+    project: Mapped[str] = mapped_column(Text, primary_key=True)
+    sha256: Mapped[str] = mapped_column(Text, primary_key=True)
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    batch_id: Mapped[str] = mapped_column(Text, nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    from_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    to_offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    mtime: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    producer: Mapped[str] = mapped_column(Text, nullable=False, server_default="collector")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SeenMessage(Base):
@@ -111,4 +151,13 @@ class SeenMessage(Base):
     )
 
 
-__all__ = ["Base", "Batch", "Device", "FileCursor", "SeenMessage", "SeenSha", "Source"]
+__all__ = [
+    "Base",
+    "Batch",
+    "Device",
+    "FileCursor",
+    "IngestQueue",
+    "SeenMessage",
+    "SeenSha",
+    "Source",
+]

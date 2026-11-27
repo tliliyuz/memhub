@@ -20,8 +20,8 @@ import pytest
 import pytest_asyncio
 
 from memhub.contract import BatchFile, Cursor, IngestRequest
-from memhub.ingest.store import CursorConflict, MemoryStore, StateStore
-from memhub.queue.rawstore import BatchTargetConflict
+from memhub.ingest.store import CursorConflict, Dedupe, MemoryStore, StateStore
+from memhub.queue.identity import BatchTargetConflict
 
 NOW = datetime(2026, 11, 19, 2, 0, tzinfo=UTC)
 DEVICE = str(uuid.uuid4())
@@ -167,10 +167,17 @@ async def test_conflict_rolls_back_the_whole_batch(store: StateStore) -> None:
     assert [file.path for file in files] == ["sessions/a.jsonl"]
 
 
-async def test_same_content_different_batch_is_duplicate(store: StateStore) -> None:
+async def test_apply_reports_queue_dedupe_counts(store: StateStore) -> None:
+    """判重已移到队列（ADR-0020）：状态层只记录队列给出的 accepted/duplicates。
+
+    同一正文换路径再推时，重复由 `ingest_queue` 的 `(project, sha256)` 主键判定；
+    状态层不再维护 `seen_shas`，不能自己把批次判成重复。
+    """
     await store.apply(_batch(content="hello"))
-    # 换路径但内容 sha 相同：去重按 (source, sha)，不看路径。
-    result = await store.apply(_batch(content="hello", path="sessions/copy.jsonl"))
+    result = await store.apply(
+        _batch(content="hello", path="sessions/copy.jsonl"),
+        dedupe=Dedupe(accepted=0, duplicates=1),
+    )
     assert (result.accepted, result.duplicates) == (0, 1)
 
 
