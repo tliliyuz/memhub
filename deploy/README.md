@@ -97,7 +97,7 @@ python tests/collector_loopback_fixture.py --device-id <测试客户端的UUIDv4
 | 组件 | 形态 |
 |:---|:---|
 | ingest-api | compose 常驻容器 `memhub/app:0.1.0`，`network_mode: host`，容器内绑 `127.0.0.1:8700`（**没有 `ports:`**，host 网络下端口映射无效） |
-| worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-02:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
+| worker | compose 常驻容器 `memhub/app-worker:0.1.0`，内部窗口门控 21:00-05:00；窗口外常驻 sleep 不退出，`restart: on-failure:5` |
 | kb-api | compose 常驻容器 `memhub/app-kb:0.1.0`，复用 worker wheelhouse + 烘进镜像的 `web/dist`；绑 `127.0.0.1:8701`，由 nginx 挂到 `/`。**连 PG**：`MEMHUB_KB_DB_URL`（运行时 DML 角色，`search_path=kb`）经**独立** `env_file` `/etc/memhub/env.kb` 注入，缺该键启动即失败，不退回 markdown；该文件不含 `MEMHUB_DB_URL` / `PGPASSWORD` / LLM 与设备凭据 |
 | purge | systemd timer 跑 `docker run --rm` 一次性子命令 |
 
@@ -257,7 +257,8 @@ timer 建议：purge `06:15`；worker 窗口由容器内门控，不需要 timer
 unit 文件在 `deploy/systemd/`：`memhub-memory-aggregate.service`（oneshot，用
 `memhub/app-worker:0.1.0` 跑 `memhub memory-aggregate --publish`）与
 `memhub-memory-aggregate.timer`（`Mon *-*-* 03:00:00`，`Persistent=true`）。
-03:00 与 worker 的 21:00-02:00 提炼窗口错峰；聚合只读写 `kb_*` 表并调用模型，不挂数据卷。
+负责人 2026-11-27 将 worker 提炼窗口延长到 21:00-05:00 后，03:00 落在窗口内，
+聚合与提炼重叠为接受项；聚合只读写 `kb_*` 表并调用模型，不挂数据卷。
 
 安装（部署变更，按需执行）：
 
