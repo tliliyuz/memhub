@@ -51,9 +51,11 @@ closing_layers = ["tests", "docs"]
 name = "config"
 patterns = ["pyproject.toml", "requirements.txt", ".env.example", "Dockerfile", "docker-compose.yml", "alembic.ini"]
 
+# 运行态入口与采集基础设施：队列模块（ADR-0020）与 CLI 入口同属这一层，
+# 避免队列 ↔ ingest/worker 的相互导入被切成无法单独通过 mypy 的提交。
 [[atomic.layer]]
 name = "infra"
-patterns = ["src/memhub/ingest/", "src/memhub/worker/", "deploy/"]
+patterns = ["src/memhub/ingest/", "src/memhub/worker/", "src/memhub/queue/", "src/memhub/cli/", "deploy/"]
 
 [[atomic.layer]]
 name = "models"
