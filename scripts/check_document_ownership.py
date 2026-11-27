@@ -22,7 +22,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 AUTHORITY_DOCS = {
-    "docs/architecture.md",
+    "docs/tech/architecture.md",
     "docs/contracts/README.md",
     "docs/contracts/ingest-api.md",
     "docs/contracts/kb-admin-api.md",

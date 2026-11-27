@@ -3,7 +3,7 @@
 > 一句话：**采集端是无状态哑管道，云端是唯一有状态的提炼者。** 任何记忆能力都不在请求路径上。
 >
 > 适用范围：系统拓扑、组件职责、故障隔离约束与部署形态。
-> 不负责：环境变量键值（见 [tech/ENVIRONMENT.md](tech/ENVIRONMENT.md)）、跨端字段契约（见 [contracts/](contracts/README.md)）、实施历史（见 [CHANGELOG.md](CHANGELOG.md)）。
+> 不负责：环境变量键值（见 [tech/ENVIRONMENT.md](ENVIRONMENT.md)）、跨端字段契约（见 [contracts/](../contracts/README.md)）、实施历史（见 [CHANGELOG.md](../CHANGELOG.md)）。
 
 ## 1. 拓扑
 
@@ -77,7 +77,7 @@
 - 管理台：`memhub kb` 在同一进程托管打包前端，`/` 由 nginx 反代；页面直接调 `/api/v1/kb/*`，没有 explorer 子进程，也没有文件投影。
 - 检索：按授权范围与 `kind` 过滤后，应用层 BM25 排序；默认排除 `deprecated`（`tier=canonical`），`tier=all` 才包含废弃节点。向量混合检索按 ADR-0007 另案推进。
 - 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
-- 上传：`/api/v1/kb/uploads` 校验文件后调用 ingest 的内部接口 `/internal/enqueue`，由 worker 按 docs profile 提炼，不经过采集协议；kb-api 不持有队列、ClickHouse 或本机 raw 目录（见 [kb-admin-api.md](contracts/kb-admin-api.md) §4.7）。
+- 上传：`/api/v1/kb/uploads` 校验文件后调用 ingest 的内部接口 `/internal/enqueue`，由 worker 按 docs profile 提炼，不经过采集协议；kb-api 不持有队列、ClickHouse 或本机 raw 目录（见 [kb-admin-api.md](../contracts/kb-admin-api.md) §4.7）。
 - 长期记忆：`/api/v1/kb/memories*` 提供条目、候选与快照的查询和治理动作，管理台「长期记忆」页只展示元数据与结论；会话抽取的注入不经过该入口。
 - 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 

@@ -5,7 +5,7 @@
 | 文档状态 | specified |
 | 最后更新 | 2026-11-27 |
 | 适用范围 | 环境准备、目录门禁、命令、验证矩阵、提交粒度、分支与 worktree 闭环、Git 授权边界、编码约定 |
-| 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../architecture.md) 与 [contracts](../contracts/README.md)） |
+| 不负责 | 产品语义裁决、契约字段取值、系统拓扑（见 [architecture](../tech/architecture.md) 与 [contracts](../contracts/README.md)） |
 
 ## 1. 环境准备
 
@@ -42,7 +42,7 @@ tests/
 docs/
 scripts/      治理检查脚本
 deploy/       compose / nginx / systemd / daemon.json
-knowledge/    markdown 真源的一次性迁移源（迁移后删除，见 §9.1；运行时不再读取）
+knowledge/    markdown 真源的一次性迁移源（迁移后删除，见 §11.1；运行时不再读取）
 prompts/      各 source_type 的抽取 profile
 ```
 
@@ -56,11 +56,34 @@ prompts/      各 source_type 的抽取 profile
 | 工具定义 | `mcp/` | 在工具函数里实现检索算法 |
 | 运维命令 | `cli/` | 在命令里实现业务规则 |
 
-新增顶层目录或改分层：先改 [architecture](../architecture.md)，再改本表。
+新增顶层目录或改分层：先改 [architecture](../tech/architecture.md)，再改本表。
 
 治理门禁与评测仓同源（`scripts/` 下脚本 + pre-commit）：`check_document_format.py --staged`（结构、H2 编号、链接、入口镜像）、`check_document_ownership.py --staged`（权威文档归属、实施历史与密钥形态）、`check_adr_governance.py`（ADR 索引、状态词与编号唯一性）、`check_agent_entrypoints_sync.py`、`check_commit_message.py`（禁工具署名行）、`check_no_raw_sql.py`、`check_async_io.py`、`check_env_example_keys.py`。`knowledge/` 与 `prompts/` 不是治理文档，文档类检查自动排除。
 
-## 3. 常用命令
+<!-- governance:section:verification begin -->
+## 3. 验证矩阵
+
+| 变更类型 | 必跑 |
+|---|---|
+| 业务代码 | 受影响模块的测试命令 |
+| 接口与数据契约 | 契约测试与受影响模块测试 |
+| 文档 | `governance verify` 与本仓格式检查 |
+| 配置与依赖 | 启动 smoke 与受影响模块测试 |
+| 纯注释、生成物与配置 | `governance verify`；说明无法制造业务 RED 的理由 |
+
+验证结果必须附在完成声明中，写明实际执行的命令与结果；未执行的项写明原因，不得写成通过。
+<!-- governance:section:verification end -->
+
+<!-- governance:section:resources begin -->
+## 4. 资源与浏览器验收
+
+- 页面验收只使用一个 space：不为单个任务另开 space，不占用、接管或关闭负责人正在使用的 space 与标签页；分步验收在同一标签内导航。
+- 验收前查看本仓当前占用的浏览器标签页与进程，只启动本次所需的浏览器与服务。
+- 验收结束关闭本次打开的全部标签页与 space，结束本次启动的进程，不让服务常驻。
+- 需要多开并发进程或并行验收时先取得负责人确认；归属无法确认时先问负责人。
+<!-- governance:section:resources end -->
+
+## 5. 常用命令
 
 | 目的 | 命令 |
 |:---|:---|
@@ -79,7 +102,7 @@ prompts/      各 source_type 的抽取 profile
 
 本地钩子（`mypy`、`env-key-parity`、`doc-format`）使用 `language: system`，依赖 PATH 上的 Python 与 venv 内的包。提交前先激活虚拟环境（`. .venv/Scripts/activate` 或 PowerShell 的 `.venv\Scripts\Activate.ps1`），否则 `mypy` 会报 `Executable mypy not found`。
 
-## 4. 验证矩阵
+## 6. 本仓验证矩阵
 
 | 改动类型 | 至少执行 |
 |:---|:---|
@@ -96,20 +119,20 @@ prompts/      各 source_type 的抽取 profile
 
 验收结论必须逐项写明浏览器与服务资源：本次打开的 space、标签页与进程（未打开写「无」），以及验收后均已关闭。缺少这一项的验收结论不算完成。
 
-## 5. 提交粒度
+## 7. 提交粒度
 
 - 一次提交只做一件事：一个行为、一次重构、一份文档。
 - 格式：`<type>(<scope>): <中文摘要>`，`type ∈ feat|fix|docs|refactor|test|chore|perf`，摘要 ≤50 字。
 - 不提交 `.env`、`data/`、`content_store/`、真实会话内容。
 - 提交信息只描述实际改动，**不加 `Co-Authored-By` 等工具署名行**；`scripts/check_commit_message.py` 在 `commit-msg` 阶段强制（与评测仓同源）。署名属于提交信息正文，不属于源码、文档或发布物。
 
-## 6. 分支、Git 授权与 worktree 闭环
+## 8. 分支、Git 授权与 worktree 闭环
 
 授权边界：
 
 - Git 本地写操作默认授权，无需逐次确认——包括 `add`、`commit`、`merge`、`rebase`、`cherry-pick`、`revert`、`switch`、`checkout`、`restore`、`reset`、`clean`、`stash`、`worktree`、`branch`、`tag`、`config`、`rm`、`mv` 等；本地不可逆操作执行前仍须确认不会丢弃其他会话未提交的改动。
 - 仅**远端操作**需要负责人针对当前操作明确授权：`push`、`fetch`、`pull`、`clone`、`ls-remote`、修改 `remote`、推送标签、`send-email`、`request-pull`、`lfs` 的远端动作，以及创建或更新 PR/release。本地操作的授权不覆盖任何远端操作。
-- **机器化**：授权边界由 [.claude/hooks/guard-git-write.py](../../.claude/hooks/guard-git-write.py) 执行，经 [.claude/settings.json](../../.claude/settings.json) 注册——只读命令与全部本地写操作放行；远端子命令返回 `ask`，逐条确认。复合命令逐段判定，`git status && git push` 不会因前半段放行而整条通过。`Co-Authored-By` 等工具署名由 §5 的 `commit-msg` 门禁拦截；Git 授权钩子只判定远端操作，不做署名拦截。钩子不检查当前分支，worktree 闭环靠本节文本约束与自查执行。
+- **机器化**：授权边界由 [.claude/hooks/guard-git-write.py](../../.claude/hooks/guard-git-write.py) 执行，经 [.claude/settings.json](../../.claude/settings.json) 注册——只读命令与全部本地写操作放行；远端子命令返回 `ask`，逐条确认。复合命令逐段判定，`git status && git push` 不会因前半段放行而整条通过。`Co-Authored-By` 等工具署名由 §7 的 `commit-msg` 门禁拦截；Git 授权钩子只判定远端操作，不做署名拦截。钩子不检查当前分支，worktree 闭环靠本节文本约束与自查执行。
 
 worktree 闭环（硬约束）：
 
@@ -119,12 +142,12 @@ worktree 闭环（硬约束）：
 - worktree 目录只允许单数 `.claude/worktree/<主题>`；**禁止**用 `EnterWorktree` 工具创建 worktree（含其默认路径）：该工具的托管根硬编码为复数 `.claude/worktrees/`，传入任何自选路径都会被判为 permission-root relocation 而弹出手动确认，`permissions.allow` 与 CLAUDE.md 都无法消除。复数目录故意不加入 `.gitignore`：一旦出现 `.claude/worktrees/`，说明有工具路径绕过本闭环，应删除并改用 `git worktree add`。
 - 完成后：验证 → 提交 → 合并回 `dev` → `git worktree remove` + `git branch -d` 清理，不长期停留在特性分支 → 在 [CHANGELOG](../CHANGELOG.md) 记录实际变化；涉及迁移的，同时记录迁移态六要素。
 
-## 7. 依赖引入
+## 9. 依赖引入
 
 新增依赖必须说明：用途与不可替代性、维护状态、体积、替代方案与被否理由、许可证。
 固定版本下限与上限，不用浮动范围。
 
-## 8. 编码约定
+## 10. 编码约定
 
 - 注释与文档中文；标识符、字段名英文。
 - 公共函数与契约模型必须类型标注；`mypy strict`。
@@ -133,7 +156,7 @@ worktree 闭环（硬约束）：
 - 时间一律带时区 UTC。
 - LLM 调用参数（模型、max_tokens）从配置读，不写死在函数里。
 
-## 9. 端到端最小闭环（会话 → PG 真源 → 管理台）
+## 11. 端到端最小闭环（会话 → PG 真源 → 管理台）
 
 前置：`.env` 里 `MEMHUB_KB_DB_URL`（kb-api / MCP）与 `MEMHUB_KB_RT_DB_URL`（ingest / worker）
 分别指向一个可写的 `kb_*` 库（本地开发用 `memhub_dev` 的独立 schema，生产用 `memhub_prod` 的 `kb`）。
@@ -155,7 +178,7 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main kb \
 - 图谱与检索都直读 `kb_*` 表，不再生成或依赖任何文件投影。
 - 页面首屏画布高度依赖视口，脚本化截图前先设置足够大的视口（如 1440×1000），否则画布可能塌成 1px。
 
-### 9.1 一次性迁移（markdown → PostgreSQL）与归档恢复
+### 11.1 一次性迁移（markdown → PostgreSQL）与归档恢复
 
 ```bash
 # 目标库由 --dsn 或 MEMHUB_KB_DB_URL 决定。生产角色在数据库侧已把默认 search_path 设为 kb，
@@ -178,7 +201,7 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main migrate-kb \
 - 迁移前若 `knowledge/_kb_archives/pending.json` 存在，先用 `memhub recover-kb-archive --knowledge-dir ./knowledge`
   续做未完成的归档事务；它没解决就不要开始迁移（迁移会显式阻断）。
 
-### 9.2 一次性导入旧本机队列（raw_store → ClickHouse + PG 队列）
+### 11.2 一次性导入旧本机队列（raw_store → ClickHouse + PG 队列）
 
 ADR-0020 切换后，旧版 `raw_store/` 里「已接收但未提炼」的文件不会自动进入 CH 与 `ingest_queue`。
 `memhub import-raw-store` 负责把它们补进去；它是迁移工具，不是采集入口，也不替代正常的
@@ -224,7 +247,7 @@ docker compose -f /opt/memhub/app/compose.yml exec ingest \
 # 退出码 0 = 已连上 CH（含 MEMHUB_CH_CA 校验）；1 = 不可用；2 = 配置错误
 ```
 
-## 10. MCP 检索服务（stdio 与 HTTP）
+## 12. MCP 检索服务（stdio 与 HTTP）
 
 ```bash
 # 直接跑：每行一条 JSON-RPC 2.0，stdout 只放协议，日志走 stderr
@@ -244,7 +267,7 @@ claude mcp add memhub -- .venv/Scripts/python -m memhub.cli.main mcp
 `http.py` HTTP 入口、`auth.py` 凭据鉴权；检索算法在 `src/memhub/kb/query.py`，受限读取与
 路径校验在 `src/memhub/kb/reader.py`，候选写入在 `src/memhub/kb/candidates.py`。
 
-### 10.1 HTTP 入口（可选，默认关闭）
+### 12.1 HTTP 入口（可选，默认关闭）
 
 ```bash
 python -m pip install -e ".[dev,mcp-http]"     # 官方 MCP Python SDK，只有 HTTP 入口需要

@@ -27,7 +27,7 @@ EXCLUDED_PREFIXES = ("knowledge/", "prompts/")
 
 # 必须使用连续整数 H2 编号的文档。
 NUMBERED_DOCS = (
-    "docs/architecture.md",
+    "docs/tech/architecture.md",
     "docs/tech/ENVIRONMENT.md",
     "docs/guides/DEVELOPMENT.md",
     "docs/contracts/kb-admin-api.md",

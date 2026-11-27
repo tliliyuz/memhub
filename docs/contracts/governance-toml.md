@@ -12,7 +12,9 @@
 |---|---|---|
 | `governance.toml` | 消费仓 | owner 手工维护，只写本仓差异 |
 | `docs/contracts/governance-toml.md` | 平台 | `init` / `sync` 写入，勿手改 |
+| `docs/guides/SDD.md`、`docs/guides/DOCUMENT_GOVERNANCE.md`、`docs/guides/DOCUMENT_FORMAT.md`、`docs/tech/TIME_CONVENTIONS.md` | 平台 | `init` / `sync` 逐字写入，勿手改 |
 | `AGENTS.md`、`CLAUDE.md` 的主题受管块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
+| `docs/guides/DEVELOPMENT.md` 的 `verification`、`resources` 受管章节 | 平台 | `sync` 只替换章节块内，块外归 owner |
 | `.claude/commands/review.md` 的 `review` 块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
 | `.claude/hooks/guard-git-write.py` | 平台 | `init` / `sync` 写入，勿手改 |
 | 其余文档与代码 | 消费仓 | owner 手工维护 |
@@ -31,6 +33,10 @@
 默认值。顶层键必须写在任何 `[段]` 之前（TOML 规则）；误写进 `[checks]` 的顶层键
 会被兼容读取，但不作为新配置的写法。
 
+平台侧的 `policy/manifest.toml` 是分发内容的唯一清单（入口短文本、整份受管文档、
+受管章节、宿主与一次性骨架）。清单不随 `init` 下发，消费仓只维护自己的
+`governance.toml` 差异。
+
 ## 3. 键清单
 
 | 键 | 类型 | 默认 | 含义 |
@@ -46,6 +52,8 @@
 | `env_example` | 字符串 | `.env.example` | 环境键清单文件 |
 | `environment_doc` | 字符串 | `docs/tech/ENVIRONMENT.md` | 环境变量权威文档 |
 | `[checks] <name>` | 布尔 | 启用 | 显式写 `false` 才关闭对应检查 |
+| `[entrypoints] max_lines` | 整数 | `120` | 入口文件总行数上限（`entry_budget`） |
+| `[entrypoints] max_owner_lines` | 整数 | `40` | 「## 本仓专属」行数上限 |
 | `[atomic] max_implementation_layers` | 整数 | `1` | 单次提交允许的实现层数 |
 | `[atomic] closing_layers` | 字符串数组 | `["tests", "docs"]` | 可与实现层同提交的收尾层 |
 | `[[atomic.layer]]` | 表数组 | 技术包默认值 | 文件到实现层的映射（`name` + `patterns`） |
@@ -64,24 +72,32 @@ python <平台路径>/governance.py init --repo <目标仓>
 python <平台路径>/governance.py sync --repo <目标仓>
 ```
 
-- `init`：生成 `governance.toml` 初稿（`[repo] name` 取目标目录名）、写入本契约
-  文档、搭建最小文档集与 `.pre-commit-config.yaml`、注入入口与审查命令的受管块。
-  重复执行不产生改动。
-- `sync`：把契约文档与受管块更新到平台当前版本，不改 `governance.toml`、骨架
-  文档与受管块之外的内容。未初始化时报错，先运行 `init`。
+- `init`：按 `policy/manifest.toml` 生成 `governance.toml` 初稿（`[repo] name` 取
+  目标目录名）、写入本契约文档与四份通用标准文档、搭建骨架文档集（含
+  `docs/tech/OPERATION_TIME.md`）、填充 `DEVELOPMENT` 的受管章节、写入
+  `.pre-commit-config.yaml`，并注入入口与审查命令的受管块。重复执行不产生改动。
+- `sync`：按清单把受管内容更新到平台当前版本，不改 `governance.toml`、骨架文档
+  与受管块之外的正文。未初始化时报错，先运行 `init`。
 - `.pre-commit-config.yaml` 缺失时由 `init` 写入；已存在时不改写。安装 git 钩子
   需执行 `pre-commit install` 与
   `pre-commit install --hook-type commit-msg --hook-type pre-push`。
 
 ## 5. 漂移门禁
 
-- `contract_pack`：本文件、guard 钩子副本与平台版本逐字一致；两个入口文件的主题
-  块存在且与平台模板一致；`.claude/commands/review.md` 存在时，其 `review` 块同样
-  校验（文件缺失不报错）。不一致时提示运行 `governance sync`。
+- `manifest_complete`：清单声明的入口条目、受管文档与受管章节的源文件必须存在且
+  非空；每个宿主的主题集合、每个章节宿主的主题集合与清单完全一致，未登记块与
+  缺失块都报错；骨架必须有对应模板。
+- `contract_pack`：本文件、四份通用标准文档、guard 钩子副本与平台版本逐字一致；
+  两个入口文件的主题块、`DEVELOPMENT` 的受管章节与平台模板一致；
+  `.claude/commands/review.md` 存在时，其 `review` 块同样校验（文件缺失不报错）。
+  不一致时提示运行 `governance sync`。
 - `entrypoints`：`AGENTS.md` 与 `CLAUDE.md` 必须逐字节一致。
-- 主题块由 `<!-- governance:<主题> begin -->` 与 `<!-- governance:<主题> end -->`
-  界定，正文由平台从 L0 对应章节渲染；L0 每个章节各对应一个主题块，入口文件承载
-  全部主题，审查命令另承载 `review` 块。
+- `entry_budget`：入口总行数不超过 `[entrypoints] max_lines`；受管块外的二级标题
+  只允许「## 本仓专属」，且该块不超过 `max_owner_lines`。通用标准放 `docs/`，入口
+  只保留硬约束与索引。
+- 主题块由 `<!-- governance:<主题> begin -->` 与 `end` 界定；入口承载 `intro`、
+  `core`、`hard-constraints`、`doc-matrix` 四个主题，审查命令另承载 `review` 块；
+  受管章节使用 `<!-- governance:section:<主题> begin -->`。
 
 ## 6. 升级流程
 
@@ -92,6 +108,8 @@ python <平台路径>/governance.py sync --repo <目标仓>
 
 ## 7. 手改边界
 
-通用规范只在平台定义，消费仓不复制、不本地改写。本仓确实需要的差异写成配置键
-（如 `[time] allow_paths`、`excluded_prefixes`）或追加规则；需要新的通用规则时，
-先在平台增加检查与规则文本，再由各仓同步，避免各仓各自定义造成不一致。
+通用规范只在平台定义，消费仓不复制、不本地改写。入口短文本住在平台的
+`policy/entry/`，受管章节住在 `policy/sections/`，新增或修改时必须同时更新
+`policy/manifest.toml`，再由各仓 `sync`。本仓确实需要的差异写成配置键（如
+`[time] allow_paths`、`excluded_prefixes`）或块外正文；需要新的通用规则时，先在
+平台登记条目并增加检查，再由各仓同步，避免各仓各自定义造成不一致。
