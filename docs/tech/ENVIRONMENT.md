@@ -26,7 +26,8 @@
 | `MEMHUB_CH_USER` | 否 | 空 | ingest / worker | ClickHouse HTTP 用户（`X-ClickHouse-User`）；随 `MEMHUB_CH_URL` 一起生效，留空按 ClickHouse 默认用户 |
 | `MEMHUB_CH_PASSWORD` | 否 | 空 | ingest / worker | ClickHouse HTTP 口令（`X-ClickHouse-Key`）；日志与错误信息不回显 |
 | `MEMHUB_CH_CA` | 否 | 空 | ingest / worker | 私有 CA / 自签证书的 PEM 路径；使用系统信任库时留空 |
-| `MEMHUB_KB_DB_URL` | 所有运行入口必需（kb-api / MCP / worker / ingest / CLI） | 空 | 运行入口（`memhub.kb.session`） | 指向只对 `kb_*` 做 DML 的受限角色，库为 `memhub_prod`、`search_path` 固定 `kb`；DSN 必须自带口令（kb 容器只注入 `/etc/memhub/env.kb`，没有 `PGPASSWORD`）；缺失或为空抛 `KbDsnMissing`，**不回退文件/内存**。不得复用 `MEMHUB_DB_URL`（那是运行态角色，能碰运行态表与令牌摘要）。ingest 只用它读 `kb_projects` 校验采集目标 |
+| `MEMHUB_KB_DB_URL` | kb-api / MCP 必需（ADR-0021 拆分后只给它） | 空 | kb-api 与 MCP（`memhub.kb.session.create_runtime_store`） | 指向只对 `kb_*` 做 DML 的受限角色 `memhub_kb_app`，库为 `memhub_prod`、`search_path` 固定 `kb`；DSN 必须自带口令（kb 容器只注入 `/etc/memhub/env.kb`，没有 `PGPASSWORD`）；缺失或为空抛 `KbDsnMissing`，**不回退文件/内存**。不得复用 `MEMHUB_DB_URL`（那是运行态角色，能碰运行态表与令牌摘要），也不得与 `MEMHUB_KB_RT_DB_URL` 混用（ADR-0021） |
+| `MEMHUB_KB_RT_DB_URL` | ingest / worker / 运行时 CLI 必需（ADR-0021） | 空 | ingest、worker 与运行时 CLI 子命令（`memhub.kb.session.create_rt_store`） | 运行态知识角色 `memhub_rt_app` 的连接串，权限与 `memhub_kb_app` 对齐（schema `kb` 的 `USAGE` + `kb_*` 的 DML，无 `public`、无运行态 `ingest_queue`）；`search_path` 固定 `kb`。缺失或为空抛 `KbDsnMissing`，**不回退 `MEMHUB_KB_DB_URL`**。池预算 ingest `2+2`、worker/CLI `1+1`；角色 `CONNECTION LIMIT` 按 `Σ(容器数 × (pool + overflow)) + 2` 核算（ADR-0021 给出取值与公式）。带外管理工具（`migrate-kb`）不是常驻进程，仍用 `--dsn` / `MEMHUB_KB_DB_URL` |
 | `MEMHUB_KB_MIGRATE_DB_URL` | 迁移时必需 | 空 | Alembic（`alembic/env.py`） | 迁移角色，对 `kb_*` 有 DDL；`memhub migrate-kb` / 部署步骤带外执行，不在 kb 容器启动时跑。缺失抛 `KbDsnMissing`。运行态不读它。DSN 可写 `postgresql://`，入口按 psycopg 3 归一化为 `postgresql+psycopg://`（镜像里没有 psycopg2） |
 | `MEMHUB_TEST_DB_URL` | 测试必需 | 空 | 契约与单元测试（`tests/conftest.py`） | 指向 `memhub_dev`（`memhub_dev_app`，无 CREATEDB，连接限额 8），每个用例建独立 schema。解析顺序：进程环境变量优先；未设置或为空时依次读仓库根 `.env` 与（worktree 场景）主 checkout 的 `.env`，只读这一个键，空值视同未设置。仍未获得时 PG 用例 skip，**skip 不计为通过** |
 | `MEMHUB_HTTP_HOST` | 否 | `127.0.0.1` | ingest | — |
@@ -69,5 +70,5 @@
 | 模型不可用 | worker 重试 3 次后该文档进 `pending_review`；ingest 不受影响 |
 | 队列或正文存储缺失 | `MEMHUB_ENV=prod` 下 ingest 启动失败（先报 `MEMHUB_DB_URL`，再报 `MEMHUB_CH_URL`）；worker 缺 `MEMHUB_DB_URL` 或同时缺 `MEMHUB_CH_URL` / `MEMHUB_DATA_DIR` 时退出 2 |
 | 上传未启用 | `MEMHUB_INGEST_URL` 或 `MEMHUB_INTERNAL_TOKEN` 任一为空时 `/api/v1/kb/uploads*` 返回 `503/2001`，其余管理台接口正常 |
-| `MEMHUB_KB_DB_URL` 缺失 | 所有运行入口（kb-api / MCP / worker / ingest / CLI）启动失败（`KbDsnMissing`），不退回文件真源；ingest 不再读 `MEMHUB_KNOWLEDGE_DIR` 判目标 |
+| `MEMHUB_KB_DB_URL` / `MEMHUB_KB_RT_DB_URL` 缺失 | 对应进程启动失败（`KbDsnMissing`），不退回文件真源、也不互相回退：kb-api / MCP 缺前者、ingest / worker / CLI 缺后者都直接失败；ingest 不再读 `MEMHUB_KNOWLEDGE_DIR` 判目标（ADR-0021） |
 | 磁盘水位超阈值 | disk-guard 告警 + 心跳附带；不自动删除任何数据 |

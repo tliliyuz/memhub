@@ -133,7 +133,7 @@ Authorization: Bearer <device_token>
 | `cursor_before` / `cursor_after` | **仅诊断**，服务端不校验，也不据此产生 1004。游标以每条文件的 `from_offset` 为准。 |
 | `project` | 必须是用户选定的显式知识库 ID（`^[a-z0-9][a-z0-9._-]{0,63}$`，不允许 `auto`，不修剪空白）。目标必须已在管理台登记且当前活动——判据是 `kb_projects` 存在该行且 `archived_at` 为空，不再看 `MEMHUB_KNOWLEDGE_DIR` 下的目录或 `.kbs.json`。不推断目标，不用 `source_id` 兜底，不自动建库。 |
 
-缺失、空值、非字符串、格式错误、未登记、不活动的目标统一返回 HTTP `400`、`code:1003`，用 `data.reason` 区分 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`，不回显目标或披露是否存在；拒绝发生在配额、正文写入和游标更新之前，重放也要先通过目标校验。采集端只读 `kb_projects`，不写知识真源；未配置 `MEMHUB_KB_DB_URL` 时服务拒绝启动。服务暂不能确认登记状态（例如存在未完成的归档事务）时返回通用 `500/2001`，可重试。目标被拒仅影响该源：保留待发增量，不推进被拒游标，修正目标前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
+缺失、空值、非字符串、格式错误、未登记、不活动的目标统一返回 HTTP `400`、`code:1003`，用 `data.reason` 区分 `missing` / `reserved` / `invalid` / `unregistered` / `inactive` / `target_conflict`，不回显目标或披露是否存在；拒绝发生在配额、正文写入和游标更新之前，重放也要先通过目标校验。采集端只读 `kb_projects`，不写知识真源；未配置 `MEMHUB_KB_RT_DB_URL`（ADR-0021 起的运行态知识角色）时服务拒绝启动。服务暂不能确认登记状态（例如存在未完成的归档事务）时返回通用 `500/2001`，可重试。目标被拒仅影响该源：保留待发增量，不推进被拒游标，修正目标前不重复推送，不停掉正常的兄弟源。已有同源同哈希内容不能用另一个目标重新提交；同一批次 ID 也不能用于重定向。
 
 服务端游标校验只看两处：`source_rev`（是否允许重扫）与每条文件的 `from_offset`（相对已知 offset 是否回退）。
 

@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 2026-11-27（kb 运行态角色拆分与连接预算，ADR-0021）
+
+- **ADR 检查**：命中触发清单第 7 项（访问控制/密钥边界）与第 6 项（部署环境假设）——
+  运行态角色与 DSN 键拆分改变访问控制边界；结论：创建
+  [ADR-0021](decisions/ADR-0021-kb-runtime-role-split.md)，负责人当次裁决 accepted，
+  采用「ingest/worker/CLI 独立角色 `memhub_rt_app`」。关联文档：`docs/tech/ENVIRONMENT.md`、
+  `deploy/README.md`、`deploy/compose.yml`、`.env.example`、`docs/decisions/README.md`。
+- `feat(kb)`：新增 `MEMHUB_KB_RT_DB_URL` 与 `memhub.kb.session.create_rt_store`——ingest、
+  worker 与 CLI 走独立运行态角色，kb-api / MCP 保持 `MEMHUB_KB_DB_URL`；两把键互不回退，
+  缺失时 `KbDsnMissing` 启动失败。池预算按进程：ingest `2+2`、worker/CLI `1+1`。
+- `fix(deploy/docs)`：部署文档补角色建库与授权 SQL、连接上限公式（`Σ(容器数 × (pool+overflow)) + 2`，
+  `memhub_rt_app` 8 / `memhub_kb_app` 6）、env 拆分与回滚步骤；新增
+  `scripts/kb_concurrency_smoke.py` 并发验收脚本（graph + stats + nodes）。
+- `chore(env)`：`.env.example` 增加 `MEMHUB_KB_RT_DB_URL`，本机 `.env` 同次补空键。
+- 验证（本机，worktree `.claude/worktree/rt-role-split`；PG 用例依赖远端测试库，本机 IP 被
+  `pg_hba.conf` 拒绝）：RED 先观察到 `ImportError: RT_DSN_KEY`；GREEN 后 `ruff check`/`format`
+  通过，`mypy src` 无问题（56 文件）；`pytest tests/unit/test_kb_session.py test_cli_ingest.py
+  test_cli_memory.py test_kb_api_boot.py test_cli_migrate_kb.py -q` 33 passed / 12 errors；
+  `pytest tests/unit -q` 379 passed / 1 skipped / 27 errors，错误全部为既有 `no pg_hba.conf entry`；
+  `docker compose -f deploy/compose.yml config --quiet` 通过；`scripts/kb_concurrency_smoke.py --help`
+  可执行。并发冒烟未对生产执行，待角色与 env 上线后按部署文档运行。
+
 ## 2026-11-27（旧本机队列一次性导入、CH CA 挂载与容器内自检）
 
 - `docs`：明确 [`memhub import-raw-store`](guides/DEVELOPMENT.md) 的一次性导入口径（只读 `raw_store/`、

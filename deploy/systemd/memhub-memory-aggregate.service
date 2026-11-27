@@ -8,7 +8,7 @@ Requires=docker.service
 Type=oneshot
 # 与 purge 一致：一次性容器、只读根文件系统、host 网络（PostgreSQL 只听回环）。
 # 聚合只读写 kb_* 表并调用模型，不写 /var/lib/memhub，因此不挂数据卷。
-# /etc/memhub/env 必须提供 MEMHUB_KB_DB_URL、MEMHUB_LLM_BASE_URL / API_KEY 与
+# /etc/memhub/env 必须提供 MEMHUB_KB_RT_DB_URL（ADR-0021 运行态角色）、MEMHUB_LLM_BASE_URL / API_KEY 与
 # MEMHUB_LLM_MODEL_MEMORY（或回退的 MEMHUB_LLM_MODEL_EXTRACT）。
 ExecStart=/usr/bin/docker run --rm --name memhub-memory-aggregate \
   --user 999:987 \

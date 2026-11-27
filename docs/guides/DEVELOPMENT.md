@@ -20,7 +20,7 @@
 python -m venv .venv
 . .venv/Scripts/activate        # PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev,engine]"   # engine = 上传依赖 python-multipart（含投影下线后暂留的 semantica，依赖清理另案）；dev 已含 sqlalchemy/psycopg/alembic；验证 MCP HTTP 再追加 ,mcp-http
-cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（运行入口必填）、MEMHUB_DB_URL（队列）、MEMHUB_CH_*（正文）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
+cp .env.example .env   # 再填 MEMHUB_KB_DB_URL（kb-api / MCP）、MEMHUB_KB_RT_DB_URL（ingest / worker，ADR-0021）、MEMHUB_DB_URL（队列）、MEMHUB_CH_*（正文）、MEMHUB_TEST_DB_URL（测试用，指向 memhub_dev）
 ```
 
 ## 2. 目录分层与归属门禁
@@ -135,9 +135,10 @@ worktree 闭环（硬约束）：
 
 ## 9. 端到端最小闭环（会话 → PG 真源 → 管理台）
 
-前置：`.env` 里 `MEMHUB_KB_DB_URL` 指向一个可写的 `kb_*` 库（本地开发用 `memhub_dev` 的独立 schema，
-生产用 `memhub_prod` 的 `kb`）。缺该键时每个运行入口都抛 `KbDsnMissing` 直接失败——知识没有文件/内存退路
-（[ADR-0013](../decisions/ADR-0013-postgres-source-of-truth.md)）。
+前置：`.env` 里 `MEMHUB_KB_DB_URL`（kb-api / MCP）与 `MEMHUB_KB_RT_DB_URL`（ingest / worker）
+分别指向一个可写的 `kb_*` 库（本地开发用 `memhub_dev` 的独立 schema，生产用 `memhub_prod` 的 `kb`）。
+缺对应键时进程抛 `KbDsnMissing` 直接失败——知识没有文件/内存退路，两把键也不互相回退
+（[ADR-0013](../decisions/ADR-0013-postgres-source-of-truth.md)、[ADR-0021](../decisions/ADR-0021-kb-runtime-role-split.md)）。
 
 ```bash
 # 0) 建表：Alembic 用迁移角色带外执行（不在任何服务启动时跑）
@@ -210,7 +211,7 @@ PYTHONPATH=src .venv/Scripts/python -m memhub.cli.main import-raw-store \
 - **顺序**：每条先 `content.put` 再 `queue.enqueue`，与在线路径一致；worker 不会领到取不到正文的任务。
   导入不推进 `file_cursors`、不写 `batches`，也不修改 `raw_store/` 本身。
 - **退出码**：`0` 全部导入或核验通过；`1` 有失败记录（汇总打印失败数，不打印正文与凭据）；
-  `2` 配置错误（缺 `--data-dir`、缺 `MEMHUB_DB_URL`/`MEMHUB_KB_DB_URL`、既无 `MEMHUB_CH_URL`
+  `2` 配置错误（缺 `--data-dir`、缺 `MEMHUB_DB_URL`、既无 `MEMHUB_CH_URL`
   也无本地正文目录）。
 - **并发**：脚本不获取跨进程锁。必须在旧 ingest / worker 停止后运行；新 worker 在导入核验通过后才启用，
   否则会与导入抢同一批任务。
