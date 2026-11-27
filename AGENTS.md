@@ -71,3 +71,9 @@ ADR 检查与裁决
 | 知识真源 | PostgreSQL 的 `kb_*` 表（ADR-0013；markdown 仅作一次性迁移源） |
 
 当文档冲突或实现领先于规范时，不自行选择方便实现的一方：先输出文档裁决候选并取得负责人有效裁决。
+
+<!-- governance:contract begin -->
+> 治理契约：本仓的通用治理规范由 governance-platform 统一维护，配置键集、初始化与
+> 升级流程见 [治理配置契约](docs/contracts/governance-toml.md)。本段由 `governance sync` 生成，
+> 请勿手改；通用规范不要在本仓自行定义，需要变更时先在平台更新后同步。
+<!-- governance:contract end -->

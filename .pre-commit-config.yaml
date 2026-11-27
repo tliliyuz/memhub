@@ -10,6 +10,9 @@ repos:
     rev: v4.6.0
     hooks:
       - id: end-of-file-fixer
+        # 平台契约文档按字节与 governance-platform 比对，平台源没有结尾换行；
+        # 自动补换行会被 contract_pack 判成漂移。
+        exclude: ^docs/contracts/governance-toml\.md$
       - id: trailing-whitespace
       - id: check-merge-conflict
       - id: check-yaml
