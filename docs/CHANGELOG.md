@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## 2026-11-28（kb 读接口接入本机 Redis 热读缓存）
+
+- **ADR 检查**：命中清单 #5（新增第三方运行时依赖 `redis`）与 #6（新增本机缓存层与部署假设：同机 Redis 由部署侧预装、kb-api 走 host 网络访问），按治理规则新增 [ADR-0023](decisions/ADR-0023-kb-read-cache.md)（accepted；设计与构建口径由云侧 2026-11-28 确认）。不改变对外契约、真源与访问控制。
+- `feat(kb)`：新增 `memhub.kb.read_cache`——`NullReadCache`（未配置/不可用时关闭缓存，直接计算）与 `RedisReadCache`（按 `kb_*` 数据版本 epoch 拼 key、TTL 60s、值为带 `SCHEMA_VERSION` 的 JSON）；connect/get/set 失败只 `WARNING` 一次并降级到 PG，口令只读环境变量，不落日志与 key。
+- `feat(kb)`：`PgKnowledgeStore.cache_epoch()` 用两条廉价聚合拼版本串——`(active 节点 count, max(updated_at))` + `(边 count, max(created_at))`；任意节点/边增删改（含恢复时刷新 `updated_at`）都会让旧 key 失联，一致性不依赖 TTL。
+- `feat(kb-api)`：`nodes` / `stats` / `audit` 三个读接口经 `KnowledgeApi.cache` 读取；`create_app` 按 `MEMHUB_REDIS_URL` 构造缓存并在关闭时释放，测试可注入替身。`search` / `graph` 不缓存。
+- `build`：`pyproject.toml` 增加 `cache = ["redis>=5.0,<6"]`（dev 额外项同步）；`deploy/Dockerfile.kb` 安装 `memhub[postgres,engine,mcp-http,cache]`；`deploy/lock-kb.txt` 固定 `redis==5.3.1`（纯 Python 客户端，无 hiredis，Python 3.12 下无额外传递依赖）。离线构建时 wheelhouse 需含该 wheel。
+- `docs`：`ENVIRONMENT.md` 增加 `MEMHUB_REDIS_URL` / `MEMHUB_REDIS_PASSWORD` 与失败语义行；`architecture.md` 补 kb-api 热读缓存与同机 Redis 的部署说明；`.env.example` 增加同名空键。
+- 验证（worktree `.claude/worktree/kb-read-cache`）：
+  - RED：回退实现后 `pytest tests/unit/test_read_cache.py -q` 因 `ModuleNotFoundError: No module named 'memhub.kb.read_cache'` 收集中断；恢复后 15 passed（含 `stats` 路由命中缓存与 epoch 变化重算的接线用例）。
+  - `pytest tests/unit tests/contract -q`：571 passed / 1 skipped / 203 errors；错误全部来自既有 `no pg_hba.conf entry` 的 PG fixture setup（含新增 `test_cache_epoch_tracks_node_and_edge_changes` 的 setup），无断言失败。
+  - `ruff check src tests`、`ruff format --check`、`mypy src`（57 files）通过；`scripts/check_env_example_keys.py` 通过（39 键双向一致）。
+
+## 2026-11-28（MCP 现代协议的连接事件并入漏斗）
+
+- **ADR 检查**：命中「对外契约（`kb_mcp_trace` 事件枚举与漏斗口径）」「可观测性语义」与「数据真源不变但新增事件取值」，按 ADR 治理规则新增 [ADR-0022](decisions/ADR-0022-mcp-modern-connection-event.md)（accepted）。
+- `docs(mcp)`：生产观测证明 Claude Code 2.1.332 走 2026-07-28 现代协议，首请求为 `server/discover`、不发 `initialize`，漏斗「连接数」结构性恒为 0（24 次 `tools/list`、1 次 `tools/call`、0 次 `initialize`）。ADR-0022 裁决：`server/discover` 记 `event=discover`，`connections = initialize 成功 + discover 成功`，不按请求去重；`notifications/*` 与 `ping` 仍不记录，无迁移。同步更新 `docs/plans/mcp-trace-spec.md`（§1.1、§2.1、§3.1、§3.2、§6.1、§6.2、§7、§9 验收条件 9、§10 裁决）、`docs/contracts/kb-admin-api.md` §4.9 与 `docs/contracts/mcp-tools.md` §5。
+- `test(mcp)`：`tests/contract/test_mcp_trace.py` 新增现代协议用例（`Mcp-Protocol-Version: 2026-07-28` + `Mcp-Method: server/discover`，断言返回 `supportedVersions` 与 instructions、只落一行 `discover ok` 且 `tool`/`tool_count` 为空、同请求无 `initialize` 行），列表筛选与漏斗汇总补 `discover` 行。
+- `feat(mcp)`：`McpEndpoint` 的发现层中间件由 `initialize`/`tools/list` 三元判断改为 `_DISCOVERY_EVENTS` 映射，新增 `server/discover → discover`。
+- `feat(kb)`：`trace_query.mcp_traces_summary` 的 `connections` 改为 `initialize` 成功数 + `discover` 成功数；`GET /api/v1/kb/mcp-traces` 的 `event` 筛选放开 `discover`。
+- `feat(web)`：`TraceEvent` 增加 `discover`，调用轨迹页漏斗提示改为「initialize 或 server/discover 成功」。
+- 验证（worktree `.claude/worktree/mcp-modern-connection`，本机 Docker 测试库 `memhub-test-pg`）：
+  - RED：回退三处实现后，契约用例分别报 `assert [] == ['discover']`、`KeyError: 'items'`、`{'connections': 2} != {'connections': 3}`；恢复后 `pytest tests/contract/test_mcp_trace.py -q` 16 passed。
+  - 进程内探针（真实 ASGI 入口 + 假存储）：修复前 `count 0`，修复后 3 行 `initialize` / `list_tools`（`tool_count=4`）/ `discover`（`rpc_id=server-discover-probe-1`），退出码 0。
+  - 合入最新 `dev`（`87153c9`，含读接口批量读）后重跑：`pytest tests/contract/test_mcp_trace.py -q` 16 passed；`pytest tests/unit tests/contract -q` 755 passed / 1 skipped / 2 failed / 1 error，失败与错误仍是下列既有项。
+  - `pytest tests/unit tests/contract -q`：3 项失败与本次改动无关且未能在本机闭环——`test_worker_rejects_invalid_memory_settings`（需 `MEMHUB_DB_URL`，补上后通过）、`test_round_writes_canonical_into_pg`（fixture 预建 `knowledge/` 目录，结构性失败）、`test_merge_and_cursor.py::test_cursor_summary_matches_file_details`（需完整迁移后的 `MEMHUB_KB_RT_DB_URL` 库，报 `relation "devices" does not exist`）。
+  - `ruff check`、`ruff format --check`（本次 4 个 Python 文件）与 `mypy src` 通过；`web` 下 `npm run typecheck`（`tsc -b`）退出码 0；`python -m governance_lib check --staged --fast` 通过。
+
 ## 2026-11-28（读接口批量读，消除 PG 迁移后的 N+1）
 
 - **ADR 检查**：未命中触发清单——只改 kb 读路径的实现方式与存储操作面，不改变对外契约、访问控制、数据真源与部署假设。

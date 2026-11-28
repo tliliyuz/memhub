@@ -1,8 +1,9 @@
 # memhub kb 镜像的依赖锁（离线构建用；与 lock-worker.txt 分开）。
-# 覆盖 memhub[postgres,engine,mcp-http]==0.1.0 的完整闭包：
+# 覆盖 memhub[postgres,engine,mcp-http,cache]==0.1.0 的完整闭包：
 # - postgres：psycopg / SQLAlchemy / alembic（ADR-0013，运行入口强制 PG）
 # - engine：semantica 及其传递依赖（暂留；清理随锁文件重出另案）
 # - mcp-http：官方 MCP Python SDK（/mcp 入口），含 jsonschema / PyJWT[crypto] 等
+# - cache：redis-py（ADR-0023，kb-api 本地热读缓存；纯 Python 客户端）
 # 生成方式：离线 pip install --target 多平台标签仿真，权威锁仍须发版时在镜像内 pip freeze 重出。
 alembic==1.20.1
 annotated-doc==0.0.7
@@ -58,6 +59,7 @@ python-frontmatter==1.3.0
 python-multipart==0.0.34
 PyYAML==6.0.3
 rdflib==7.6.0
+redis==5.3.1
 referencing==0.37.0
 requests==2.34.2
 rich==15.0.0

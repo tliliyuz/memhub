@@ -79,6 +79,7 @@
 - 写入：只给治理 agent 用（见 mcp-tools.md）；写操作落 `kb_*` 表并在同一事务追加修订历史。
 - 上传：`/api/v1/kb/uploads` 校验文件后调用 ingest 的内部接口 `/internal/enqueue`，由 worker 按 docs profile 提炼，不经过采集协议；kb-api 不持有队列、ClickHouse 或本机 raw 目录（见 [kb-admin-api.md](../contracts/kb-admin-api.md) §4.7）。
 - 长期记忆：`/api/v1/kb/memories*` 提供条目、候选与快照的查询和治理动作，管理台「长期记忆」页只展示元数据与结论；会话抽取的注入不经过该入口。
+- 热读缓存：`nodes` / `stats` / `audit` 可走同机 Redis（ADR-0023）；`MEMHUB_REDIS_URL` 缺失或不可用时直接读 PG，缓存值只由 `kb_*` 数据版本 epoch 决定失效，真源仍是 PG。
 - 备份与回滚：`pg_dump` 为唯一完整备份；单节点回滚走 `kb_node_revisions` 的完整快照，不再用 git。
 
 ### mcp-server（首版随 kb-api 进程）
@@ -100,6 +101,7 @@
 - Docker Compose：`ingest-api` / `worker` / `kb-api` / `nginx`（nginx 也可用宿主机的）；`/mcp` 由
   kb-api 进程提供，不单列服务。
 - systemd timer：`disk-guard.timer`、`memory-aggregate.timer`（每周聚合并发布长期记忆快照）；知识库备份由部署侧定时 `pg_dump` 承担。
+- 同机 Redis 7（只监听 loopback、纯缓存、不持久化）由部署侧预装，不在 compose 里；kb-api 走 host 网络按 `MEMHUB_REDIS_URL` 访问，缺失即关闭缓存。
 - 知识真源在 PostgreSQL（`memhub_prod` 的 `kb` schema），随实例备份；`knowledge/` 只作为一次性迁移源，迁移校验通过后从服务器删除。
 - 配置与密钥：`.env`（600）+ systemd `EnvironmentFile`；不写进镜像。
 
