@@ -11,6 +11,7 @@
 - 验证（worktree `.claude/worktree/mcp-modern-connection`，本机 Docker 测试库 `memhub-test-pg`）：
   - RED：回退三处实现后，契约用例分别报 `assert [] == ['discover']`、`KeyError: 'items'`、`{'connections': 2} != {'connections': 3}`；恢复后 `pytest tests/contract/test_mcp_trace.py -q` 16 passed。
   - 进程内探针（真实 ASGI 入口 + 假存储）：修复前 `count 0`，修复后 3 行 `initialize` / `list_tools`（`tool_count=4`）/ `discover`（`rpc_id=server-discover-probe-1`），退出码 0。
+  - 合入最新 `dev`（`87153c9`，含读接口批量读）后重跑：`pytest tests/contract/test_mcp_trace.py -q` 16 passed；`pytest tests/unit tests/contract -q` 755 passed / 1 skipped / 2 failed / 1 error，失败与错误仍是下列既有项。
   - `pytest tests/unit tests/contract -q`：3 项失败与本次改动无关且未能在本机闭环——`test_worker_rejects_invalid_memory_settings`（需 `MEMHUB_DB_URL`，补上后通过）、`test_round_writes_canonical_into_pg`（fixture 预建 `knowledge/` 目录，结构性失败）、`test_merge_and_cursor.py::test_cursor_summary_matches_file_details`（需完整迁移后的 `MEMHUB_KB_RT_DB_URL` 库，报 `relation "devices" does not exist`）。
   - `ruff check`、`ruff format --check`（本次 4 个 Python 文件）与 `mypy src` 通过；`web` 下 `npm run typecheck`（`tsc -b`）退出码 0；`python -m governance_lib check --staged --fast` 通过。
 
