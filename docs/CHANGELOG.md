@@ -14,6 +14,15 @@
   - `pytest tests/unit tests/contract -q`：3 项失败与本次改动无关且未能在本机闭环——`test_worker_rejects_invalid_memory_settings`（需 `MEMHUB_DB_URL`，补上后通过）、`test_round_writes_canonical_into_pg`（fixture 预建 `knowledge/` 目录，结构性失败）、`test_merge_and_cursor.py::test_cursor_summary_matches_file_details`（需完整迁移后的 `MEMHUB_KB_RT_DB_URL` 库，报 `relation "devices" does not exist`）。
   - `ruff check`、`ruff format --check`（本次 4 个 Python 文件）与 `mypy src` 通过；`web` 下 `npm run typecheck`（`tsc -b`）退出码 0；`python -m governance_lib check --staged --fast` 通过。
 
+## 2026-11-27（提炼窗口延长至 21:00-05:00）
+
+- `fix(deploy)`：按负责人 2026-11-27 裁决，把 worker 提炼窗口由 21:00-02:00 延长到
+  21:00-05:00，同步 `deploy/compose.yml`、`deploy/Dockerfile.worker`、`deploy/README.md`
+  与聚合 timer 注释；02:00-05:00 与 eval L2 的重叠为接受项。线上已按该窗口运行，仓库此前
+  仍写 02:00，本次同步消除文档与线上的漂移。
+- 验证：临时补空 `deploy/etc/memhub/env` 与 `env.kb` 后 `docker compose config --quiet` 通过
+  （两份空文件随后删除，未入库）；纯部署配置与注释改动，无法制造业务 RED，未连生产、未改线上文件。
+
 ## 2026-11-27（迁移到治理平台入口清单结构）
 
 - **ADR 检查**：执行平台 ADR-0005（入口只留通用主题块与「本仓专属」）、ADR-0006（入口预算与通用标准文档）、ADR-0007（清单分发）与 ADR-0008（架构文档归入 `docs/tech/`）；本仓无新增决策，不另立 ADR。
