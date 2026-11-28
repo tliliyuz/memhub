@@ -38,6 +38,7 @@ from memhub.contract import Edge, EntityKind, ErrorCode, Kind, Predicate, Questi
 from memhub.kb import catalog, manage, query, trace_query
 from memhub.kb.errors import RevisionConflict
 from memhub.kb.pgstore import PgKnowledgeStore
+from memhub.kb.read_cache import NullReadCache, ReadCache, build_read_cache
 from memhub.kb.session import KB_SCHEMA, create_runtime_store
 from memhub.kb.target_access import TargetUnavailable, registered_active
 from memhub.kb.uploads import (
@@ -213,10 +214,11 @@ class MemorySnapshotDisable(BaseModel):
 
 
 class KnowledgeApi:
-    """API 运行时状态：真源存储。"""
+    """API 运行时状态：真源存储与读缓存（ADR-0023；未注入时缓存关闭）。"""
 
-    def __init__(self, store: PgKnowledgeStore) -> None:
+    def __init__(self, store: PgKnowledgeStore, cache: ReadCache | None = None) -> None:
         self.store = store
+        self.cache: ReadCache = cache if cache is not None else NullReadCache()
 
 
 def _error_response(exc: manage.ManageError) -> JSONResponse:
@@ -230,12 +232,14 @@ def create_app(
     *,
     store: PgKnowledgeStore | None = None,
     uploads: KbUploads | None = None,
+    cache: ReadCache | None = None,
     schema: str | None = KB_SCHEMA,
 ) -> FastAPI:
     """组装 kb-api；默认按 `MEMHUB_KB_DB_URL` 强制构造 PG 存储（规格 §9.2.4）。
 
     `store` 与 `schema` 仅供测试注入独立 schema；`uploads` 允许测试注入指向
-    ingest 内部接口的客户端。生产入口不留文件存储退路，`search_path` 固定为 `kb`。
+    ingest 内部接口的客户端；`cache` 允许测试注入替身，缺省按 `MEMHUB_REDIS_URL`
+    构造（缺失即缓存关闭，ADR-0023）。生产入口不留文件存储退路，`search_path` 固定为 `kb`。
     """
     web_dist_raw = os.environ.get("MEMHUB_KB_WEB_DIST", "")
     web_dist = Path(web_dist_raw) if web_dist_raw else None
@@ -243,7 +247,9 @@ def create_app(
     if store is None:
         owned = create_runtime_store(schema=schema)
         store = owned
-    api = KnowledgeApi(store)
+    owned_cache = cache is None
+    read_cache = cache if cache is not None else build_read_cache()
+    api = KnowledgeApi(store, read_cache)
     owned_uploads = False
     if uploads is None:
         ingest_url = os.environ.get("MEMHUB_INGEST_URL", "").strip()
@@ -262,6 +268,8 @@ def create_app(
         finally:
             if owned_uploads and uploads is not None:
                 await uploads.close()
+            if owned_cache:
+                await read_cache.aclose()
             if owned is not None:
                 await owned.aclose()
 
@@ -353,7 +361,12 @@ def create_app(
 
     @app.get("/api/v1/kb/stats")
     async def stats() -> dict[str, Any]:
-        return await manage.stats(api.store)
+        return await api.cache.get_or_compute(
+            "stats",
+            {},
+            compute=lambda: manage.stats(api.store),
+            epoch_fn=api.store.cache_epoch,
+        )
 
     # ---- 长期记忆（ADR-0016，规格 §8）----
 
@@ -512,15 +525,29 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        return await manage.list_nodes(
-            api.store,
-            project=project,
-            kind=kind,
-            tier=tier,
-            q=q,
-            tag=tag,
-            limit=limit,
-            offset=offset,
+        params = {
+            "project": project,
+            "kind": kind,
+            "tier": tier,
+            "q": q,
+            "tag": tag,
+            "limit": limit,
+            "offset": offset,
+        }
+        return await api.cache.get_or_compute(
+            "nodes",
+            params,
+            compute=lambda: manage.list_nodes(
+                api.store,
+                project=project,
+                kind=kind,
+                tier=tier,
+                q=q,
+                tag=tag,
+                limit=limit,
+                offset=offset,
+            ),
+            epoch_fn=api.store.cache_epoch,
         )
 
     @app.post("/api/v1/kb/nodes", status_code=201)
@@ -660,7 +687,12 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        return await query.audit_list(api.store, limit=limit, offset=offset)
+        return await api.cache.get_or_compute(
+            "audit",
+            {"limit": limit, "offset": offset},
+            compute=lambda: query.audit_list(api.store, limit=limit, offset=offset),
+            epoch_fn=api.store.cache_epoch,
+        )
 
     # ---- MCP 调用轨迹（ADR-0015） ----
 

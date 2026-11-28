@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-11-28（kb 读接口接入本机 Redis 热读缓存）
+
+- **ADR 检查**：命中清单 #5（新增第三方运行时依赖 `redis`）与 #6（新增本机缓存层与部署假设：同机 Redis 由部署侧预装、kb-api 走 host 网络访问），按治理规则新增 [ADR-0023](decisions/ADR-0023-kb-read-cache.md)（accepted；设计与构建口径由云侧 2026-11-28 确认）。不改变对外契约、真源与访问控制。
+- `feat(kb)`：新增 `memhub.kb.read_cache`——`NullReadCache`（未配置/不可用时关闭缓存，直接计算）与 `RedisReadCache`（按 `kb_*` 数据版本 epoch 拼 key、TTL 60s、值为带 `SCHEMA_VERSION` 的 JSON）；connect/get/set 失败只 `WARNING` 一次并降级到 PG，口令只读环境变量，不落日志与 key。
+- `feat(kb)`：`PgKnowledgeStore.cache_epoch()` 用两条廉价聚合拼版本串——`(active 节点 count, max(updated_at))` + `(边 count, max(created_at))`；任意节点/边增删改（含恢复时刷新 `updated_at`）都会让旧 key 失联，一致性不依赖 TTL。
+- `feat(kb-api)`：`nodes` / `stats` / `audit` 三个读接口经 `KnowledgeApi.cache` 读取；`create_app` 按 `MEMHUB_REDIS_URL` 构造缓存并在关闭时释放，测试可注入替身。`search` / `graph` 不缓存。
+- `build`：`pyproject.toml` 增加 `cache = ["redis>=5.0,<6"]`（dev 额外项同步）；`deploy/Dockerfile.kb` 安装 `memhub[postgres,engine,mcp-http,cache]`；`deploy/lock-kb.txt` 固定 `redis==5.3.1`（纯 Python 客户端，无 hiredis，Python 3.12 下无额外传递依赖）。离线构建时 wheelhouse 需含该 wheel。
+- `docs`：`ENVIRONMENT.md` 增加 `MEMHUB_REDIS_URL` / `MEMHUB_REDIS_PASSWORD` 与失败语义行；`architecture.md` 补 kb-api 热读缓存与同机 Redis 的部署说明；`.env.example` 增加同名空键。
+- 验证（worktree `.claude/worktree/kb-read-cache`）：
+  - RED：回退实现后 `pytest tests/unit/test_read_cache.py -q` 因 `ModuleNotFoundError: No module named 'memhub.kb.read_cache'` 收集中断；恢复后 15 passed（含 `stats` 路由命中缓存与 epoch 变化重算的接线用例）。
+  - `pytest tests/unit tests/contract -q`：571 passed / 1 skipped / 203 errors；错误全部来自既有 `no pg_hba.conf entry` 的 PG fixture setup（含新增 `test_cache_epoch_tracks_node_and_edge_changes` 的 setup），无断言失败。
+  - `ruff check src tests`、`ruff format --check`、`mypy src`（57 files）通过；`scripts/check_env_example_keys.py` 通过（39 键双向一致）。
+
 ## 2026-11-28（MCP 现代协议的连接事件并入漏斗）
 
 - **ADR 检查**：命中「对外契约（`kb_mcp_trace` 事件枚举与漏斗口径）」「可观测性语义」与「数据真源不变但新增事件取值」，按 ADR 治理规则新增 [ADR-0022](decisions/ADR-0022-mcp-modern-connection-event.md)（accepted）。
