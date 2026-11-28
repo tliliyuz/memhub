@@ -179,18 +179,18 @@ device token、游标与批次幂等。kb-api 只持有 `MEMHUB_INGEST_URL` 与
 
 ### 4.9 MCP 调用轨迹
 
-只读查询 `kb_mcp_trace`（ADR-0015 / ADR-0018）；服务端在 `/mcp` 入口记录每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`。
+只读查询 `kb_mcp_trace`（ADR-0015 / ADR-0018 / ADR-0022）；服务端在 `/mcp` 入口记录每次 `tools/call`、鉴权/路由拒绝，以及发现层的 `initialize`、`server/discover` 与 `tools/list`。
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
 | GET | `/api/v1/kb/mcp-traces?limit=&offset=&event=&tool=&status=&credential=&since=&until=` | `{items, total, offset, limit}`，`called_at` 倒序 |
 | GET | `/api/v1/kb/mcp-traces/summary?days=` | `{since, days, total, ok, error, rejected, tools:[{tool, count, ok, error, rejected, avg_ms}], credentials:[{id, name, count}], funnel:{connections, listings, calls, listings_per_connection, calls_per_listing, avg_tools}}` |
 
-- `limit` 1–500（默认 50），`offset` ≥ 0；`event` ∈ `call/list_tools/initialize`，默认 `call`（只看调用与拒绝，保持既有语义）；`status` ∈ `ok/error/rejected`；`credential` 同时匹配 `credential_id` 与 `credential_name`；`days` 1–30（默认 7）。
+- `limit` 1–500（默认 50），`offset` ≥ 0；`event` ∈ `call/list_tools/initialize/discover`，默认 `call`（只看调用与拒绝，保持既有语义）；`status` ∈ `ok/error/rejected`；`credential` 同时匹配 `credential_id` 与 `credential_name`；`days` 1–30（默认 7）。
 - `avg_ms` 为该工具 `ok` 与 `error` 调用耗时的平均值（取整），`rejected` 不参与，无可算调用时为 0。
-- 漏斗口径：`connections` = `initialize` 成功行数，`listings` = `tools/list` 成功行数，`calls` = `call` 的 `ok + error` 行数（拒绝不计入调用）；`listings_per_connection`、`calls_per_listing` 分母为 0 时记 `0.0`；`avg_tools` 为成功列工具行的 `tool_count` 平均值，无行时为 0。
+- 漏斗口径：`connections` = `initialize` 与 `discover` 成功行数之和（旧协议握手连接 + 现代协议发现探测连接），`listings` = `tools/list` 成功行数，`calls` = `call` 的 `ok + error` 行数（拒绝不计入调用）；`listings_per_connection`、`calls_per_listing` 分母为 0 时记 `0.0`；`avg_tools` 为成功列工具行的 `tool_count` 平均值，无行时为 0。
 - 每项字段：`trace_id, request_id, rpc_id, called_at, credential:{id,name}, event, tool, status, http_status, error_code, error_kind, duration_ms, result_bytes, tool_count, projects, client`。
-- `event` 为 `initialize` / `list_tools` 时 `tool` 为 `null`；`tool_count` 仅在 `tools/list` 成功时非空。
+- `event` 为 `initialize` / `discover` / `list_tools` 时 `tool` 为 `null`；`tool_count` 仅在 `tools/list` 成功时非空。
 - 凭据未配置 `name` 时 `credential.name=null`，**展示层**按 `name || id || "unknown"` 降级；契约不固化展示文案。
 - 只记元数据：不含参数原文、正文与 token；参数仅留 `args_digest`。明细保留 30 天，更早数据由写入路径节流清理。
 - 非 PG 存储（仅测试夹具可能出现）返回 503/`2001`。
