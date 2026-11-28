@@ -113,15 +113,18 @@ docker build --network=none -f deploy/Dockerfile.kb     -t memhub/app-kb:0.1.0 .
 wheel 不含提示词，漏了这层 `worker --once` 会 `FileNotFoundError`）。
 
 依赖锁：`lock-ingest.txt`（ingest）与 `lock-worker.txt` / `lock-kb.txt`（worker 与 kb 的
-`memhub[postgres,engine]` / `memhub[postgres,engine,mcp-http]` 完整闭包）。两份锁仅在 `mcp==2.3.0`
-及其传递依赖（`mcp-types` / `httpx2` / `sse-starlette` / `pyjwt[crypto]` / `jsonschema` 等）上不同；
-锁定版本前记得校验镜像内 `pip freeze` 与锁一致，避免与权威锁漂移。
+`memhub[postgres,engine]` / `memhub[postgres,engine,mcp-http,cache]` 完整闭包）。两份锁在
+`mcp==2.3.0` 及其传递依赖（`mcp-types` / `httpx2` / `sse-starlette` / `pyjwt[crypto]` / `jsonschema`
+等）以及 kb 专属的 `redis`（本地热读缓存，ADR-0023）上不同；锁定版本前记得校验镜像内
+`pip freeze` 与锁一致，避免与权威锁漂移。
 
 数据库为宿主机 native PostgreSQL 16（`memhub_prod`），容器走 host 网络访问 `127.0.0.1:5432`；
 运行态密钥只存在于 `/etc/memhub/env`（0600），经 `env_file` 注入。kb-api 例外：它用独立文件
 `/etc/memhub/env.kb`（同样 0600），只放 kb 进程实际读取的键（至少 `MEMHUB_KB_DB_URL`；`/mcp` 入口
 用 `MEMHUB_MCP_GRANTS`，按需再拷 `MEMHUB_LOG_LEVEL` /
-`MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`），避免受限容器拿到运行态全权 DSN 与 `PGPASSWORD`。
+`MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`，本地热读缓存再拷 `MEMHUB_REDIS_URL` /
+`MEMHUB_REDIS_PASSWORD`），避免受限容器拿到运行态全权 DSN 与 `PGPASSWORD`。注意 kb 只读
+`env.kb`：写进 `/etc/memhub/env` 的变量对 kb 容器不可见（缓存会静默关闭，接口仍走 PG）。
 运行态 5 表由 `memhub api`（ingest 容器）启动时调 `ensure_schema` 幂等应用，没有单独的 migrate 命令；
 563fefe 未新增迁移（仍只有 `0001_state`），旧库启动即打印 `schema: already up to date`。
 
@@ -314,7 +317,8 @@ systemctl list-timers memhub-memory-aggregate.timer
      独立文件里没有 `PGPASSWORD`，仍按「DSN 不写口令 + PGPASSWORD」写法会直接认证失败。
      `/mcp` 入口需要时一并拷 `MEMHUB_MCP_GRANTS`，以及
      `MEMHUB_LOG_LEVEL` / `MEMHUB_KB_AUTO_REBUILD` / `MEMHUB_QUEUE_MAX_BYTES` / `MEMHUB_KB_HTTP_PORT`
-     中实际设置过的项。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
+     中实际设置过的项；本地热读缓存再拷 `MEMHUB_REDIS_URL` / `MEMHUB_REDIS_PASSWORD`（缺省即缓存关闭，
+     不阻断启动）。**不要**把 `MEMHUB_DB_URL`、`PGPASSWORD`、LLM 凭据、设备 token 密钥拷进来：
      kb 用受限角色，只该看到知识表的 DML 权限。
 2. **停写**：`docker compose stop kb worker`，等正在跑的 `worker --once` 结束。
    ingest 可以继续跑（只写 PG 队列与 CH 原文，不碰 `knowledge/`）。
