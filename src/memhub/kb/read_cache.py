@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 # 缓存值格式版本；值结构变化时 +1，旧值读到时按未命中处理并重算。
 SCHEMA_VERSION = 1
-DEFAULT_TTL_SECONDS = 60.0
+# 10 分钟：正确性由 epoch 保证，TTL 只是内存背压上限。低频访问下 60s 会让每次刷新
+# 都落到冷路径（ADR-0024）；3–5 个小 key、几百 KB，不需要靠短 TTL 省内存。
+DEFAULT_TTL_SECONDS = 600.0
 _KEY_PREFIX = f"kb:r{SCHEMA_VERSION}"
 
 
