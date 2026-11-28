@@ -62,6 +62,7 @@ from memhub.kb.models import (
     KbProject,
     KbWriteAudit,
 )
+from memhub.kb.query import NodeRecord
 from memhub.kb.store import TrashEntry
 from memhub.mcp.trace import TraceEntry
 
@@ -118,7 +119,8 @@ def _row_from(node: NodeFrontmatter, node_id: str, body: str, revision: str) -> 
     }
 
 
-def _node_from_row(row: KbNode) -> NodeFrontmatter:
+def _node_from_row(row: Any) -> NodeFrontmatter:
+    """从 ORM 实例或 `select(KbNode.<列>...)` 的 Row 组装 frontmatter（字段同名）。"""
     return NodeFrontmatter.model_validate(
         {
             "id": row.id,
@@ -427,6 +429,55 @@ class PgKnowledgeStore:
             if row is None or row.archived_at is not None:
                 raise NodeMissing(f"节点不存在: {node_id}")
             return _node_from_row(row), row.body
+
+    async def read_many(
+        self, node_ids: list[str], *, include_body: bool = True
+    ) -> list[NodeRecord]:
+        """一次 SELECT 读多节点（含当前 revision），消除读接口的 N+1 session 开销。
+
+        `include_body=False` 只取 frontmatter 与 `length(body)`，不搬运整库正文；
+        返回顺序跟随 `node_ids`，不存在或已软删的 id 跳过。
+        """
+        if not node_ids:
+            return []
+        stmt = select(
+            KbNode.id,
+            KbNode.project,
+            KbNode.kind,
+            KbNode.entity_kind,
+            KbNode.title,
+            KbNode.tier,
+            KbNode.confidence,
+            KbNode.tags,
+            KbNode.source,
+            KbNode.valid_from,
+            KbNode.valid_until,
+            KbNode.supersedes,
+            KbNode.superseded_by,
+            KbNode.deprecated_reason,
+            KbNode.occurred_at,
+            KbNode.decided_at,
+            KbNode.status,
+            KbNode.created_at,
+            KbNode.updated_at,
+            KbNode.revision,
+            func.length(KbNode.body).label("body_chars"),
+        ).where(KbNode.id.in_(node_ids), KbNode.archived_at.is_(None))
+        if include_body:
+            stmt = stmt.add_columns(KbNode.body)
+        async with self._session() as session:
+            rows = (await session.execute(stmt)).all()
+        found: dict[str, NodeRecord] = {}
+        for row in rows:
+            node = _node_from_row(row)
+            found[row.id] = NodeRecord(
+                row.id,
+                node,
+                row.body if include_body else "",
+                row.revision,
+                row.body_chars,
+            )
+        return [found[node_id] for node_id in node_ids if node_id in found]
 
     async def write(
         self,

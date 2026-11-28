@@ -14,6 +14,14 @@
   - `pytest tests/unit tests/contract -q`：3 项失败与本次改动无关且未能在本机闭环——`test_worker_rejects_invalid_memory_settings`（需 `MEMHUB_DB_URL`，补上后通过）、`test_round_writes_canonical_into_pg`（fixture 预建 `knowledge/` 目录，结构性失败）、`test_merge_and_cursor.py::test_cursor_summary_matches_file_details`（需完整迁移后的 `MEMHUB_KB_RT_DB_URL` 库，报 `relation "devices" does not exist`）。
   - `ruff check`、`ruff format --check`（本次 4 个 Python 文件）与 `mypy src` 通过；`web` 下 `npm run typecheck`（`tsc -b`）退出码 0；`python -m governance_lib check --staged --fast` 通过。
 
+## 2026-11-28（读接口批量读，消除 PG 迁移后的 N+1）
+
+- **ADR 检查**：未命中触发清单——只改 kb 读路径的实现方式与存储操作面，不改变对外契约、访问控制、数据真源与部署假设。
+- `perf(kb)`：`query.KnowledgeReader` 新增 `read_many(node_ids, *, include_body=True)`，`_records` 由逐条 `read()` 改为一次 `list_ids` + 一次批量读。PG 实现用单条 `SELECT` 同查 `revision` 与 `length(body)`，不再为每个节点新开 session；文件实现沿用逐个读。`NodeRecord` 增加 `revision` / `body_chars`，`_summary` 直接复用批量读带回的 revision，不再逐条查修订号。
+- `perf(kb)`：`graph` / `stats` / `audit_list` 走无正文投影（`include_body=False`），`edge_index` 可复用已读到的 id，省掉重复 `list_ids`；`list_nodes` 仅带关键词过滤时读正文。
+- 根因：PG 迁移后 `_records` 对每个 node_id 单独 `read()`，PG 每次新开 session；节点数随提炼积压从 ~437 涨到 4441 后，`nodes` / `audit` / `stats` / `search` 等接口退化到十余秒（`limit` 无关）。
+- 验证（worktree `.claude/worktree/kb-read-batch`）：RED 先观察到 4441 次逐条读与 `records(include_body=)` 参数缺失（4 个用例失败）；GREEN 后 `pytest tests/unit tests/contract -q` 556 passed / 1 skipped / 201 errors（错误全部为既有 `no pg_hba.conf entry`）；`ruff check` / `format --check` 与 `mypy src` 通过。线上接口耗时待发版后实测复核。
+
 ## 2026-11-27（提炼窗口延长至 21:00-05:00）
 
 - `fix(deploy)`：按负责人 2026-11-27 裁决，把 worker 提炼窗口由 21:00-02:00 延长到
