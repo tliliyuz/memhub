@@ -539,12 +539,12 @@ async def graph(store: KnowledgeStore | PgKnowledgeStore, project: str) -> dict[
     if isinstance(store, PgKnowledgeStore):
         if not await store.project_exists(project):
             raise NotFoundError(f"知识库不存在: {project}")
-        records = await query.records(store, project)
+        records = await query.records(store, project, include_body=False)
         edge_records = await store.edges(project)
     else:
         if project not in await _dirs(store):
             raise NotFoundError(f"知识库不存在: {project}")
-        records = await query.records(store, project)
+        records = await query.records(store, project, include_body=False)
         edge_records = await _edges(store, project)
     ids = {record.id for record in records}
     slug_index: dict[str, list[str]] = {}

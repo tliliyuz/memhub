@@ -21,6 +21,7 @@ from memhub.contract.models import KB_ID_RE
 from memhub.kb.archive import checked_path, path_kind
 from memhub.kb.errors import TargetUnavailable
 from memhub.kb.manage import ConflictError
+from memhub.kb.query import NodeRecord
 from memhub.kb.store import KnowledgeStore
 
 NODE_ID_RE = re.compile(NODE_ID_PATTERN)
@@ -86,6 +87,18 @@ class ActiveReader:
             raise FileNotFoundError
         return await self._store.read(node_id)
 
+    async def read_many(
+        self, node_ids: list[str], *, include_body: bool = True
+    ) -> list[NodeRecord]:
+        allowed: list[str] = []
+        for node_id in node_ids:
+            if (
+                await self._project_active(node_id.split("/", 1)[0])
+                and await _safe_kind(self._root, self._store.path_for(node_id)) == "file"
+            ):
+                allowed.append(node_id)
+        return await self._store.read_many(allowed, include_body=include_body)
+
     async def list_ids(self, project: str | None = None) -> list[str]:
         ids: list[str] = []
         for name in await self._projects(project):
@@ -120,6 +133,9 @@ class ScopedSource(Protocol):
     async def project_status(self, project: str) -> str: ...
     async def exists(self, node_id: str) -> bool: ...
     async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]: ...
+    async def read_many(
+        self, node_ids: list[str], *, include_body: bool = True
+    ) -> list[NodeRecord]: ...
     async def list_ids(self, project: str | None = None) -> list[str]: ...
     def edge_lines(self) -> AsyncIterator[str]: ...
 
@@ -161,6 +177,14 @@ class ScopedReader:
         if not await self.exists(node_id):
             raise FileNotFoundError
         return await self._store.read(node_id)
+
+    async def read_many(
+        self, node_ids: list[str], *, include_body: bool = True
+    ) -> list[NodeRecord]:
+        allowed = [
+            node_id for node_id in node_ids if await self._project_active(node_id.split("/", 1)[0])
+        ]
+        return await self._store.read_many(allowed, include_body=include_body)
 
     async def list_ids(self, project: str | None = None) -> list[str]:
         ids = await self._store.list_ids(project)

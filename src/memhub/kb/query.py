@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -25,6 +25,9 @@ class KnowledgeReader(Protocol):
     async def list_ids(self, project: str | None = None) -> list[str]: ...
     async def exists(self, node_id: str) -> bool: ...
     async def read(self, node_id: str) -> tuple[NodeFrontmatter, str]: ...
+    async def read_many(
+        self, node_ids: list[str], *, include_body: bool = True
+    ) -> list[NodeRecord]: ...
     def edge_lines(self) -> AsyncIterator[str]: ...
 
 
@@ -49,9 +52,15 @@ class NotFound(QueryError):
     code = 3001
 
 
-async def records(store: KnowledgeReader, project: str | None = None) -> list[NodeRecord]:
-    """读全部节点；管理端列表复用同一套解析（坏 frontmatter 跳过）。"""
-    return await _records(store, project)
+async def records(
+    store: KnowledgeReader, project: str | None = None, *, include_body: bool = True
+) -> list[NodeRecord]:
+    """读全部节点；管理端列表复用同一套解析（坏 frontmatter 跳过）。
+
+    `include_body=False` 只取汇总字段（`body` 为空、`body_chars` 保留真实长度），
+    供 graph / stats / audit 这类不需要正文的读路径避免搬运整库正文。
+    """
+    return await _records(store, project, include_body=include_body)
 
 
 def terms(query: str) -> list[str]:
@@ -69,6 +78,9 @@ class NodeRecord:
     id: str
     node: NodeFrontmatter
     body: str
+    # 批量读顺带给出的当前修订号与正文长度；单条构造时可为 None，由调用方回退查询。
+    revision: str | None = None
+    body_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -78,16 +90,12 @@ class EdgeIndex:
     incident: dict[str, int]
 
 
-async def _records(store: KnowledgeReader, project: str | None = None) -> list[NodeRecord]:
-    records: list[NodeRecord] = []
-    for node_id in await store.list_ids(project):
-        try:
-            node, body = await store.read(node_id)
-        except (OSError, ValueError):
-            # 手写坏的 frontmatter 不应该让整次检索失败；读单个节点时仍会报错。
-            continue
-        records.append(NodeRecord(node_id, node, body))
-    return records
+async def _records(
+    store: KnowledgeReader, project: str | None = None, *, include_body: bool = True
+) -> list[NodeRecord]:
+    """一次列出 id、一次批量读；不再对每个节点单独 `read()`（PG 会 N+1 开 session）。"""
+    node_ids = await store.list_ids(project)
+    return await store.read_many(node_ids, include_body=include_body)
 
 
 def _terms(query: str) -> list[str]:
@@ -224,9 +232,12 @@ def _check_id(node_id: str) -> None:
         raise NotFound(f"节点 id 不合法: {node_id!r}")
 
 
-async def edge_index(store: KnowledgeReader) -> EdgeIndex:
-    """解析 `_edges.jsonl`。规则与图谱解析一致：完整 id 优先，其次唯一 slug。"""
-    ids = set(await store.list_ids())
+async def edge_index(store: KnowledgeReader, *, ids: Iterable[str] | None = None) -> EdgeIndex:
+    """解析 `_edges.jsonl`。规则与图谱解析一致：完整 id 优先，其次唯一 slug。
+
+    调用方已经批量读过节点时传入 `ids`，省掉再次 `list_ids()` 的一轮查询。
+    """
+    ids = set(await store.list_ids()) if ids is None else set(ids)
     slug_index: dict[str, list[str]] = {}
     for node_id in ids:
         slug_index.setdefault(node_id.rsplit("/", 1)[-1], []).append(node_id)
@@ -377,8 +388,9 @@ async def audit_list(
     """
     limit = max(1, min(limit, MAX_RESULTS))
     offset = max(0, offset)
-    records = await _records(store)
-    index = await edge_index(store)
+    # 只判矛盾/断链/孤立/低置信/陈旧，不需要正文：走无正文投影，避免搬整库正文。
+    records = await _records(store, include_body=False)
+    index = await edge_index(store, ids=(record.id for record in records))
     now = datetime.now(UTC)
     issues: list[dict[str, Any]] = [
         {

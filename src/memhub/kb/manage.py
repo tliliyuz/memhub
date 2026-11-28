@@ -170,6 +170,11 @@ async def node_revision(store: Storage, node_id: str) -> str | None:
 
 async def _summary(store: Storage, record: query.NodeRecord) -> dict[str, Any]:
     node = record.node
+    # 批量读已带回 revision / 正文长度时直接用，避免对每个节点再开一次查询。
+    revision = (
+        record.revision if record.revision is not None else await node_revision(store, record.id)
+    )
+    body_chars = record.body_chars if record.body_chars is not None else len(record.body)
     return {
         "id": record.id,
         "kind": node.kind.value,
@@ -182,8 +187,8 @@ async def _summary(store: Storage, record: query.NodeRecord) -> dict[str, Any]:
         "status": node.status.value if node.status else None,
         "created_at": node.created_at.isoformat(),
         "updated_at": node.updated_at.isoformat(),
-        "revision": await node_revision(store, record.id),
-        "body_chars": len(record.body),
+        "revision": revision,
+        "body_chars": body_chars,
     }
 
 
@@ -202,7 +207,8 @@ async def list_nodes(
     offset = max(0, offset)
     terms = query.terms(q) if q and q.strip() else []
     items: list[dict[str, Any]] = []
-    for record in await query.records(store, project):
+    # 只有搜索过滤需要正文；不带 q 时走无正文投影，仍能给出 body_chars。
+    for record in await query.records(store, project, include_body=bool(terms)):
         if kind and record.node.kind.value != kind:
             continue
         if tier and tier != "all" and record.node.tier.value != tier:
@@ -225,14 +231,14 @@ async def stats(store: Storage) -> dict[str, Any]:
     by_kind: dict[str, int] = {}
     by_tier: dict[str, int] = {}
     by_project: dict[str, int] = {}
-    records = await query.records(store)
+    records = await query.records(store, include_body=False)
     for record in records:
         kind = record.node.kind.value
         tier = record.node.tier.value
         by_kind[kind] = by_kind.get(kind, 0) + 1
         by_tier[tier] = by_tier.get(tier, 0) + 1
         by_project[record.node.project] = by_project.get(record.node.project, 0) + 1
-    index = await query.edge_index(store)
+    index = await query.edge_index(store, ids=(record.id for record in records))
     return {
         "nodes": sum(by_kind.values()),
         "edges": len(index.edges),
