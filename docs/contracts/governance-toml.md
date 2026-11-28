@@ -51,6 +51,7 @@
 | `decisions_dir` | 字符串 | `docs/decisions` | ADR 目录 |
 | `env_example` | 字符串 | `.env.example` | 环境键清单文件 |
 | `environment_doc` | 字符串 | `docs/tech/ENVIRONMENT.md` | 环境变量权威文档 |
+| `env_local` | 字符串 | `.env` | 本机密钥文件；存在时须覆盖 `env_example` 全部键（Git 忽略） |
 | `[checks] <name>` | 布尔 | 启用 | 显式写 `false` 才关闭对应检查 |
 | `[entrypoints] max_lines` | 整数 | `120` | 入口文件总行数上限（`entry_budget`） |
 | `[entrypoints] max_owner_lines` | 整数 | `40` | 「## 本仓专属」行数上限 |
