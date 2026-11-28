@@ -6,13 +6,21 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-from memhub.contract import Kind, NodeFrontmatter, Predicate, SourceKind, SourceRef, Tier
+from memhub.contract import (
+    Edge,
+    Kind,
+    NodeFrontmatter,
+    Predicate,
+    SourceKind,
+    SourceRef,
+    Tier,
+)
 from memhub.kb.errors import TargetUnavailable
 from memhub.kb.models import Base, KbArchive, KbEdge, KbNode, KbNodeRevision
 from memhub.kb.pgstore import NodeMissing, PgKnowledgeStore, RevisionConflict, WriteDeferred
@@ -298,3 +306,29 @@ async def test_concurrent_writes_only_one_wins(store: PgKnowledgeStore) -> None:
     assert REVISION_RE.fullmatch(winner)
     node, _ = await store.read("demo/fact/alpha")
     assert node.title in {"写入 A", "写入 B"}
+
+
+async def test_cache_epoch_tracks_node_and_edge_changes(store: PgKnowledgeStore) -> None:
+    """ADR-0023：读缓存 epoch 随节点增改与边增删变化，无写入时保持稳定。"""
+    await store.register_project(PROJECT, name="演示库")
+    empty = await store.cache_epoch()
+    assert await store.cache_epoch() == empty
+
+    await store.write("demo/fact/alpha", _node(), BODY)
+    after_write = await store.cache_epoch()
+    assert after_write != empty
+    assert await store.cache_epoch() == after_write
+
+    touched = _node().model_copy(update={"updated_at": NOW + timedelta(minutes=1)})
+    await store.write("demo/fact/alpha", touched, BODY)
+    after_update = await store.cache_epoch()
+    assert after_update != after_write
+
+    await store.append_edges(
+        PROJECT, [Edge(source="demo/fact/alpha", predicate=Predicate.RELATED_TO, target="x/y")]
+    )
+    after_edge = await store.cache_epoch()
+    assert after_edge != after_update
+
+    await store.archive_node("demo/fact/alpha")
+    assert await store.cache_epoch() != after_edge
