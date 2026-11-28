@@ -3,9 +3,9 @@
 | 属性 | 值 |
 |:---|:---|
 | 文档状态 | draft（待负责人评审） |
-| 最后更新 | 2026-11-26 |
+| 最后更新 | 2026-11-27 |
 | 适用范围 | `kb_mcp_trace` 数据模型、记录语义（含发现层事件）、可靠落库、保留期、管理台 API 与页面、验收条件 |
-| 不负责 | 架构裁决（见 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)、[ADR-0018](../decisions/ADR-0018-mcp-discovery-trace.md)）、MCP 工具契约（见 [mcp-tools.md](../contracts/mcp-tools.md)）、管理台接口总表（见 [kb-admin-api.md](../contracts/kb-admin-api.md)） |
+| 不负责 | 架构裁决（见 [ADR-0015](../decisions/ADR-0015-mcp-call-trace.md)、[ADR-0018](../decisions/ADR-0018-mcp-discovery-trace.md)、[ADR-0022](../decisions/ADR-0022-mcp-modern-connection-event.md)）、MCP 工具契约（见 [mcp-tools.md](../contracts/mcp-tools.md)）、管理台接口总表（见 [kb-admin-api.md](../contracts/kb-admin-api.md)） |
 
 ## 1. 目标与范围
 
@@ -14,7 +14,7 @@
 ### 1.1 本轮范围
 
 - `kb_mcp_trace` 表与 Alembic `0002` / `0004` 迁移。
-- HTTP MCP 入口的记录：`tools/call`、鉴权/路由拒绝，以及发现层的 `initialize` 与 `tools/list`（ADR-0018）。
+- HTTP MCP 入口的记录：`tools/call`、鉴权/路由拒绝，以及发现层的 `initialize`、`server/discover` 与 `tools/list`（ADR-0018 / ADR-0022）。
 - 可靠的写入路径（独立事务 + 重试 + 本地 spool 补投）。
 - 凭据可选 `name` 与降级显示。
 - 30 天保留的节流清理。
@@ -39,7 +39,7 @@
 | `request_id` | text not null | HTTP 请求 id，入口生成；批量请求下可重复 |
 | `rpc_id` | text null | JSON-RPC `id` 的字符串形式；通知与拒绝为空 |
 | `called_at` | timestamptz not null | 请求进入入口的时间，UTC |
-| `event` | text not null | `call`（`tools/call` 与拒绝）/ `list_tools` / `initialize`；历史行迁移后为 `call` |
+| `event` | text not null | `call`（`tools/call` 与拒绝）/ `list_tools` / `initialize` / `discover`；历史行迁移后为 `call` |
 | `credential_id` | text null | 凭据摘要前 12 位（`grant_id`）；无效 token 为空 |
 | `credential_name` | text null | 写入时的凭据名快照；未配置则为空 |
 | `tool` | text null | `tools/call` 的工具名；发现层事件与拒绝记录为空 |
@@ -81,16 +81,17 @@
 | 非 POST | `call` | 入口返回 405 前 | `error_kind=method_not_allowed` |
 | 入口限流 | `call` | 入口返回 429 前 | `error_kind=rate_limited` |
 | `initialize` 成功/失败 | `initialize` | SDK 中间件在握手返回/异常前 | `status=ok/error`，`tool` 为空 |
+| `server/discover` 成功/失败 | `discover` | SDK 中间件在发现探测返回/异常前 | `status=ok/error`，`tool`/`tool_count` 为空 |
 | `tools/list` 成功/失败 | `list_tools` | SDK 中间件在列表返回/异常前 | 成功时 `tool_count` 为返回工具数 |
 | 非 `/mcp` 路径 | — | **不记录** | — |
 
-`notifications/*`、`ping` 不记录：它们不构成「连接 → 列工具 → 调用」漏斗中的任何一步。`initialize` 每发生一次算一次连接尝试；`tools/list` 每成功返回一次算一次「看到工具」。发现层事件会随凭据作用域变化（`mcp:read` 4 个工具、`mcp:write` 7 个），因此 `tool_count` 只描述该次返回，不做跨凭据合并。
+`notifications/*`、`ping` 不记录：它们不构成「连接 → 列工具 → 调用」漏斗中的任何一步。`initialize` 每发生一次算一次连接尝试；现代协议没有握手，客户端以 `server/discover` 探测建立对端，`server/discover` 每次返回同样算一次连接尝试（ADR-0022）。`tools/list` 每成功返回一次算一次「看到工具」。发现层事件会随凭据作用域变化（`mcp:read` 4 个工具、`mcp:write` 7 个），因此 `tool_count` 只描述该次返回，不做跨凭据合并。
 
 ### 3.2 耗时定义
 
 - `tools/call`：从进入 `invoke` 回调到结果准备好上抛，单调时钟差值，向上取整毫秒。
 - 拒绝：从入口匹配到 `/mcp` 到响应对象构造完成。
-- `initialize` / `tools/list`：从 SDK 中间件进入处理器到结果准备好（或异常抛出），单调时钟差值，向上取整毫秒。
+- `initialize` / `server/discover` / `tools/list`：从 SDK 中间件进入处理器到结果准备好（或异常抛出），单调时钟差值，向上取整毫秒。
 - `called_at` 用请求进入入口的时间，不是写入时间。
 
 ### 3.3 参数摘要
@@ -136,7 +137,7 @@
 |---|---|---|---|
 | `limit` | int | 50 | 1–500 |
 | `offset` | int | 0 | ≥ 0 |
-| `event` | str | `call` | `call` / `list_tools` / `initialize`；默认只看调用与拒绝，保持既有语义 |
+| `event` | str | `call` | `call` / `list_tools` / `initialize` / `discover`；默认只看调用与拒绝，保持既有语义 |
 | `tool` | str | — | 精确匹配 |
 | `status` | str | — | `ok` / `error` / `rejected` |
 | `credential` | str | — | 匹配 `credential_id` 或 `credential_name` |
@@ -173,7 +174,7 @@
 - `days`：1–30，默认 7。
 - `avg_ms`：该工具 `ok` 与 `error` 调用的 `duration_ms` 平均值（四舍五入取整）；`rejected` 不参与，无可算调用时为 0。
 - 漏斗口径（同一时间窗，按 `event` 分组）：
-  - `connections`：`initialize` 且 `status=ok` 的行数（连接次数）。
+  - `connections`：`initialize` 与 `discover` 中 `status=ok` 的行数之和（旧协议的握手连接 + 现代协议的发现探测连接，ADR-0022）。
   - `listings`：`list_tools` 且 `status=ok` 的行数（看到工具的次数）。
   - `calls`：`call` 且 `status in (ok, error)` 的行数（实际调用；`rejected` 不算调用，仍单独统计）。
   - 转化率 `listings_per_connection = listings / connections`、`calls_per_listing = calls / listings`，分母为 0 时记 `0.0`；`avg_tools` 为该窗口内 `list_tools` 成功行 `tool_count` 的平均值（无行时 0）。
@@ -202,7 +203,7 @@
 - 侧栏「治理」下新增 `调用轨迹`，路径 `/traces`，图标用 `Activity`（lucide）。
 - 页面结构：
   - 顶部汇总：总数、成功、失败、拒绝、按工具分布；
-  - 漏斗区块：连接数（`initialize`）、列工具数（`tools/list`）、实际调用数（`call` 的成功 + 失败），以及两段转化率与平均每次列出的工具数；分母为 0 时显示 `—`；
+  - 漏斗区块：连接数（`initialize` 与 `server/discover` 成功行之和）、列工具数（`tools/list`）、实际调用数（`call` 的成功 + 失败），以及两段转化率与平均每次列出的工具数；分母为 0 时显示 `—`；
   - 筛选：工具、状态、凭据、时间范围（近 1/7/30 天）；
   - 表格：时间、请求 ID（截前 8 位，悬停见完整值）、工具、凭据（降级显示）、状态、HTTP、错误码、耗时、结果大小、客户端；
   - 分页与「共 N 条」。
@@ -213,7 +214,7 @@
 - `docs/contracts/kb-admin-api.md` §4.9「MCP 调用轨迹」同步发现层字段与漏斗。
 - `docs/contracts/mcp-tools.md` §5「可观测性」同步发现层记录范围。
 - `docs/tech/ENVIRONMENT.md` 新增 `MEMHUB_KB_TRACE_SPOOL`（可选）并说明失败语义。
-- `docs/decisions/README.md` 登记 ADR-0015 与 ADR-0018。
+- `docs/decisions/README.md` 登记 ADR-0015、ADR-0018 与 ADR-0022。
 - `docs/plans/README.md` 登记本规格。
 - `docs/CHANGELOG.md` 行为变更记录。
 
@@ -231,29 +232,30 @@
 6. 参数原文不出现在表内任何列：用含唯一标记的查询做反证。
 7. 一次连接 + 列表 + 调用产生三条记录：`initialize`（`tool_count=null`）、`list_tools`（`tool_count=4` 或 `7`，与凭据作用域一致）、`call`（`tool` 为被调工具）；三者的 `request_id`、`credential_id/name`、`client` 都非空。
 8. `notifications/*` 与 `ping` 不产生记录。
+9. 现代协议请求（`Mcp-Protocol-Version: 2026-07-28` + `server/discover`）产生一行 `event=discover`、`status=ok`、`tool_count=null`，且同一请求不产生 `initialize` 行；汇总 `connections` 计入该行（ADR-0022）。
 
 ### 9.2 可靠落库
 
-9. 注入一次写入失败（session 抛错）后，行出现在 spool 文件；下一次成功记录时补投到表，spool 被清空。
-10. 重试成功后不产生重复行（同一 `trace_id` 只一行）。
-11. 写入彻底失败时调用返回内容不变、状态码不变。
+10. 注入一次写入失败（session 抛错）后，行出现在 spool 文件；下一次成功记录时补投到表，spool 被清空。
+11. 重试成功后不产生重复行（同一 `trace_id` 只一行）。
+12. 写入彻底失败时调用返回内容不变、状态码不变。
 
 ### 9.3 保留期
 
-12. `called_at` 早于 30 天的行在触发清理后消失；新行保留。
-13. 清理节流：两次写入不重复执行清理（以注入的时钟或计数断言）。
+13. `called_at` 早于 30 天的行在触发清理后消失；新行保留。
+14. 清理节流：两次写入不重复执行清理（以注入的时钟或计数断言）。
 
 ### 9.4 API 与页面
 
-14. 列表接口返回 `{items,total,offset,limit}`，按时间倒序，过滤条件生效；默认 `event=call`，显式 `event=list_tools` 能取到发现层行。
-15. 汇总接口按 `days` 聚合，`total = ok + error + rejected`；`funnel.connections/listings/calls` 与插入行一致，转化率按 §6.2 计算，分母为 0 时为 `0.0`。
-16. 非 PG 存储时返回 503/`2001`。
-17. 前端 `pnpm build` 通过；页面能展示空态、有数据与漏斗区块。
+15. 列表接口返回 `{items,total,offset,limit}`，按时间倒序，过滤条件生效；默认 `event=call`，显式 `event=list_tools` 能取到发现层行，显式 `event=discover` 能取到现代连接行。
+16. 汇总接口按 `days` 聚合，`total = ok + error + rejected`；`funnel.connections/listings/calls` 与插入行一致，转化率按 §6.2 计算，分母为 0 时为 `0.0`。
+17. 非 PG 存储时返回 503/`2001`。
+18. 前端 `pnpm build` 通过；页面能展示空态、有数据与漏斗区块。
 
 ### 9.5 迁移
 
-18. Alembic `upgrade head` 后 `compare_metadata` 与 `Base.metadata` 零差异，`kb_mcp_trace` 含 `event`、`tool_count` 与事件索引；历史行 `event=call`。
-19. `downgrade base` 干净移除。
+19. Alembic `upgrade head` 后 `compare_metadata` 与 `Base.metadata` 零差异，`kb_mcp_trace` 含 `event`、`tool_count` 与事件索引；历史行 `event=call`。
+20. `downgrade base` 干净移除。
 
 ## 10. 裁决记录
 
@@ -265,6 +267,7 @@
 | 发现层事件是否落库 | 并入 `kb_mcp_trace`，用 `event` 区分（ADR-0018） | 2026-11-26 |
 | 漏斗口径 | 连接 = `initialize` 成功数；列工具 = `tools/list` 成功数；实际调用 = `call` 的 ok+error；拒绝不计入调用 | 2026-11-26 |
 | 列表接口默认事件 | `event=call`，保持既有页面与筛选语义 | 2026-11-26 |
+| 现代协议连接事件 | `server/discover` 记 `event=discover`，漏斗连接数按 `initialize` 与 `discover` 成功行累加（ADR-0022） | 2026-11-27 |
 
 ## 11. 待评审事项
 

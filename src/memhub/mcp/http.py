@@ -1,7 +1,7 @@
 """精确 HTTP 路径与请求级授权；协议解析交给官方 MCP SDK。
 
-调用轨迹（ADR-0015 / ADR-0018）：`tools/call`、鉴权/路由拒绝，以及发现层的
-`initialize` / `tools/list` 记入 `kb_mcp_trace`，只记元数据；记录失败不改变响应。
+调用轨迹（ADR-0015 / ADR-0018 / ADR-0022）：`tools/call`、鉴权/路由拒绝，以及发现层的
+`initialize` / `server/discover` / `tools/list` 记入 `kb_mcp_trace`，只记元数据；记录失败不改变响应。
 通知与 `ping` 不属于连接漏斗，不记录。
 """
 
@@ -35,6 +35,12 @@ from memhub.mcp.trace import TraceEntry, TraceRecorder, new_trace_id
 
 _SCOPE_KEY = "memhub.mcp.credential"
 _RECORDER_KEY = "memhub.mcp.trace_recorder"
+# 发现层方法到轨迹事件名的映射：旧协议握手、现代协议连接探测与列工具（ADR-0018 / ADR-0022）。
+_DISCOVERY_EVENTS = {
+    "initialize": "initialize",
+    "server/discover": "discover",
+    "tools/list": "list_tools",
+}
 
 _log = logging.getLogger(__name__)
 
@@ -297,12 +303,14 @@ def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
                     _log.warning("MCP 调用轨迹记录失败: %s", exc)
 
     async def observe_discovery(ctx: ServerRequestContext, call_next: Any) -> Any:
-        """记录 `initialize` / `tools/list`（ADR-0018）；其余请求不落轨迹。
+        """记录 `initialize` / `server/discover` / `tools/list`（ADR-0018 / ADR-0022）；其余请求不落轨迹。
 
         SDK 的 `initialize` 由 runner 内联处理、不可覆盖，只能经
-        `Server.middleware` 观测；结果以 wire dict 返回。
+        `Server.middleware` 观测；2026-07-28 现代协议没有握手，客户端以
+        `server/discover` 探测连接，故一并观察。结果以 wire dict 返回。
         """
-        if ctx.method not in ("initialize", "tools/list"):
+        event = _DISCOVERY_EVENTS.get(ctx.method)
+        if event is None:
             return await call_next(ctx)
         request = ctx.request
         state = request.scope.get("state", {}) if isinstance(request, Request) else {}
@@ -331,7 +339,7 @@ def _build_transport(store: KnowledgeStore | PgKnowledgeStore) -> Starlette:
                 request_id=request_id,
                 rpc_id=str(ctx.request_id) if ctx.request_id is not None else None,
                 called_at=called_at,
-                event="list_tools" if ctx.method == "tools/list" else "initialize",
+                event=event,
                 credential_id=(credential.grant_id if isinstance(credential, Credential) else None),
                 credential_name=(credential.name if isinstance(credential, Credential) else None),
                 tool=None,

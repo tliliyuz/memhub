@@ -170,7 +170,7 @@ export type Issue = {
 
 export type TraceStatus = 'ok' | 'error' | 'rejected'
 
-export type TraceEvent = 'call' | 'list_tools' | 'initialize'
+export type TraceEvent = 'call' | 'list_tools' | 'initialize' | 'discover'
 
 export type McpTrace = {
   trace_id: string

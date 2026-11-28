@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-11-28（MCP 现代协议的连接事件并入漏斗）
+
+- **ADR 检查**：命中「对外契约（`kb_mcp_trace` 事件枚举与漏斗口径）」「可观测性语义」与「数据真源不变但新增事件取值」，按 ADR 治理规则新增 [ADR-0022](decisions/ADR-0022-mcp-modern-connection-event.md)（accepted）。
+- `docs(mcp)`：生产观测证明 Claude Code 2.1.332 走 2026-07-28 现代协议，首请求为 `server/discover`、不发 `initialize`，漏斗「连接数」结构性恒为 0（24 次 `tools/list`、1 次 `tools/call`、0 次 `initialize`）。ADR-0022 裁决：`server/discover` 记 `event=discover`，`connections = initialize 成功 + discover 成功`，不按请求去重；`notifications/*` 与 `ping` 仍不记录，无迁移。同步更新 `docs/plans/mcp-trace-spec.md`（§1.1、§2.1、§3.1、§3.2、§6.1、§6.2、§7、§9 验收条件 9、§10 裁决）、`docs/contracts/kb-admin-api.md` §4.9 与 `docs/contracts/mcp-tools.md` §5。
+- `test(mcp)`：`tests/contract/test_mcp_trace.py` 新增现代协议用例（`Mcp-Protocol-Version: 2026-07-28` + `Mcp-Method: server/discover`，断言返回 `supportedVersions` 与 instructions、只落一行 `discover ok` 且 `tool`/`tool_count` 为空、同请求无 `initialize` 行），列表筛选与漏斗汇总补 `discover` 行。
+- `feat(mcp)`：`McpEndpoint` 的发现层中间件由 `initialize`/`tools/list` 三元判断改为 `_DISCOVERY_EVENTS` 映射，新增 `server/discover → discover`。
+- `feat(kb)`：`trace_query.mcp_traces_summary` 的 `connections` 改为 `initialize` 成功数 + `discover` 成功数；`GET /api/v1/kb/mcp-traces` 的 `event` 筛选放开 `discover`。
+- `feat(web)`：`TraceEvent` 增加 `discover`，调用轨迹页漏斗提示改为「initialize 或 server/discover 成功」。
+- 验证（worktree `.claude/worktree/mcp-modern-connection`，本机 Docker 测试库 `memhub-test-pg`）：
+  - RED：回退三处实现后，契约用例分别报 `assert [] == ['discover']`、`KeyError: 'items'`、`{'connections': 2} != {'connections': 3}`；恢复后 `pytest tests/contract/test_mcp_trace.py -q` 16 passed。
+  - 进程内探针（真实 ASGI 入口 + 假存储）：修复前 `count 0`，修复后 3 行 `initialize` / `list_tools`（`tool_count=4`）/ `discover`（`rpc_id=server-discover-probe-1`），退出码 0。
+  - 合入最新 `dev`（`87153c9`，含读接口批量读）后重跑：`pytest tests/contract/test_mcp_trace.py -q` 16 passed；`pytest tests/unit tests/contract -q` 755 passed / 1 skipped / 2 failed / 1 error，失败与错误仍是下列既有项。
+  - `pytest tests/unit tests/contract -q`：3 项失败与本次改动无关且未能在本机闭环——`test_worker_rejects_invalid_memory_settings`（需 `MEMHUB_DB_URL`，补上后通过）、`test_round_writes_canonical_into_pg`（fixture 预建 `knowledge/` 目录，结构性失败）、`test_merge_and_cursor.py::test_cursor_summary_matches_file_details`（需完整迁移后的 `MEMHUB_KB_RT_DB_URL` 库，报 `relation "devices" does not exist`）。
+  - `ruff check`、`ruff format --check`（本次 4 个 Python 文件）与 `mypy src` 通过；`web` 下 `npm run typecheck`（`tsc -b`）退出码 0；`python -m governance_lib check --staged --fast` 通过。
+
 ## 2026-11-28（读接口批量读，消除 PG 迁移后的 N+1）
 
 - **ADR 检查**：未命中触发清单——只改 kb 读路径的实现方式与存储操作面，不改变对外契约、访问控制、数据真源与部署假设。
