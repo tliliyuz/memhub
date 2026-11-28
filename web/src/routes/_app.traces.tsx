@@ -128,7 +128,7 @@ function TracesPage() {
                 <FunnelStat
                   label='连接'
                   value={stats?.funnel.connections}
-                  hint='initialize 成功'
+                  hint='initialize 或 server/discover 成功'
                 />
                 <FunnelStat
                   label='列工具'
