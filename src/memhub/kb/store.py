@@ -39,6 +39,7 @@ from memhub.kb.errors import (
     TargetUnavailable,
     WriteDeferred,
 )
+from memhub.kb.query import NodeRecord
 
 # 删除是软删：原文件移到 `<root>/_trash/<时间戳>/<原 id>.md`。
 # manage 的删除/恢复与这里的 list_ids 共用同一个名字。
@@ -286,6 +287,26 @@ class KnowledgeStore:
         metadata["id"] = node_id
         node = NodeFrontmatter.model_validate(metadata)
         return node, post.content
+
+    async def read_many(
+        self, node_ids: list[str], *, include_body: bool = True
+    ) -> list[NodeRecord]:
+        """文件版逐个读（本地 IO 没有 session 开销），语义与 PG 版一致。
+
+        `include_body=False` 时只返回 frontmatter 与正文长度，供 graph/stats/audit 使用。
+        """
+        records: list[NodeRecord] = []
+        for node_id in node_ids:
+            try:
+                node, body = await self.read(node_id)
+                revision = await self.revision(node_id)
+            except (OSError, ValueError):
+                # 手写坏的 frontmatter 不应该让整次检索失败；读单个节点时仍会报错。
+                continue
+            records.append(
+                NodeRecord(node_id, node, body if include_body else "", revision, len(body))
+            )
+        return records
 
     async def write(
         self,
