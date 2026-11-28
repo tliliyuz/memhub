@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-29（读缓存发版实测与 kb env 文件口径修正）
+
+- **ADR 检查**：未命中触发清单——只修正部署文档对已有实现的描述，不改行为、依赖与拓扑。
+- `docs(deploy)`：kb 容器只读 `/etc/memhub/env.kb`，`MEMHUB_REDIS_URL` / `MEMHUB_REDIS_PASSWORD` 必须落 `env.kb`；写进 `/etc/memhub/env` 时容器内不可见，缓存静默关闭（接口仍走 PG）。`ENVIRONMENT.md` 两键补同样约束，`deploy/README.md` 的环境文件清单与锁文件说明同步（kb 锁含 `redis`，镜像额外项含 `cache`）。
+- 发版实测（main `8707db3`，缓存生效后）：冷 `nodes?limit=500` 0.49s / `stats` 0.60s / `audit` 0.69s；热命中 `nodes` 10–12ms、`stats` 7–8ms、`audit` 7–8ms；`graph` 0.08–0.18s、`search` 1.2s、`healthz` 16ms。停 Redis 后三接口仍 200、回落 0.5–0.6s，日志只有降级告警、无口令。夜间批处理把节点 4441→5108、边 4042，epoch 变化使旧 key 自然失效，符合预期。
+
 ## 2026-11-28（kb 读接口接入本机 Redis 热读缓存）
 
 - **ADR 检查**：命中清单 #5（新增第三方运行时依赖 `redis`）与 #6（新增本机缓存层与部署假设：同机 Redis 由部署侧预装、kb-api 走 host 网络访问），按治理规则新增 [ADR-0023](decisions/ADR-0023-kb-read-cache.md)（accepted；设计与构建口径由云侧 2026-11-28 确认）。不改变对外契约、真源与访问控制。
