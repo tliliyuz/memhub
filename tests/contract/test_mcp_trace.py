@@ -41,6 +41,18 @@ INIT = {
     },
 }
 MARKER = "TRACEMARK-9f3a7c"
+MODERN = {
+    "jsonrpc": "2.0",
+    "id": "server-discover-probe-1",
+    "method": "server/discover",
+    "params": {
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "fixture", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {"roots": {"listChanged": True}},
+        }
+    },
+}
 
 # ---- 夹具与工具 -----------------------------------------------------------
 
@@ -276,6 +288,33 @@ def test_ok_call_records_metadata(
     assert call["error_kind"] is None
 
 
+def test_modern_discover_records_connection_without_initialize(
+    web: Path, http_sdk: None, monkeypatch: pytest.MonkeyPatch, test_dsn: str, kb_pg_schema: str
+) -> None:
+    """现代协议（2026-07-28）以 `server/discover` 建立连接，记 `discover` 且不记 `initialize`（§9.1）。"""
+    _seed(test_dsn, kb_pg_schema)
+    config, headers = _grant(name="claude-code-laptop")
+    monkeypatch.setenv("MEMHUB_MCP_GRANTS", json.dumps([config]))
+    modern = {**headers, "mcp-protocol-version": "2026-07-28", "mcp-method": "server/discover"}
+    with TestClient(create_app(schema=kb_pg_schema), base_url="http://localhost") as client:
+        response = client.post("/mcp", json=MODERN, headers=modern)
+        assert response.status_code == 200
+        result = response.json()["result"]
+        assert result["supportedVersions"] == ["2026-07-28"]
+        assert result["instructions"]
+
+    rows = _traces(test_dsn, kb_pg_schema)
+    assert [row["event"] for row in rows] == ["discover"]
+    discover = rows[0]
+    assert discover["status"] == "ok"
+    assert discover["rpc_id"] == "server-discover-probe-1"
+    assert discover["tool"] is None
+    assert discover["tool_count"] is None
+    assert discover["credential_id"] == config["sha256"][:12]
+    assert discover["credential_name"] == "claude-code-laptop"
+    assert discover["client"]
+
+
 def test_error_call_records_business_code(
     web: Path, http_sdk: None, monkeypatch: pytest.MonkeyPatch, test_dsn: str, kb_pg_schema: str
 ) -> None:
@@ -484,6 +523,14 @@ def test_list_endpoint_filters_and_orders(web: Path, test_dsn: str, kb_pg_schema
             credential_name=None,
         ),
         _row(
+            "d0",
+            base + timedelta(minutes=2, seconds=30),
+            event="discover",
+            tool=None,
+            rpc_id="server-discover-probe-1",
+            result_bytes=None,
+        ),
+        _row(
             "d1",
             base + timedelta(minutes=3),
             event="initialize",
@@ -517,6 +564,11 @@ def test_list_endpoint_filters_and_orders(web: Path, test_dsn: str, kb_pg_schema
 
         inits = client.get("/api/v1/kb/mcp-traces", params={"event": "initialize"}).json()
         assert [item["trace_id"] for item in inits["items"]] == ["d1"]
+
+        discovers = client.get("/api/v1/kb/mcp-traces", params={"event": "discover"}).json()
+        assert [item["trace_id"] for item in discovers["items"]] == ["d0"]
+        assert discovers["items"][0]["tool"] is None
+        assert discovers["items"][0]["tool_count"] is None
 
         by_tool = client.get("/api/v1/kb/mcp-traces", params={"tool": "kb_search"}).json()
         assert [item["trace_id"] for item in by_tool["items"]] == ["t3", "t1"]
@@ -601,6 +653,25 @@ def test_summary_funnel_counts_discovery_events(
             error_kind="internal",
         ),
         _row(
+            "m1",
+            now + timedelta(seconds=2, milliseconds=500),
+            event="discover",
+            tool=None,
+            rpc_id="server-discover-probe-1",
+            result_bytes=None,
+        ),
+        _row(
+            "m2",
+            now + timedelta(seconds=2, milliseconds=600),
+            event="discover",
+            tool=None,
+            rpc_id="server-discover-probe-1",
+            result_bytes=None,
+            status="error",
+            http_status=500,
+            error_kind="internal",
+        ),
+        _row(
             "l1",
             now + timedelta(seconds=3),
             event="list_tools",
@@ -633,10 +704,10 @@ def test_summary_funnel_counts_discovery_events(
         body = client.get("/api/v1/kb/mcp-traces/summary", params={"days": 1}).json()
     assert body["total"] == body["ok"] + body["error"] + body["rejected"] == 4
     assert body["funnel"] == {
-        "connections": 2,
+        "connections": 3,
         "listings": 2,
         "calls": 3,
-        "listings_per_connection": 1.0,
+        "listings_per_connection": 0.67,
         "calls_per_listing": 1.5,
         "avg_tools": 5,
     }
