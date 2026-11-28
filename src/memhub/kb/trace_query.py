@@ -124,7 +124,8 @@ async def mcp_traces_summary(store: PgKnowledgeStore, *, days: int = 7) -> dict[
     ok = count_of("call", "ok")
     error = count_of("call", "error")
     rejected = count_of("call", "rejected")
-    connections = count_of("initialize", "ok")
+    # 旧协议握手与现代协议的连接探测各算一次连接尝试（ADR-0022）。
+    connections = count_of("initialize", "ok") + count_of("discover", "ok")
     listings = count_of("list_tools", "ok")
     calls = ok + error
 
