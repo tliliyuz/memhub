@@ -16,7 +16,8 @@ COPY deploy/dist/wheelhouse-worker /wheelhouse
 #   sqlalchemy / psycopg / alembic。
 # mcp-http：kb-api 在 MEMHUB_MCP_GRANTS 非空时要加载官方 MCP SDK，
 #   缺它时 create_app() 直接抛 RuntimeError 启动失败（stdio 与管理台不受影响）。
-RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres,engine,mcp-http]==0.1.0"
+# cache：kb-api 本地热读缓存（ADR-0023）；缺 redis 时缓存自动关闭，但镜像应带上。
+RUN pip install --no-index --find-links=/wheelhouse "memhub[postgres,engine,mcp-http,cache]==0.1.0"
 
 # 静态前端烘进镜像：容器根文件系统只读，不能指望宿主机路径。
 COPY deploy/dist/web-dist /app/web-dist
