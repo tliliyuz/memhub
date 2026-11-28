@@ -150,6 +150,11 @@ def _stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime(_TRASH_STAMP)
 
 
+def _epoch_stamp(moment: datetime | None) -> str:
+    """缓存 epoch 里的时间项；空表用固定占位，避免 ``None`` 参与拼接。"""
+    return moment.astimezone(UTC).isoformat() if moment is not None else "0"
+
+
 def _memory_entry_snapshot(row: KbMemoryEntry) -> dict[str, Any]:
     """条目对外形状；时间转 ISO 字符串，供 API 与 JSONB 快照共用。"""
     return {
@@ -478,6 +483,29 @@ class PgKnowledgeStore:
                 row.body_chars,
             )
         return [found[node_id] for node_id in node_ids if node_id in found]
+
+    async def cache_epoch(self) -> str:
+        """读缓存的数据版本：两条廉价聚合，不读正文（ADR-0023）。
+
+        `(active 节点 count, max(updated_at))` 盖住增删、正文修改与恢复（恢复会刷新
+        `updated_at`），`(边 count, max(created_at))` 盖住边的新增与摘除。epoch 拼进
+        缓存 key：任何一个变了，旧 key 立即失联，不靠 TTL 保证一致性。
+        """
+        async with self._session() as session:
+            node_count, node_updated = (
+                await session.execute(
+                    select(func.count(KbNode.id), func.max(KbNode.updated_at)).where(
+                        KbNode.archived_at.is_(None)
+                    )
+                )
+            ).one()
+            edge_count, edge_created = (
+                await session.execute(select(func.count(KbEdge.id), func.max(KbEdge.created_at)))
+            ).one()
+        return (
+            f"n{int(node_count or 0)}:{_epoch_stamp(node_updated)}"
+            f":e{int(edge_count or 0)}:{_epoch_stamp(edge_created)}"
+        )
 
     async def write(
         self,
