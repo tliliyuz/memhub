@@ -19,7 +19,7 @@ governance-platform 维护：`AGENTS.md` 与 `CLAUDE.md` 必须逐字节一致�
 
 以下约束依赖人工判断兜底，机械检查无法完全覆盖。
 
-- 密钥、token、口令只经 `.env` 注入，禁止进入仓库、文档与提交信息；值无论从何而来（负责人口述、peer 提供、外部文档），同一会话内把 `键=值` 写入本机 `.env`（缺失则创建；值未知先留空，不猜测），并在 `.env.example` 与 `docs/tech/ENVIRONMENT.md` 登记键名与读取方，之后只按名引用、不把字面值重复带进命令或留在会话；`.env` 是被指定且 Git 忽略的持久落点，写入它不违反「不进仓库」。
+- 密钥、token、口令只经 `.env` 注入，禁止进入仓库、文档与提交信息；值的登记与本机落盘流程见 `docs/tech/ENVIRONMENT_CONVENTIONS.md`。
 - Git 本地写操作（提交、合并、变基、切换、worktree、分支与标签管理）一律直接执行，不征求负责人确认；仅远端操作需要针对当前操作明确授权。
 - 单次提交至多一个实现层，tests 与 docs 收尾层可同提交；提交信息用中文描述实际改动，不加工具署名行。
 - 权威文档在正文前声明适用范围与不负责，实施历史只进 ADR/CHANGELOG，弃用文档不得新增内容；密钥值不进 Markdown。
@@ -44,6 +44,7 @@ governance-platform 维护：`AGENTS.md` 与 `CLAUDE.md` 必须逐字节一致�
 | 对外契约 | `docs/contracts/`（`README.md` 为索引） |
 | 规范驱动开发：ADR 检查、规格、验收测试与最小实现 | `docs/guides/SDD.md` |
 | 环境变量：键名、读取方与失败语义 | `docs/tech/ENVIRONMENT.md` |
+| 密钥等敏感值的键登记、本机落盘与按名引用 | `docs/tech/ENVIRONMENT_CONVENTIONS.md` |
 | 开发环境、命令、验证矩阵、提交粒度、分支闭环 | `docs/guides/DEVELOPMENT.md` |
 | 文档标题、编号、模板与冗余边界 | `docs/guides/DOCUMENT_FORMAT.md` |
 | 文档归属、冲突裁决、事实状态与入口镜像 | `docs/guides/DOCUMENT_GOVERNANCE.md` |

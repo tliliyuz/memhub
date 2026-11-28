@@ -74,6 +74,7 @@ ADR 检查
 | [ADR-0021](ADR-0021-kb-runtime-role-split.md) | kb-api 与 ingest/worker 拆分运行态角色与连接预算 | accepted |
 | [ADR-0022](ADR-0022-mcp-modern-connection-event.md) | MCP 现代协议的连接事件并入漏斗 | accepted |
 | [ADR-0023](ADR-0023-kb-read-cache.md) | kb 读接口用本机 Redis 热读缓存，失效靠数据版本 epoch | accepted |
+| [ADR-0024](ADR-0024-read-cache-ttl.md) | 读缓存 TTL 由 60s 提到 600s（ADR-0023 参数修订） | accepted |
 
 ## 模板
 

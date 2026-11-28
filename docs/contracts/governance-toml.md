@@ -12,7 +12,7 @@
 |---|---|---|
 | `governance.toml` | 消费仓 | owner 手工维护，只写本仓差异 |
 | `docs/contracts/governance-toml.md` | 平台 | `init` / `sync` 写入，勿手改 |
-| `docs/guides/SDD.md`、`docs/guides/DOCUMENT_GOVERNANCE.md`、`docs/guides/DOCUMENT_FORMAT.md`、`docs/tech/TIME_CONVENTIONS.md` | 平台 | `init` / `sync` 逐字写入，勿手改 |
+| `docs/guides/SDD.md`、`docs/guides/DOCUMENT_GOVERNANCE.md`、`docs/guides/DOCUMENT_FORMAT.md`、`docs/tech/TIME_CONVENTIONS.md`、`docs/tech/ENVIRONMENT_CONVENTIONS.md` | 平台 | `init` / `sync` 逐字写入，勿手改 |
 | `AGENTS.md`、`CLAUDE.md` 的主题受管块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
 | `docs/guides/DEVELOPMENT.md` 的 `verification`、`resources` 受管章节 | 平台 | `sync` 只替换章节块内，块外归 owner |
 | `.claude/commands/review.md` 的 `review` 块 | 平台 | `init` / `sync` 写入，块外内容归 owner |
@@ -74,7 +74,7 @@ python <平台路径>/governance.py sync --repo <目标仓>
 ```
 
 - `init`：按 `policy/manifest.toml` 生成 `governance.toml` 初稿（`[repo] name` 取
-  目标目录名）、写入本契约文档与四份通用标准文档、搭建骨架文档集（含
+  目标目录名）、写入本契约文档与全部通用标准文档、搭建骨架文档集（含
   `docs/tech/OPERATION_TIME.md`）、填充 `DEVELOPMENT` 的受管章节、写入
   `.pre-commit-config.yaml`，并注入入口与审查命令的受管块。重复执行不产生改动。
 - `sync`：按清单把受管内容更新到平台当前版本，不改 `governance.toml`、骨架文档
@@ -88,7 +88,7 @@ python <平台路径>/governance.py sync --repo <目标仓>
 - `manifest_complete`：清单声明的入口条目、受管文档与受管章节的源文件必须存在且
   非空；每个宿主的主题集合、每个章节宿主的主题集合与清单完全一致，未登记块与
   缺失块都报错；骨架必须有对应模板。
-- `contract_pack`：本文件、四份通用标准文档、guard 钩子副本与平台版本逐字一致；
+- `contract_pack`：本文件、全部通用标准文档、guard 钩子副本与平台版本逐字一致；
   两个入口文件的主题块、`DEVELOPMENT` 的受管章节与平台模板一致；
   `.claude/commands/review.md` 存在时，其 `review` 块同样校验（文件缺失不报错）。
   不一致时提示运行 `governance sync`。
