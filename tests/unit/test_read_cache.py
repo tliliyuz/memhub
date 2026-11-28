@@ -307,3 +307,11 @@ def test_stats_route_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
         assert third.status_code == 200
         assert store.list_calls == 2
         assert client.sets == 2
+
+
+async def test_default_ttl_is_ten_minutes() -> None:
+    """低频访问下 60s 等于每次冷启动；ADR-0024 把默认 TTL 提到 600s。"""
+    client = FakeRedis()
+    cache = RedisReadCache(client)
+    await cache.get_or_compute("stats", {}, compute=Counter(), epoch_fn=EpochSource())
+    assert client.ttls == [600]

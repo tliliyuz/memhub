@@ -54,7 +54,7 @@
 | `MEMHUB_KB_WEB_DIST` | 否 | 空 | kb-api | 留空只提供 API、不托管前端；目录里没有 `index.html` 时同样跳过静态托管 |
 | `MEMHUB_MCP_GRANTS` | 否 | 空（`/mcp` 关闭） | kb-api | MCP HTTP 凭据，JSON 数组；每项含 `sha256`（令牌摘要，64 位小写十六进制）、`scope`（`mcp:read` 或 `mcp:write`；`mcp:write` 隐含读）、`expires_at`（UTC）、`projects`（1–128 个库 id）、可选 `name`（展示名，1–64 字符；缺失时界面降级显示摘要前 12 位）与可选 `memory`（布尔，默认 `false`；显式开启才暴露长期记忆读工具，与 `projects` 正交）。空或未设时 `/mcp` 一律 404 且不落到 SPA；配置非法（含重复摘要）启动失败；过期、缺失或不匹配的凭据返回 401。吊销 = 删除该条摘要并重启 kb-api；需安装 `memhub[mcp-http]`，否则启用时报错退出 |
 | `MEMHUB_KB_TRACE_SPOOL` | 否 | `$MEMHUB_DATA_DIR/mcp_trace_spool.jsonl` | kb-api | MCP 调用轨迹的落库失败兜底文件（ADR-0015）。两者都未配置时 spool 关闭，仅记 ERROR 日志；路径不可写不阻断启动，但会在写失败时丢失该条记录。需要该目录对 kb 运行用户可写（容器内 `/var/lib/memhub`） |
-| `MEMHUB_REDIS_URL` | 否 | 空（缓存关闭） | kb-api | 本地热读缓存（ADR-0023）的连接串，如 `redis://127.0.0.1:6379/0`。kb 容器只注入 `/etc/memhub/env.kb`，写进 `/etc/memhub/env` 对它不可见。留空、redis 客户端缺失或连接/读写失败都按「缓存关闭」降级到 PG，不阻断启动；只缓存 `nodes` / `stats` / `audit`，key 由 `kb_*` 的数据版本 epoch 决定，TTL 60s 只做内存背压 |
+| `MEMHUB_REDIS_URL` | 否 | 空（缓存关闭） | kb-api | 本地热读缓存（ADR-0023）的连接串，如 `redis://127.0.0.1:6379/0`。kb 容器只注入 `/etc/memhub/env.kb`，写进 `/etc/memhub/env` 对它不可见。留空、redis 客户端缺失或连接/读写失败都按「缓存关闭」降级到 PG，不阻断启动；只缓存 `nodes` / `stats` / `audit`，key 由 `kb_*` 的数据版本 epoch 决定，TTL 600s 只做内存背压（ADR-0024） |
 | `MEMHUB_REDIS_PASSWORD` | 否 | 空 | kb-api | 与 `MEMHUB_REDIS_URL` 配合的 Redis 口令（同样只放 `/etc/memhub/env.kb`）；只由缓存客户端读取，日志、错误与缓存 key 都不回显 |
 
 ## 3. 模型调用

@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-29（读缓存 TTL 由 60s 提到 600s）
+
+- **ADR 检查**：命中「参数修订」——ADR 的 TTL 取值变化按治理规则新增 [ADR-0024](decisions/ADR-0024-read-cache-ttl.md)（accepted，ADR-0023 的修订，不改变其一致性口径）；不改变对外契约、依赖与部署拓扑。
+- `perf(kb)`：`read_cache.DEFAULT_TTL_SECONDS` 60s → 600s。正确性仍由 `cache_epoch()` 保证，TTL 只做内存背压；低频访问不再每次先付冷路径。`audit` 的「陈旧」判定最多滞后一个 TTL（10 分钟），该字段本就是检出时刻语义。
+- `docs`：`ENVIRONMENT.md` 的 `MEMHUB_REDIS_URL` 行同步 TTL 600s 并标注 ADR-0024；决策索引登记 ADR-0024。
+- 验证（worktree `.claude/worktree/cache-ttl`）：
+  - RED：新增 `test_default_ttl_is_ten_minutes` 后 `pytest tests/unit/test_read_cache.py -q` 失败于 `ttls == [600]`（实际 `[60]`，1 failed / 15 passed）。
+  - GREEN：改动后同命令 16 passed；随后跑完整单测与契约层（见提交时的实际结果）。
+
 ## 2026-11-29（读缓存发版实测与 kb env 文件口径修正）
 
 - **ADR 检查**：未命中触发清单——只修正部署文档对已有实现的描述，不改行为、依赖与拓扑。
